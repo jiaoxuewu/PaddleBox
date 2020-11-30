@@ -21,10 +21,10 @@ class AscendTriggerOp : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
   void InferShape(framework::InferShapeContext* ctx) const override {
-    OP_INOUT_CHECK(ctx->HasInputs("FeedList"), "Input", "FeedList",
-                   "AscendTrigger");
-    OP_INOUT_CHECK(ctx->HasOutputs("FetchList"), "Output", "FetchList",
-                   "AscendTrigger");
+    // OP_INOUT_CHECK(ctx->HasInputs("FeedList"), "Input", "FeedList",
+    //                "AscendTrigger");
+    // OP_INOUT_CHECK(ctx->HasOutputs("FetchList"), "Output", "FetchList",
+    //                "AscendTrigger");
   }
 
  protected:
