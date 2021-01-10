@@ -42,15 +42,7 @@ class AscendInstance {
  public:
   virtual ~AscendInstance() {}
   AscendInstance() {}
-  // need to expose pybind function
-
-  std::map<std::string, std::string> GetDefaultInitOptions() {
-    std::map<std::string, std::string> init_options;
-    init_options["ge.exec.deviceId"] = std::to_string(0);
-    init_options["ge.graphRunMode"] = std::to_string(1);
-    return init_options;
-  }
-
+  
   std::map<std::string, std::string> GetDefaultInitSessionOptions() {
     std::map<std::string, std::string> init_options;
     init_options["a"] = "b";
@@ -58,27 +50,24 @@ class AscendInstance {
     return init_options;
   }
 
+  // add other parameters here to init
   void InitGlobalResouces() {
-    VLOG(0) << "Begin InitGlobalResouces"; 
-    // ge::Status status = ge::GEInitialize(GetDefaultInitOptions());
-    // PADDLE_ENFORCE_EQ(status, ge::SUCCESS, paddle::platform::errors::PreconditionNotMet("Initialize ge failed"));
-    
     ss = new ge::Session(GetDefaultInitSessionOptions());
-    VLOG(0) << "End InitGlobalResouces"; 
+    VLOG(1) << "InitGlobalResouces Done";
   }
 
   static std::shared_ptr<AscendInstance> GetInstance() {
     if (nullptr == ascend_instance_) {
-      VLOG(0) << "Initialize AscendInstance";
       ascend_instance_.reset(new paddle::framework::AscendInstance());
+      VLOG(1) << "Initialize AscendInstance Done";
     }
     return ascend_instance_;
   }
 
   void AddAscendSubgraph(int graph_idx, const AscendGraphDesc& graph) {
-    // ascend_graphs_.emplace_back(graph);
     ge::Status status = ss->AddGraph(graph_idx, graph);
-    PADDLE_ENFORCE_EQ(status, ge::SUCCESS, paddle::platform::errors::PreconditionNotMet("AddGraph failed"));
+    PADDLE_ENFORCE_EQ(status, ge::SUCCESS, paddle::platform::errors::PreconditionNotMet("Calling addGraph of graph engine failed, please check Ascend Log."));
+    VLOG(1) << "AddAscendSubgraph " << graph_idx << " Done";
   }
 
 
