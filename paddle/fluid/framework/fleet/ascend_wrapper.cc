@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifdef PADDLE_WITH_ASCEND
 #include "paddle/fluid/framework/fleet/ascend_wrapper.h"
 namespace paddle {
 namespace framework {
 std::shared_ptr<AscendInstance> AscendInstance::ascend_instance_ = nullptr;
 }  // end namespace framework
 }  // end namespace paddle
+#endif

@@ -26,15 +26,18 @@ template <typename T>
 class AscendTriggerCPUKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &ctx) const override {
+
+#ifdef PADDLE_WITH_ASCEND
     auto ascend_ptr = paddle::framework::AscendInstance::GetInstance();
     auto graph_idx = ctx.Attr<int>("graph_idx");
-
-    VLOG(0) << "AscendTriggerCPUKernel, run graph: " << graph_idx;
-
-    
+    VLOG(4) << "AscendTrigger Kernel, begin to run graph: " << graph_idx;
     auto inputs = ctx.MultiInput<framework::Tensor>("FeedList");
     auto outputs = ctx.MultiOutput<framework::Tensor>("FetchList");
     ascend_ptr->RunAscendSubgraph(graph_idx, inputs, &outputs);
+#else
+    PADDLE_THROW(platform::errors::PreconditionNotMet(
+        "Please compile WITH_ASCEND option to enable ascend_trigger op"));
+#endif
   }
 };
 

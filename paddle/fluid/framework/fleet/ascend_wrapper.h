@@ -14,6 +14,7 @@ limitations under the License. */
 
 #pragma once
 
+#ifdef PADDLE_WITH_ASCEND
 #include <glog/logging.h>
 
 #include <memory>
@@ -25,6 +26,7 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/framework/lod_tensor.h"
+#include "paddle/fluid/framework/data_type.h"
 
 #include "ge/ge_api.h"
 #include "ge/ge_api_types.h"
@@ -70,9 +72,10 @@ class AscendInstance {
     VLOG(1) << "AddAscendSubgraph " << graph_idx << " Done";
   }
 
-
-  ge::DataType ge_type(proto::VarType::Type type) {
-    if (type == proto::VarType::FP32) {
+  ge::DataType VarTypeToGeType(proto::VarType::Type type) {
+    if (type == proto::VarType::FP16) {
+      return ge::DataType::DT_FLOAT16;
+    } else if (type == proto::VarType::FP32) {
       return ge::DataType::DT_FLOAT;
     } else if (type == proto::VarType::FP64) {
     return ge::DataType::DT_DOUBLE;
@@ -81,11 +84,14 @@ class AscendInstance {
     } else if (type == proto::VarType::INT64) {
       return ge::DataType::DT_INT64;
     } else {
-      PADDLE_THROW("unsupported ge type");
+      PADDLE_THROW(platform::errors::Unimplemented("Not support %s as tensor type.",
+                                               DataTypeToString(type)));
     }
   }
-  int ge_size(proto::VarType::Type type) {
-    if (type == proto::VarType::FP32) {
+  int GeTypeSize(proto::VarType::Type type) {
+    if (type == proto::VarType::FP16) {
+      return 2;
+    } else if (type == proto::VarType::FP32) {
       return 4;
     } else if (type == proto::VarType::FP64) {
       return 8;
@@ -94,72 +100,65 @@ class AscendInstance {
     } else if (type == proto::VarType::INT64) {
       return 8;
     } else {
-      PADDLE_THROW("unsupported ge type");
+      PADDLE_THROW(platform::errors::Unimplemented("Not support %s as tensor type.",
+                                               DataTypeToString(type)));
     }
   }
-  ge::Tensor make_ge_tensor(const Tensor *tensor) {
+  ge::Tensor ConvertToGeTensor(const Tensor *tensor) {
     auto numel = tensor->numel();
-    
     std::vector<int64_t> vec_dim;
     auto dimen = arity(tensor->dims());
     for (auto i = 0; i < dimen; ++i) {
       vec_dim.push_back(tensor->dims()[i]);
     }
 
-
-    VLOG(0) << "input numel: " << numel << ", dimen is " << vec_dim.size() << ", and shape is";
-    for (const auto e : vec_dim) {
-      VLOG(0) << e;
-    }
-
+    // For Debug
+    // VLOG(1) << "input numel: " << numel << ", dimen is " << vec_dim.size() << ", and shape is";
+    // for (const auto e : vec_dim) {
+    //   VLOG(0) << e;
+    // }
 
     ge::Shape shape(vec_dim);
-    ge::TensorDesc tensor_desc(shape, ge::Format::FORMAT_ND, ge_type(tensor->type()));
+    ge::TensorDesc tensor_desc(shape, ge::Format::FORMAT_ND, VarTypeToGeType(tensor->type()));
     tensor_desc.SetRealDimCnt(vec_dim.size());
 
     const uint8_t* data = reinterpret_cast<const uint8_t*>(tensor->data<void>());
-    std::vector<uint8_t> d(numel * ge_size(tensor->type()));
-    memcpy(d.data(), data, ge_size(tensor->type()) * numel); // Note, other than 32bit may have problem
-    ge::Tensor ge_tensor(tensor_desc, d);
+    std::vector<uint8_t> dst(numel * GeTypeSize(tensor->type()));
+    memcpy(dst.data(), data, GeTypeSize(tensor->type()) * numel);
+    ge::Tensor ge_tensor(tensor_desc, dst);
     return ge_tensor;
   }
 
   void RunAscendSubgraph(int graph_idx, const std::vector<const Tensor*> &inputs, std::vector<Tensor*> *outputs) {
-    VLOG(0) << "Ascend Graph[" << graph_idx << "] begin to run ";
-    // change paddle Tensor to GE Tensor
+    VLOG(1) << "Ascend Graph[" << graph_idx << "] is about to run.";
+    // Convert paddle Tensor to GE Tensor
     std::vector<ge::Tensor> ge_inputs;
     for (const auto & e : inputs) {
-      ge_inputs.push_back(make_ge_tensor(e));
+      ge_inputs.push_back(ConvertToGeTensor(e));
     }
-    VLOG(0) << "construct ge tensor done.";
 
     // Run Graph
     std::vector<ge::Tensor> ge_outputs;
     ge::Status status = ss->RunGraph(graph_idx, ge_inputs, ge_outputs);
-    PADDLE_ENFORCE_EQ(status, ge::SUCCESS, paddle::platform::errors::PreconditionNotMet("RunGraph failed"));
-    VLOG(0) << "run graph done";
+    PADDLE_ENFORCE_EQ(status, ge::SUCCESS, paddle::platform::errors::PreconditionNotMet("Calling RunGraph of graph engine failed, please check Ascend Log."));
+    VLOG(1) << "Run Ascend Graph[" << graph_idx << "] Done";
 
-    // change tensor back
-
+    // change tensor back, note all tensor's type computed in GE is uint8
     for (size_t i = 0; i < ge_outputs.size(); ++i) {
       const uint8_t* ret_data = ge_outputs[i].GetData();
       size_t size = ge_outputs[i].GetSize();
-      VLOG(0) << "GE Tensor size for output var " << i << " is " << size;
-      auto *d = (*outputs)[i]->mutable_data<uint8_t>({(long int)size}, platform::CPUPlace());
-      memcpy(d, ret_data, size);
-      // for (size_t i = 0; i < size; ++i) {
-      //   d[i] = ret_data[i];
-      // }
+      VLOG(1) << "GE Tensor size of the " << i << "th output var is " << size;
+      auto *dst = (*outputs)[i]->mutable_data<uint8_t>({(long int)size}, platform::CPUPlace());
+      memcpy(dst, ret_data, size);
 
       // Following for debug:
-      VLOG(0) << "output for " << i << " var: ";
-      float *tmp = reinterpret_cast<float*>(d);
-      for (size_t j = 0; j < size / 4; ++j) {
-        printf("%f ", tmp[j]);
-      }
-      printf("\n");
+      // VLOG(0) << "output for " << i << " var: ";
+      // float *tmp = reinterpret_cast<float*>(dst);
+      // for (size_t j = 0; j < size / 4; ++j) {
+      //   printf("%f ", tmp[j]);
+      // }
+      // printf("\n");
     }
-
   }
 
  protected:
@@ -170,3 +169,4 @@ class AscendInstance {
 };
 }  // end namespace framework
 }  // end namespace paddle
+#endif

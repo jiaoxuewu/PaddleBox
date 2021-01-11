@@ -29,8 +29,12 @@ include(generic)            # simplify cmake module
 find_package(CUDA QUIET)
 option(WITH_GPU         "Compile PaddlePaddle with NVIDIA GPU"          ${CUDA_FOUND})
 option(WITH_XPU         "Compile PaddlePaddle with BAIDU KUNLUN"        OFF)
+option(WITH_ASCEND         "Compile PaddlePaddle with ASCEND"        OFF)
 if (WITH_GPU  AND WITH_XPU)
     message(FATAL_ERROR "Error when compile GPU and XPU at the same time")
+endif()
+if (WITH_GPU  AND WITH_ASCEND)
+    message(FATAL_ERROR "Error when compile GPU and ASCEND at the same time")
 endif()
 # cmake 3.12, 3.13, 3.14 will append gcc link options to nvcc, and nvcc doesn't recognize them.
 if(WITH_GPU AND (${CMAKE_VERSION} VERSION_GREATER_EQUAL 3.12) AND (${CMAKE_VERSION} VERSION_LESS 3.15))

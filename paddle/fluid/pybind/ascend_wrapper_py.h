@@ -28,6 +28,8 @@
 
 #pragma once
 
+
+#ifdef PADDLE_WITH_ASCEND
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 
@@ -41,3 +43,4 @@ void BindAscendWrapper(py::module* m);
 
 }  // namespace pybind
 }  // namespace paddle
+#endif
