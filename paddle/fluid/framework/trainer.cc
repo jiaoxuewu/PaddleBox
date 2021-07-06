@@ -44,7 +44,7 @@ void TrainerBase::ParseDumpConfig(const TrainerDesc& desc) {
   }
 
   if (desc.dump_param_size() != 0) {
-    need_dump_param_ = true;
+    //need_dump_param_ = true;
     dump_param_.resize(desc.dump_param_size());
     for (int i = 0; i < desc.dump_param_size(); ++i) {
       dump_param_[i] = desc.dump_param(i);
