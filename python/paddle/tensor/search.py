@@ -274,12 +274,10 @@ def argmin(x, axis=None, keepdim=False, dtype="int64", name=None):
 
 def index_select(x, index, axis=0, name=None):
     """
-
     Returns a new tensor which indexes the ``input`` tensor along dimension ``axis`` using 
     the entries in ``index`` which is a Tensor. The returned tensor has the same number 
     of dimensions as the original ``x`` tensor. The dim-th dimension has the same 
     size as the length of ``index``; other dimensions have the same size as in the ``x`` tensor. 
-
     Args:
         x (Tensor): The input Tensor to be operated. The data of ``x`` can be one of float32, float64, int32, int64.
         index (Tensor): The 1-D Tensor containing the indices to index. The data type of ``index`` must be int32 or int64.
@@ -287,7 +285,6 @@ def index_select(x, index, axis=0, name=None):
         name(str, optional): The default value is None. Normally there is no
             need for user to set this property. For more information, please
             refer to :ref:`api_guide_Name`.
-
     Returns:
         Tensor: A Tensor with same data type as ``x``.
     
@@ -295,7 +292,6 @@ def index_select(x, index, axis=0, name=None):
         .. code-block:: python
             
             import paddle
-
             x = paddle.to_tensor([[1.0, 2.0, 3.0, 4.0],
                                   [5.0, 6.0, 7.0, 8.0],
                                   [9.0, 10.0, 11.0, 12.0]])
@@ -311,7 +307,7 @@ def index_select(x, index, axis=0, name=None):
     """
 
     if in_dygraph_mode():
-        return core.ops.index_select(x, index, 'dim', axis)
+        return _C_ops.index_select(x, index, 'dim', axis)
 
     helper = LayerHelper("index_select", **locals())
     check_variable_and_dtype(x, 'x', ['float32', 'float64', 'int32', 'int64'],
@@ -328,7 +324,6 @@ def index_select(x, index, axis=0, name=None):
         outputs={'Out': out},
         attrs={'dim': axis})
     return out
-
 
 def nonzero(x, as_tuple=False):
     """

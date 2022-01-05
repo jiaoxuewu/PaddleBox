@@ -231,5 +231,104 @@ void GatherV2GradFunction(const Tensor* input, const Tensor* index,
   }
 }
 
+template <typename T, typename U>
+void GatherV2Function(const Tensor* input, const Tensor* index, int axis,
+                      Tensor* out, const paddle::platform::Place& place) {
+  auto* index_data = index->data<U>();
+  int64_t index_size = index->numel();
+  int64_t input_size = input->numel();
+  auto input_dim = input->dims();
+  auto* input_data = input->data<T>();
+
+  if (input->numel() == 0) return;
+  int axis_index = axis;
+
+  int64_t input_index_dim_size = input_dim[axis_index];
+  for (int64_t i = 0; i < index_size; i++) {
+    PADDLE_ENFORCE_LT(index_data[i], input_index_dim_size,
+                      platform::errors::OutOfRange(
+                          "The element of Index must be less than the size of "
+                          "input dim size of axis which is %d, but received "
+                          "index element which is %d in the %d index.",
+                          input_index_dim_size, index_data[i], i));
+    PADDLE_ENFORCE_GE(index_data[i], 0,
+                      platform::errors::OutOfRange(
+                          "The element of Index must be greater than or equal "
+                          "to 0, but received index element which is %d in the "
+                          "%d index.",
+                          index_data[i], i));
+  }
+
+  int64_t inner_dim_size = 1;
+  int64_t outer_dim_size = 1;
+  std::vector<int64_t> out_dim_vec;
+
+  for (int i = 0; i < axis_index; i++) {
+    inner_dim_size *= input_dim[i];
+    out_dim_vec.push_back(input_dim[i]);
+  }
+  out_dim_vec.push_back(index_size);
+  for (int i = axis_index + 1; i < input_dim.size(); i++) {
+    outer_dim_size *= input_dim[i];
+    out_dim_vec.push_back(input_dim[i]);
+  }
+  auto out_dim = framework::make_ddim(out_dim_vec);
+
+  out->Resize(out_dim);
+  auto* out_data = out->mutable_data<T>(place);
+
+  int out_index = 0;
+  for (int64_t i = 0; i < inner_dim_size; i++) {
+    for (int64_t j = 0; j < index_size; j++) {
+      for (int64_t k = 0; k < outer_dim_size; k++) {
+        int64_t index = k + index_data[j] * outer_dim_size +
+                        (i * input_size / inner_dim_size);
+        out_data[out_index] = input_data[index];
+        out_index++;
+      }
+    }
+  }
+}
+
+template <typename T, typename U>
+void GatherV2GradFunction(const Tensor* input, const Tensor* index,
+                          const int axis, Tensor* out,
+                          const paddle::platform::Place& place) {
+  auto* index_data = index->data<U>();
+
+  auto input_dim = input->dims();
+  auto* input_data = input->data<T>();
+
+  if (input->numel() == 0) return;
+  int axis_index = axis;
+  int64_t input_index_dim_size = input_dim[axis_index];
+
+  int64_t inner_dim_size = 1;
+  int64_t outer_dim_size = 1;
+
+  for (int i = 0; i < axis_index; i++) {
+    inner_dim_size *= input_dim[i];
+  }
+  for (int i = axis_index + 1; i < input_dim.size(); i++) {
+    outer_dim_size *= input_dim[i];
+  }
+
+  auto* out_data = out->mutable_data<T>(place);
+  auto* dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto out_dim = out->dims();
+  int64_t out_index_dim_size = out_dim[axis_index];
+  operators::math::set_constant(*dev_ctx, out, 0.0);
+
+  for (int64_t i = 0; i < inner_dim_size; i++) {
+    for (int64_t j = 0; j < input_index_dim_size; j++) {
+      for (int64_t k = 0; k < outer_dim_size; k++) {
+        int64_t index = k + index_data[j] * outer_dim_size +
+                        i * outer_dim_size * out_index_dim_size;
+        out_data[index] += input_data[j * outer_dim_size + k];
+      }
+    }
+  }
+}
+
 }  // namespace operators
 }  // namespace paddle

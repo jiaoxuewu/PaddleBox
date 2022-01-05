@@ -297,5 +297,90 @@ void GatherV2GradCUDAFunction(const Tensor* input, const Tensor* index,
       input_data, index_data, out_data, outer_dim_size, inner_dim_size,
       input_index_dim_size, out_index_dim_size, input_size);
 }
+
+template <typename T, typename U>
+void GatherV2CUDAFunction(const Tensor* input, const Tensor* index,
+                          const int axis, Tensor* out,
+                          const paddle::platform::Place& place,
+                          const framework::ExecutionContext& ctx) {
+  int64_t index_size = index->numel();
+  int64_t input_size = input->numel();
+  auto input_dim = input->dims();
+  auto* input_data = input->data<T>();
+  auto* index_data = index->data<U>();
+
+  if (input->numel() == 0) return;
+
+  int axis_index = axis;
+  int64_t index_dim_size = input_dim[axis_index];
+
+  int64_t inner_dim_size = 1;
+  int64_t outer_dim_size = 1;
+  std::vector<int64_t> out_dim_vec;
+
+  for (int i = 0; i < axis_index; i++) {
+    inner_dim_size *= input_dim[i];
+    out_dim_vec.push_back(input_dim[i]);
+  }
+  out_dim_vec.push_back(index_size);
+  for (int i = axis_index + 1; i < input_dim.size(); i++) {
+    outer_dim_size *= input_dim[i];
+    out_dim_vec.push_back(input_dim[i]);
+  }
+  auto out_dim = framework::make_ddim(out_dim_vec);
+
+  out->Resize(out_dim);
+  auto* out_data = out->mutable_data<T>(place);
+  int64_t out_size = out->numel();
+  if (out_size == 0) return;
+
+  platform::GpuLaunchConfig config =
+      platform::GetGpuLaunchConfig1D(ctx.cuda_device_context(), out_size);
+  auto stream = ctx.cuda_device_context().stream();
+  GatherGPUKernel<
+      T, U><<<config.block_per_grid, config.thread_per_block, 0, stream>>>(
+      input_data, index_data, out_data, outer_dim_size, inner_dim_size,
+      index_size, index_dim_size, out_size);
+}
+
+template <typename T, typename U>
+void GatherV2GradCUDAFunction(const Tensor* input, const Tensor* index,
+                              const int axis, Tensor* out,
+                              const paddle::platform::Place& place,
+                              const framework::ExecutionContext& ctx) {
+  auto* index_data = index->data<U>();
+  int64_t index_size = index->numel();
+  int64_t input_size = input->numel();
+  auto input_dim = input->dims();
+  auto* input_data = input->data<T>();
+
+  if (input->numel() == 0) return;
+  int axis_index = axis;
+  int64_t input_index_dim_size = input_dim[axis_index];
+
+  int64_t inner_dim_size = 1;
+  int64_t outer_dim_size = 1;
+
+  for (int i = 0; i < axis_index; i++) {
+    inner_dim_size *= input_dim[i];
+  }
+  for (int i = axis_index + 1; i < input_dim.size(); i++) {
+    outer_dim_size *= input_dim[i];
+  }
+
+  auto* out_data = out->mutable_data<T>(place);
+  auto* dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto out_dim = out->dims();
+  int64_t out_index_dim_size = out_dim[axis_index];
+  operators::math::set_constant(*dev_ctx, out, 0.0);
+
+  platform::GpuLaunchConfig config =
+      platform::GetGpuLaunchConfig1D(ctx.cuda_device_context(), input_size);
+  auto stream = ctx.cuda_device_context().stream();
+  GatherGradGPUKernel<
+      T, U><<<config.block_per_grid, config.thread_per_block, 0, stream>>>(
+      input_data, index_data, out_data, outer_dim_size, inner_dim_size,
+      input_index_dim_size, out_index_dim_size, input_size);
+}
 }  // namespace operators
 }  // namespace paddle

@@ -54,6 +54,10 @@ class IndexSelectOp : public framework::OperatorWithKernel {
                   "the dimension of Input(Index) is [%d].",
                   index_dim, index_dim.size()));
 
+    PADDLE_ENFORCE_EQ(index_dim[0] != 0, true,
+                      platform::errors::InvalidArgument(
+                          "The length of Input(Index) can't be 0."));
+
     auto output_dim = framework::vectorize(input_dim);
     if (dim < 0) {
       dim += input_dim.size();
@@ -112,7 +116,6 @@ class IndexSelectOpMaker : public framework::OpProtoAndCheckerMaker {
     Returns a new tensor which indexes the input tensor
     along dimension dim using the entries in index which
     is a Tensor.
-
     The returned tensor has the same number of dimensions
     as the original tensor (input). The dim-th dimension
     has the same size as the length of index; other dimensions

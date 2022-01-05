@@ -1,11 +1,8 @@
 /* Copyright (c) 2016 PaddlePaddle Authors. All Rights Reserved.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +15,7 @@ limitations under the License. */
 #include <vector>
 #include "paddle/fluid/framework/ddim.h"
 #include "paddle/fluid/framework/op_version_registry.h"
+
 namespace paddle {
 namespace operators {
 
@@ -52,11 +50,29 @@ class GatherOp : public framework::OperatorWithKernel {
               index_dims.size()));
     }
 
-    int batch_size = ctx->GetInputDim("Index")[0];
-    framework::DDim output_dims(ctx->GetInputDim("X"));
-    output_dims[0] = batch_size;
-    ctx->SetOutputDim("Out", output_dims);
-    ctx->ShareLoD("X", /*->*/ "Out");
+    auto axis = ctx->Attrs().Get<int>("axis");
+    auto input_dim = ctx->GetInputDim("X");
+    if (ctx->HasInput("Axis") || axis == 0) {
+      // if HasInput("Axis"), we can not obtain correct shape of output
+      int batch_size = index_dims[0];
+      framework::DDim output_dims(input_dim);
+      output_dims[0] = batch_size;
+      ctx->SetOutputDim("Out", output_dims);
+      ctx->ShareLoD("X", /*->*/ "Out");
+    } else {
+      int index_size = index_dims[0];
+      std::vector<int> out_dim_vec;
+      for (int i = 0; i < axis; i++) {
+        out_dim_vec.push_back(input_dim[i]);
+      }
+      out_dim_vec.push_back(index_size);
+      for (int i = axis + 1; i < input_dim.size(); i++) {
+        out_dim_vec.push_back(input_dim[i]);
+      }
+      auto output_dims = framework::make_ddim(out_dim_vec);
+      ctx->SetOutputDim("Out", output_dims);
+      ctx->ShareLoD("X", /*->*/ "Out");
+    }
   }
 
  protected:
@@ -120,27 +136,23 @@ class GatherOpMaker : public framework::OpProtoAndCheckerMaker {
         "If true, update the grad using the overwrite mode in same index,"
         "If false, using the accumulate mode in same index.")
         .SetDefault(true);
+    AddAttr<int>(
+        "axis",
+        "The Tensor which contains the axis that we do gather operation.")
+        .SetDefault(0);
     AddComment(R"DOC(
 Gather Operator.
-
 $Out = X[Index]$
-
 Out is obtained by gathering entries of the outer-most dimension
 of X indexed by Index and concatenate them together.
-
 Example:
-
 X = [[1, 2],
      [3, 4],
      [5, 6]]
-
 Index = [[1, 2]]
-
 Then:
-
 Out = [[3, 4],
        [5, 6]]
-
 )DOC");
   }
 };
