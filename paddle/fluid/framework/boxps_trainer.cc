@@ -141,16 +141,16 @@ void BoxPSTrainer::InitTrainerEnv(const ProgramDesc& main_program,
 
   std::set<std::string> async_param_name;
   if (async_mode_) {
-      async_param_name = dense_table_->Init(*root_scope_, *param_need_sync_.get(),
-                       persistable_vars_);
+    async_param_name = dense_table_->Init(*root_scope_, *param_need_sync_.get(),
+                                          persistable_vars_);
   }
   for (int i = 0; i < thread_num_; ++i) {
     auto this_worker =
         std::dynamic_pointer_cast<paddle::framework::BoxPSWorker>(workers_[i]);
     this_worker->SetRootScope(root_scope_);
     if (async_mode_) {
-        this_worker->SetDenseTable(dense_table_.get());
-        this_worker->SetAsyncParamName(async_param_name);
+      this_worker->SetDenseTable(dense_table_.get());
+      this_worker->SetAsyncParamName(async_param_name);
     }
     this_worker->CreateDeviceResource(main_program);
     //    CopyParameters(*root_scope_, i);
