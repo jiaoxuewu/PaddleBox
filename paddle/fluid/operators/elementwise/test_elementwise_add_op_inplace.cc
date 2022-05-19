@@ -12,20 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <algorithm>
-#include <cstdlib>
-#include <memory>
 #include <random>
+
 #include "gtest/gtest.h"
 #include "paddle/fluid/framework/lod_tensor.h"
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/framework/operator.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/platform/device_context.h"
 #include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/place.h"
+#include "paddle/phi/core/kernel_registry.h"
 
-USE_OP(elementwise_add);
+USE_OP_ITSELF(elementwise_add);
+
+PD_DECLARE_KERNEL(add, CPU, ALL_LAYOUT);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+PD_DECLARE_KERNEL(add, KPS, ALL_LAYOUT);
+#endif
 
 namespace paddle {
 namespace operators {
@@ -33,9 +36,13 @@ namespace operators {
 static void Memcpy(void *dst, const void *src, size_t n, bool copy_to_gpu) {
   if (copy_to_gpu) {
 #ifdef PADDLE_WITH_CUDA
-    PADDLE_ENFORCE(cudaMemcpy(dst, src, n, cudaMemcpyHostToDevice));
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpy(dst, src, n, cudaMemcpyHostToDevice));
+#elif defined(PADDLE_WITH_HIP)
+    PADDLE_ENFORCE_GPU_SUCCESS(hipMemcpy(dst, src, n, hipMemcpyHostToDevice));
 #else
-    PADDLE_THROW("Not compiled with cuda");
+    PADDLE_THROW(
+        platform::errors::InvalidArgument("Check your paddle version, current "
+                                          "version is not compiled with cuda"));
 #endif
   } else {
     std::memcpy(dst, src, n);
@@ -54,7 +61,7 @@ bool TestMain(const platform::Place &place, const framework::DDim &dims,
   y->Resize(dims);
   z->Resize(dims);
 
-  size_t numel = static_cast<size_t>(framework::product(dims));
+  size_t numel = static_cast<size_t>(phi::product(dims));
 
   auto x_ptr = x->mutable_data<T>(place);
   auto y_ptr = y->mutable_data<T>(place);
@@ -88,11 +95,22 @@ bool TestMain(const platform::Place &place, const framework::DDim &dims,
 
   framework::LoDTensor cpu_out;
   auto &out_tensor = scope.FindVar(out_name)->Get<framework::LoDTensor>();
-  PADDLE_ENFORCE(scope.kids().empty());
+  PADDLE_ENFORCE_EQ(scope.kids().empty(), true,
+                    platform::errors::InvalidArgument(
+                        "The scope can not have the child scopes,"
+                        "please check your code."));
   if (inplace) {
-    PADDLE_ENFORCE_EQ(&out_tensor, x);
+    PADDLE_ENFORCE_EQ(
+        &out_tensor, x,
+        platform::errors::InvalidArgument(
+            "The output tensor should be same as input x in inplace mode,"
+            " but now is not same."));
   } else {
-    PADDLE_ENFORCE_EQ(&out_tensor, z);
+    PADDLE_ENFORCE_EQ(
+        &out_tensor, z,
+        platform::errors::InvalidArgument(
+            "The output tensor should be same as output z in normal mode,"
+            " but now is not same."));
   }
 
   if (is_gpu_place) {
@@ -118,7 +136,7 @@ TEST(test_elementwise_add_not_inplace, cpu_place) {
   ASSERT_TRUE(TestMain<float>(p, dims, false));
 }
 
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 TEST(test_elementwise_add_inplace, gpu_place) {
   framework::DDim dims({32, 64});
   platform::CUDAPlace p(0);

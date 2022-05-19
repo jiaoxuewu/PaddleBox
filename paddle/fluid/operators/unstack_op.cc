@@ -12,12 +12,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/unstack_op.h"
 #include <memory>
 #include <string>
 #include <vector>
+#include "paddle/fluid/framework/infershape_utils.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/platform/for_range.h"
+#include "paddle/phi/core/infermeta_utils.h"
+#include "paddle/phi/infermeta/unary.h"
 
 namespace paddle {
 namespace operators {
@@ -25,43 +27,6 @@ namespace operators {
 class UnStackOp : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
-
-  void InferShape(framework::InferShapeContext *ctx) const override {
-    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "UnStack");
-    int axis = ctx->Attrs().Get<int>("axis");
-    int num = ctx->Attrs().Get<int>("num");
-    auto x_dim = ctx->GetInputDim("X");
-    int rank = x_dim.size();
-    PADDLE_ENFORCE_GE(axis, -rank,
-                      platform::errors::InvalidArgument(
-                          "The attribute axis is out of range, it must be "
-                          "inside [-rank, rank), where rank = %d",
-                          rank));
-    PADDLE_ENFORCE_LT(axis, rank,
-                      platform::errors::InvalidArgument(
-                          "The attribute axis is out of range, it must be "
-                          "inside [-rank, rank), where rank = %d",
-                          rank));
-    if (axis < 0) axis += rank;
-
-    PADDLE_ENFORCE_EQ(ctx->Outputs("Y").size(), static_cast<size_t>(num),
-                      platform::errors::InvalidArgument(
-                          "Number of Outputs(Y) is wrong. Got %d , but it must "
-                          "equal to attribute num which is %d.",
-                          ctx->Outputs("Y").size(), static_cast<size_t>(num)));
-    if (x_dim[axis] > 0) {
-      PADDLE_ENFORCE_EQ(
-          num, x_dim[axis],
-          platform::errors::InvalidArgument(
-              "The number of attribute num is not equal to the length of the "
-              "%d axis of Input(X). Expect %d but got %d.",
-              axis, x_dim[axis], num));
-    }
-    auto vec = framework::vectorize<int>(x_dim);
-    vec.erase(vec.begin() + axis);
-    ctx->SetOutputsDim("Y", std::vector<framework::DDim>(  // NOLINT
-                                x_dim[axis], framework::make_ddim(vec)));
-  }
 };
 
 class UnStackOpMaker : public framework::OpProtoAndCheckerMaker {
@@ -101,14 +66,18 @@ class UnStackGradOp : public framework::OperatorWithKernel {
   void InferShape(framework::InferShapeContext *ctx) const override {
     PADDLE_ENFORCE_GT(ctx->Inputs(framework::GradVarName("Y")).size(), 0,
                       platform::errors::InvalidArgument(
-                          "Number of Inputs(Y@Grad) must be larger than 0"));
+                          "The Inputs(Y@Grad) of unstack operator are empty."));
     OP_INOUT_CHECK(ctx->HasOutput(framework::GradVarName("X")), "Output", "X",
                    "UnStackGrad");
     auto input_dims = ctx->GetInputsDim(framework::GradVarName("Y"));
     for (size_t i = 1; i < input_dims.size(); ++i) {
-      PADDLE_ENFORCE_EQ(input_dims[i], input_dims[0],
-                        platform::errors::InvalidArgument(
-                            "Dims of all Inputs(Y@Grad) must be the same"));
+      PADDLE_ENFORCE_EQ(
+          input_dims[i], input_dims[0],
+          platform::errors::InvalidArgument(
+              "The dimensions of all Inputs(Y@Grad) must be the same,"
+              "but received Inputs(Y@Grad)'s %d-th dimension is %d, "
+              "Inputs(Y@Grad)'s 0-th to %d-th dimension is %d.",
+              i, input_dims[i], i - 1, input_dims[0]));
     }
 
     int axis = ctx->Attrs().Get<int>("axis");
@@ -125,9 +94,9 @@ class UnStackGradOp : public framework::OperatorWithKernel {
                           rank));
     if (axis < 0) axis += (rank + 1);
 
-    auto vec = framework::vectorize<int>(input_dims[0]);
+    auto vec = phi::vectorize<int>(input_dims[0]);
     vec.insert(vec.begin() + axis, input_dims.size());
-    ctx->SetOutputDim(framework::GradVarName("X"), framework::make_ddim(vec));
+    ctx->SetOutputDim(framework::GradVarName("X"), phi::make_ddim(vec));
   }
 };
 
@@ -137,20 +106,12 @@ class UnStackGradOp : public framework::OperatorWithKernel {
 namespace plat = paddle::platform;
 namespace ops = paddle::operators;
 
+DECLARE_INFER_SHAPE_FUNCTOR(unstack, UnStackInferMetaFunctor,
+                            PD_INFER_META(phi::UnStackInferMeta));
+
 REGISTER_OPERATOR(unstack, ops::UnStackOp, ops::UnStackOpMaker,
                   ops::UnStackGradOpMaker<paddle::framework::OpDesc>,
-                  ops::UnStackGradOpMaker<paddle::imperative::OpBase>);
+                  ops::UnStackGradOpMaker<paddle::imperative::OpBase>,
+                  UnStackInferMetaFunctor);
 
 REGISTER_OPERATOR(unstack_grad, ops::UnStackGradOp);
-
-REGISTER_OP_CPU_KERNEL(unstack,
-                       ops::UnStackKernel<plat::CPUDeviceContext, float>,
-                       ops::UnStackKernel<plat::CPUDeviceContext, double>,
-                       ops::UnStackKernel<plat::CPUDeviceContext, int>,
-                       ops::UnStackKernel<plat::CPUDeviceContext, int64_t>);
-
-REGISTER_OP_CPU_KERNEL(unstack_grad,
-                       ops::UnStackGradKernel<plat::CPUDeviceContext, float>,
-                       ops::UnStackGradKernel<plat::CPUDeviceContext, double>,
-                       ops::UnStackGradKernel<plat::CPUDeviceContext, int>,
-                       ops::UnStackGradKernel<plat::CPUDeviceContext, int64_t>);

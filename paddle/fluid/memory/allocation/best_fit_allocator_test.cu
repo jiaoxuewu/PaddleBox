@@ -16,7 +16,9 @@
 #include <random>
 #include <thread>  // NOLINT
 #include <vector>
+
 #include "gtest/gtest.h"
+#include "paddle/fluid/memory/allocation/allocator_facade.h"
 #include "paddle/fluid/memory/allocation/best_fit_allocator.h"
 #include "paddle/fluid/memory/allocation/cuda_allocator.h"
 #include "paddle/fluid/memory/allocation/locked_allocator.h"
@@ -41,12 +43,18 @@ TEST(BestFitAllocator, concurrent_cuda) {
   LockedAllocator concurrent_allocator(
       std::unique_ptr<Allocator>(new BestFitAllocator(cuda_allocation.get())));
 
+  platform::CUDAPlace gpu(0);
+  platform::CUDADeviceContext dev_ctx(gpu);
+  dev_ctx.SetAllocator(paddle::memory::allocation::AllocatorFacade::Instance()
+                           .GetAllocator(gpu, dev_ctx.stream())
+                           .get());
+  dev_ctx.PartialInitWithAllocator();
+
   auto th_main = [&](std::random_device::result_type seed) {
     std::default_random_engine engine(seed);
     std::uniform_int_distribution<size_t> dist(1U, 1024U);
-    platform::CUDAPlace gpu(0);
-    platform::CUDADeviceContext dev_ctx(gpu);
     std::array<size_t, 1024> buf;
+
     for (size_t i = 0; i < 128; ++i) {
       size_t allocate_size = dist(engine);
 

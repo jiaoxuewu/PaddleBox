@@ -1,4 +1,4 @@
-#   Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2022 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ from paddle.fluid.dygraph.base import to_variable
 from test_imperative_base import new_program_scope
 import numpy as np
 import six
+from paddle.fluid.framework import _test_eager_guard
 
 
 class SimpleNet(fluid.Layer):
@@ -80,10 +81,18 @@ class SimpleNet(fluid.Layer):
 
 
 class TestDygraphSimpleNet(unittest.TestCase):
-    def test_simple_net(self):
+    def func_simple_net(self):
         for is_sparse in [True, False]:
-            for dtype in ["float32", "float64"]:
+            dtype_list = ["float32"]
+            if not core.is_compiled_with_rocm():
+                dtype_list.append("float64")
+            for dtype in dtype_list:
                 self.simple_net_float(is_sparse, dtype)
+
+    def test_simple_net(self):
+        with _test_eager_guard():
+            self.func_simple_net()
+        self.func_simple_net()
 
     def simple_net_float(self, is_sparse, dtype):
         places = [fluid.CPUPlace()]
@@ -102,7 +111,7 @@ class TestDygraphSimpleNet(unittest.TestCase):
             for is_sort_sum_gradient in [True, False]:
                 traced_layer = None
                 with fluid.dygraph.guard(place):
-                    paddle.manual_seed(seed)
+                    paddle.seed(seed)
                     paddle.framework.random._manual_program_seed(seed)
 
                     simple_net = SimpleNet(
@@ -146,7 +155,7 @@ class TestDygraphSimpleNet(unittest.TestCase):
                     dy_loss_value = dy_loss.numpy()
 
                 with new_program_scope():
-                    paddle.manual_seed(seed)
+                    paddle.seed(seed)
                     paddle.framework.random._manual_program_seed(seed)
 
                     simple_net = SimpleNet(

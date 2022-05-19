@@ -17,6 +17,7 @@ limitations under the License. */
 #include <string>
 #include <unordered_map>
 #include <vector>
+
 #include "paddle/fluid/framework/block_desc.h"
 #include "paddle/fluid/framework/op_desc.h"
 #include "paddle/fluid/framework/type_defs.h"
@@ -24,8 +25,8 @@ limitations under the License. */
 namespace paddle {
 namespace framework {
 
-class OpDesc;
 class BlockDesc;
+class OpDesc;
 class StaticGraphVarTypeInference;
 // default infer var type context
 
@@ -66,6 +67,12 @@ class InferVarTypeContext {
     PADDLE_ENFORCE_NOT_NULL(
         op_, platform::errors::PreconditionNotMet("op_ should not be null"));
     return op_->Inputs().at(name).size();
+  }
+
+  virtual size_t OutputSize(const std::string& name) const {
+    PADDLE_ENFORCE_NOT_NULL(
+        op_, platform::errors::PreconditionNotMet("op_ should not be null"));
+    return op_->Outputs().at(name).size();
   }
 
   virtual const std::string& InputVarName(const std::string& name,

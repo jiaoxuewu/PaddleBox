@@ -18,6 +18,8 @@ import unittest
 import numpy as np
 from op_test import OpTest
 import paddle.fluid as fluid
+import paddle
+from paddle.fluid.dygraph.base import switch_to_static_graph
 
 
 def numpy_scatter_nd(ref, index, updates, fun):
@@ -65,6 +67,7 @@ class TestScatterNdAddSimpleOp(OpTest):
 
     def setUp(self):
         self.op_type = "scatter_nd_add"
+        self.python_api = paddle.scatter_nd_add
         ref_np = np.random.random([100]).astype("float64")
         index_np = np.random.randint(0, 100, [100, 1]).astype("int32")
         updates_np = np.random.random([100]).astype("float64")
@@ -74,10 +77,10 @@ class TestScatterNdAddSimpleOp(OpTest):
         self.outputs = {'Out': expect_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['Updates'], 'Out', in_place=True)
+        self.check_grad(['X', 'Updates'], 'Out', check_eager=True)
 
 
 class TestScatterNdAddWithEmptyIndex(OpTest):
@@ -87,6 +90,7 @@ class TestScatterNdAddWithEmptyIndex(OpTest):
 
     def setUp(self):
         self.op_type = "scatter_nd_add"
+        self.python_api = paddle.scatter_nd_add
         ref_np = np.random.random((10, 10)).astype("float64")
         index_np = np.array([[], []]).astype("int32")
         updates_np = np.random.random((2, 10, 10)).astype("float64")
@@ -97,10 +101,10 @@ class TestScatterNdAddWithEmptyIndex(OpTest):
         self.outputs = {'Out': expect_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out', in_place=True)
+        self.check_grad(['X', 'Updates'], 'Out', check_eager=True)
 
 
 class TestScatterNdAddWithHighRankSame(OpTest):
@@ -110,11 +114,12 @@ class TestScatterNdAddWithHighRankSame(OpTest):
 
     def setUp(self):
         self.op_type = "scatter_nd_add"
-        shape = (10, 9, 8, 1, 15)
+        self.python_api = paddle.scatter_nd_add
+        shape = (3, 2, 2, 1, 10)
         ref_np = np.random.rand(*shape).astype("float64")
         index_np = np.vstack(
             [np.random.randint(
-                0, s, size=150) for s in shape]).T.astype("int32")
+                0, s, size=100) for s in shape]).T.astype("int32")
         update_shape = judge_update_shape(ref_np, index_np)
         updates_np = np.random.rand(*update_shape).astype("float64")
         expect_np = numpy_scatter_nd_add(ref_np.copy(), index_np, updates_np)
@@ -123,10 +128,10 @@ class TestScatterNdAddWithHighRankSame(OpTest):
         self.outputs = {'Out': expect_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['Updates'], 'Out', in_place=True)
+        self.check_grad(['X', 'Updates'], 'Out', check_eager=True)
 
 
 class TestScatterNdAddWithHighRankDiff(OpTest):
@@ -136,7 +141,8 @@ class TestScatterNdAddWithHighRankDiff(OpTest):
 
     def setUp(self):
         self.op_type = "scatter_nd_add"
-        shape = (10, 9, 8, 1, 15)
+        self.python_api = paddle.scatter_nd_add
+        shape = (8, 2, 2, 1, 10)
         ref_np = np.random.rand(*shape).astype("double")
         index = np.vstack([np.random.randint(0, s, size=500) for s in shape]).T
         index_np = index.reshape([10, 5, 10, 5]).astype("int64")
@@ -148,10 +154,10 @@ class TestScatterNdAddWithHighRankDiff(OpTest):
         self.outputs = {'Out': expect_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['Updates'], 'Out', in_place=True)
+        self.check_grad(['X', 'Updates'], 'Out', check_eager=True)
 
 
 #Test Python API
@@ -226,6 +232,50 @@ class TestScatterNdOpAPI(unittest.TestCase):
         output4 = fluid.layers.scatter_nd(
             index4, updates4, shape4, name='scatter_nd')
 
+    def testcase5(self):
+        if not fluid.core.is_compiled_with_cuda():
+            return
+
+        shape = [2, 3, 4]
+        x = np.arange(int(np.prod(shape))).reshape(shape)
+        index = np.array([[0, 0, 2], [0, 1, 2]])
+        val = np.array([-1, -3])
+
+        with fluid.dygraph.guard():
+            device = paddle.get_device()
+            paddle.set_device('gpu')
+            gpu_value = paddle.scatter_nd_add(
+                paddle.to_tensor(x),
+                paddle.to_tensor(index), paddle.to_tensor(val))
+            paddle.set_device('cpu')
+            cpu_value = paddle.scatter_nd_add(
+                paddle.to_tensor(x),
+                paddle.to_tensor(index), paddle.to_tensor(val))
+            self.assertTrue(
+                np.array_equal(gpu_value.numpy(), cpu_value.numpy()))
+            paddle.set_device(device)
+
+        @switch_to_static_graph
+        def test_static_graph():
+            with paddle.static.program_guard(paddle.static.Program(),
+                                             paddle.static.Program()):
+                x_t = paddle.static.data(name="x", dtype=x.dtype, shape=x.shape)
+                index_t = paddle.static.data(
+                    name="index", dtype=index.dtype, shape=index.shape)
+                val_t = paddle.static.data(
+                    name="val", dtype=val.dtype, shape=val.shape)
+                out_t = paddle.scatter_nd_add(x_t, index_t, val_t)
+                feed = {x_t.name: x, index_t.name: index, val_t.name: val}
+                fetch = [out_t]
+
+                gpu_exe = paddle.static.Executor(paddle.CUDAPlace(0))
+                gpu_value = gpu_exe.run(feed=feed, fetch_list=fetch)[0]
+                cpu_exe = paddle.static.Executor(paddle.CPUPlace())
+                cpu_value = cpu_exe.run(feed=feed, fetch_list=fetch)[0]
+                self.assertTrue(np.array_equal(gpu_value, cpu_value))
+
+        test_static_graph()
+
 
 #Test Raise Error
 class TestScatterNdOpRaise(unittest.TestCase):
@@ -241,7 +291,7 @@ class TestScatterNdOpRaise(unittest.TestCase):
                 output5 = fluid.layers.scatter_nd_add(ref5, index5, updates5)
             except Exception as e:
                 t = \
-                "Input(Index).shape[-1] should be no greater than Input(X).rank"
+                "The last dimension of Input(Index)'s shape should be no greater "
                 if t in str(e):
                     raise IndexError
 
@@ -284,5 +334,24 @@ class TestScatterNdOpRaise(unittest.TestCase):
         self.assertRaises(ValueError, check_raise_is_test)
 
 
+class TestDygraph(unittest.TestCase):
+    def test_dygraph(self):
+        with fluid.dygraph.guard(fluid.CPUPlace()):
+            index_data = np.array([[1, 1], [0, 1], [1, 3]]).astype(np.int64)
+            index = fluid.dygraph.to_variable(index_data)
+            updates = paddle.rand(shape=[3, 9, 10], dtype='float32')
+            shape = [3, 5, 9, 10]
+            output = paddle.scatter_nd(index, updates, shape)
+
+    def test_dygraph_1(self):
+        with fluid.dygraph.guard(fluid.CPUPlace()):
+            x = paddle.rand(shape=[3, 5, 9, 10], dtype='float32')
+            updates = paddle.rand(shape=[3, 9, 10], dtype='float32')
+            index_data = np.array([[1, 1], [0, 1], [1, 3]]).astype(np.int64)
+            index = fluid.dygraph.to_variable(index_data)
+            output = paddle.scatter_nd_add(x, index, updates)
+
+
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

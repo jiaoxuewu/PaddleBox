@@ -17,10 +17,8 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
-#include "paddle/fluid/framework/ir/graph.h"
-#include "paddle/fluid/framework/ir/graph_pattern_detector.h"
-#include "paddle/fluid/framework/ir/pass.h"
 
 namespace paddle {
 namespace framework {
@@ -29,8 +27,10 @@ namespace ir {
 /*
  * Squash dequantize->quantize pair pattern into requantize op
  */
+
 class CPUQuantizeSquashPass : public FusePassBase {
  public:
+  CPUQuantizeSquashPass();
   virtual ~CPUQuantizeSquashPass() {}
 
  protected:
@@ -42,6 +42,20 @@ class CPUQuantizeSquashPass : public FusePassBase {
   void FindNodesToKeep(
       Graph* graph,
       std::unordered_map<const Node*, int>* nodes_keep_counter) const;
+
+  /*
+   * Check if input to dequantize is uint8
+   */
+  bool IsDequantizeInputUint8(const Node* dequant_in) const;
+
+  /*
+   * Don't squash unsigned dequantize with signed quantize.
+   * This is important for concat and elementwise ops.
+   * When inputs have different sign, concat will assume signed type and
+   * elementwise assumes first input type.
+   */
+  bool IsDequantizeQuantizeIncompatible(Node* quant_op, Node* dequant_in,
+                                        Node* next_op) const;
 
   /*
    * Squash dequantize-quantize ops pairs into requantize or nothing
@@ -74,6 +88,16 @@ class CPUQuantizeSquashPass : public FusePassBase {
    * Squash scale if dequantize is before scale
    */
   void DequantScaleSquash(Graph* graph) const;
+
+  /*
+   * Squash scale if scale is before quantize
+   */
+  void ScaleQuantSquash(Graph* graph) const;
+
+  /*
+   * Squash quantize if is before bfloat16 conv2d
+   */
+  void QuantizeBf16Conv(Graph* graph) const;
 
   const std::string name_scope_{"squash"};
 };

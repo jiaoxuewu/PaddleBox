@@ -13,12 +13,13 @@
 # limitations under the License.
 
 import paddle
-import paddle.nn.functional as F
-from paddle import fluid
+import numpy as np
 import paddle.fluid.dygraph as dg
 import paddle.fluid.initializer as I
-import numpy as np
+import paddle.nn.functional as F
 import unittest
+from paddle import fluid
+from paddle.fluid.framework import _test_eager_guard
 from unittest import TestCase
 
 
@@ -113,7 +114,7 @@ class TestFunctionalConv3DTranspose(TestCase):
                     "weight", self.weight.shape, dtype=self.dtype)
                 if not self.no_bias:
                     bias = fluid.data("bias", self.bias.shape, dtype=self.dtype)
-                y = F.conv_transpose3d(
+                y = F.conv3d_transpose(
                     x,
                     weight,
                     None if self.no_bias else bias,
@@ -138,7 +139,7 @@ class TestFunctionalConv3DTranspose(TestCase):
             x = dg.to_variable(self.input)
             weight = dg.to_variable(self.weight)
             bias = None if self.no_bias else dg.to_variable(self.bias)
-            y = F.conv_transpose3d(
+            y = F.conv3d_transpose(
                 x,
                 weight,
                 bias,
@@ -165,11 +166,21 @@ class TestFunctionalConv3DTranspose(TestCase):
         self.place = fluid.CPUPlace()
         self._test_identity()
 
+    def test_identity_cpu_check_eager(self):
+        with _test_eager_guard():
+            self.test_identity_cpu()
+
     @unittest.skipIf(not fluid.core.is_compiled_with_cuda(),
                      "core is not compiled with CUDA")
     def test_identity_gpu(self):
         self.place = fluid.CUDAPlace(0)
         self._test_identity()
+
+    @unittest.skipIf(not fluid.core.is_compiled_with_cuda(),
+                     "core is not compiled with CUDA")
+    def test_identity_gpu_check_eager(self):
+        with _test_eager_guard():
+            self.test_identity_gpu()
 
 
 class TestFunctionalConv3DTransposeError(TestCase):
@@ -222,7 +233,7 @@ class TestFunctionalConv3DTransposeError(TestCase):
                     "weight", self.weight_shape, dtype=self.dtype)
                 if not self.no_bias:
                     bias = fluid.data("bias", self.bias_shape, dtype=self.dtype)
-                y = F.conv_transpose3d(
+                y = F.conv3d_transpose(
                     x,
                     weight,
                     None if self.no_bias else bias,
@@ -480,6 +491,87 @@ class TestFunctionalConv3DTransposeErrorCase9(
         self.groups = 2
         self.no_bias = False
         self.act = "sigmoid"
+        self.data_format = "NCDHW"
+
+
+class TestFunctionalConv3DTransposeErrorCase10(TestCase):
+    def setUp(self):
+        self.input = np.array([])
+        self.filter = np.array([])
+        self.num_filters = 0
+        self.filter_size = 0
+        self.bias = None
+        self.padding = 0
+        self.stride = 1
+        self.dilation = 1
+        self.groups = 1
+        self.data_format = "NCDHW"
+
+    def static_graph_case(self):
+        main = fluid.Program()
+        start = fluid.Program()
+        with fluid.unique_name.guard():
+            with fluid.program_guard(main, start):
+                x = fluid.data("input", self.input.shape, dtype=paddle.float32)
+                y = fluid.layers.conv3d_transpose(
+                    x,
+                    self.num_filters,
+                    self.filter_size,
+                    stride=self.stride,
+                    padding=self.padding,
+                    dilation=self.dilation,
+                    groups=self.groups,
+                    param_attr=I.NumpyArrayInitializer(self.filter),
+                    bias_attr=False if self.bias is None else
+                    I.NumpyArrayInitializer(self.bias),
+                    act=None,
+                    data_format=self.data_format)
+        exe = fluid.Executor()
+        exe.run(start)
+        out, = exe.run(main, feed={"input": self.input}, fetch_list=[y])
+        return out
+
+    def dygraph_case(self):
+        with dg.guard():
+            x = dg.to_variable(self.input, dtype=paddle.float32)
+            w = dg.to_variable(self.filter, dtype=paddle.float32)
+            b = None if self.bias is None else dg.to_variable(
+                self.bias, dtype=paddle.float32)
+            y = F.conv3d_transpose(
+                x,
+                w,
+                b,
+                padding=self.padding,
+                stride=self.stride,
+                dilation=self.dilation,
+                groups=self.groups,
+                data_format=self.data_format)
+
+    def test_dygraph_exception(self):
+        with self.assertRaises(ValueError):
+            self.dygraph_case()
+
+    def test_dygraph_exception_check_eager(self):
+        with _test_eager_guard():
+            self.test_dygraph_exception()
+
+    def test_static_exception(self):
+        with self.assertRaises(ValueError):
+            self.static_graph_case()
+
+
+class TestFunctionalConv3DTransposeErrorCase11(
+        TestFunctionalConv3DTransposeErrorCase10):
+    def setUp(self):
+        self.input = np.random.randn(1, 3, 3, 3, 3)
+        self.filter = np.random.randn(3, 3, 1, 1, 1)
+        self.num_filters = 3
+        self.filter_size = 1
+        self.bias = None
+        self.padding = 0
+        self.stride = 1
+        self.dilation = 1
+        self.groups = 0
         self.data_format = "NCDHW"
 
 

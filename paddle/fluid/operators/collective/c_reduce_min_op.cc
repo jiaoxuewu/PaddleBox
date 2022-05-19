@@ -15,6 +15,17 @@ limitations under the License. */
 #include "paddle/fluid/operators/collective/c_reduce_op.h"
 
 namespace paddle {
+namespace framework {
+class OpDesc;
+template <typename T>
+class EmptyGradOpMaker;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+}  // namespace paddle
+
+namespace paddle {
 namespace operators {
 
 class CReduceMinOpMaker : public CReduceOpMaker {

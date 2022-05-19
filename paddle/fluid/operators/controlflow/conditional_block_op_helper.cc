@@ -13,11 +13,14 @@
 // limitations under the License.
 
 #include "paddle/fluid/operators/controlflow/conditional_block_op_helper.h"
+
 #include <string>
-#include <unordered_set>
-#include <utility>
-#include <vector>
-#include "paddle/fluid/operators/controlflow/op_variant.h"
+
+namespace paddle {
+namespace framework {
+class ProgramDesc;
+}  // namespace framework
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -155,21 +158,39 @@ void PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOp(
   PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOpImpl(
       program, &fwd_ops, &bwd_ops);
 }
+void PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOp(
+    const framework::ProgramDesc &program, int block_id,
+    const std::vector<framework::OperatorBase *> &all_ops) {
+  // If block_id is not 0, returns
+  // This is because all conditional_block_ops and conditional_block_grad_ops
+  // in the whole program would be processed when block_id is 0 (i.e.
+  // when Executor::Run() or ParallelExecutor constructs).
+
+  // What's more, all conditional_block_ops and conditional_block_grad_ops
+  // must be processed when block_id is zero. If not, conditional_block_op
+  // may run first and erase variables used in conditional_block_grad_op,
+  // and in this moment, conditional_block_grad_ops may be not constructed yet.
+  if (block_id != 0) return;
+
+  std::vector<OpVariant> fwd_ops, bwd_ops;
+  for (auto *op : all_ops) {
+    if (op->Type() == "conditional_block") {
+      fwd_ops.emplace_back(op);
+    } else if (op->Type() == "conditional_block_grad") {
+      bwd_ops.emplace_back(op);
+    }
+  }
+
+  PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOpImpl(
+      program, &fwd_ops, &bwd_ops);
+}
 
 void PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOp(
     const framework::ProgramDesc &program,
-    const std::vector<framework::OperatorBase *> &ifelse_ops,
-    const std::vector<framework::OperatorBase *> &ifelse_grad_ops) {
-  std::vector<OpVariant> fwd_ops, bwd_ops;
-  fwd_ops.reserve(ifelse_ops.size());
-  for (auto *op : ifelse_ops) {
-    fwd_ops.emplace_back(op);
-  }
-
-  bwd_ops.reserve(ifelse_grad_ops.size());
-  for (auto *op : ifelse_grad_ops) {
-    bwd_ops.emplace_back(op);
-  }
+    const std::vector<OpVariant> &ifelse_ops,
+    const std::vector<OpVariant> &ifelse_grad_ops) {
+  std::vector<OpVariant> fwd_ops = ifelse_ops;
+  std::vector<OpVariant> bwd_ops = ifelse_grad_ops;
 
   PrepareSafeEagerDeletionOnConditionalOpAndConditionalGradOpImpl(
       program, &fwd_ops, &bwd_ops);

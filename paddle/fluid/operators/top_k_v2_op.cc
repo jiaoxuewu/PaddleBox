@@ -12,8 +12,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/top_k_v2_op.h"
 #include <memory>
+
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/fluid/framework/op_registry.h"
+#include "paddle/phi/infermeta/unary.h"
 
 namespace paddle {
 namespace operators {
@@ -21,45 +24,6 @@ namespace operators {
 class TopkV2Op : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
-
-  void InferShape(framework::InferShapeContext* ctx) const override {
-    PADDLE_ENFORCE(ctx->HasInput("X"),
-                   "Input(X) of TopkOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasOutput("Out"),
-                   "Output(Out) of TopkOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasOutput("Indices"),
-                   "Output(Indices) of TopkOp should not be null.");
-
-    auto input_dims = ctx->GetInputDim("X");
-    const int& dim_size = input_dims.size();
-    const int k = static_cast<int>(ctx->Attrs().Get<int>("k"));
-    int axis = static_cast<int>(ctx->Attrs().Get<int>("axis"));
-    PADDLE_ENFORCE_EQ((axis < dim_size) && (axis >= (-1 * dim_size)), true,
-                      "the axis of topk"
-                      "must be [-%d, %d), but you set axis is %d",
-                      dim_size, dim_size, axis);
-
-    if (axis < 0) axis += dim_size;
-
-    PADDLE_ENFORCE_GE(
-        k, 1, "the attribute of k in the topk must >= 1, but received %d .", k);
-    PADDLE_ENFORCE_GE(input_dims.size(), 1,
-                      "input of topk must have >= 1d shape");
-
-    if (ctx->IsRuntime()) {
-      PADDLE_ENFORCE_GE(
-          input_dims[axis], k,
-          "input of topk op must have >= %d columns in axis of %d", k, axis);
-    }
-
-    framework::DDim dims = input_dims;
-
-    dims[axis] = k;
-    ctx->SetOutputDim("Out", dims);
-    ctx->SetOutputDim("Indices", dims);
-    ctx->ShareLoD("X", "Out");
-    ctx->ShareLoD("X", "Indices");
-  }
 
  protected:
   framework::OpKernelType GetExpectedKernelType(
@@ -157,20 +121,11 @@ class TopkV2GradOpMaker : public framework::SingleGradOpMaker<T> {
 }  // namespace paddle
 
 namespace ops = paddle::operators;
+DECLARE_INFER_SHAPE_FUNCTOR(top_k_v2, TopKInferShapeFunctor,
+                            PD_INFER_META(phi::TopKInferMeta));
 REGISTER_OPERATOR(top_k_v2, ops::TopkV2Op, ops::TopkV2OpMaker,
                   ops::TopkV2GradOpMaker<paddle::framework::OpDesc>,
-                  ops::TopkV2GradOpMaker<paddle::imperative::OpBase>);
+                  ops::TopkV2GradOpMaker<paddle::imperative::OpBase>,
+                  TopKInferShapeFunctor);
 
 REGISTER_OPERATOR(top_k_v2_grad, ops::TopkV2OpGrad);
-
-REGISTER_OP_CPU_KERNEL(top_k_v2,
-                       ops::TopkV2Kernel<paddle::platform::CPUPlace, float>,
-                       ops::TopkV2Kernel<paddle::platform::CPUPlace, double>,
-                       ops::TopkV2Kernel<paddle::platform::CPUPlace, int32_t>,
-                       ops::TopkV2Kernel<paddle::platform::CPUPlace, int64_t>)
-
-REGISTER_OP_CPU_KERNEL(
-    top_k_v2_grad, ops::TopkV2GradKernel<paddle::platform::CPUPlace, float>,
-    ops::TopkV2GradKernel<paddle::platform::CPUPlace, double>,
-    ops::TopkV2GradKernel<paddle::platform::CPUPlace, int32_t>,
-    ops::TopkV2GradKernel<paddle::platform::CPUPlace, int64_t>)

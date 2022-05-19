@@ -13,38 +13,37 @@
 # limitations under the License.
 
 # TODO: define all functions about input & output in this directory 
-__all__ = [
-    'Dataset',
-    'IterableDataset',
-    'TensorDataset',
-    'BatchSampler',
-    'DistributedBatchSampler',
-    #            'Transform',
-    'DataLoader',
-    'get_worker_info',
-    'Sampler',
-    'SequenceSampler',
-    'RandomSampler',
-    'load',
-    'save',
-    'load_program_state',
-    'set_program_state',
-    'load_inference_model',
-    'save_inference_model',
-    'batch',
-    'shuffle',
-    'buffered',
-    'cache',
-    'chain',
-    'firstn',
-    'compose',
-    'map_readers',
-    'xmap_readers'
-]
 
-from ..fluid.io import DataLoader
-from ..fluid.dataloader import Dataset, IterableDataset, BatchSampler, get_worker_info, \
-        TensorDataset, Sampler, SequenceSampler, RandomSampler, DistributedBatchSampler
-from ..fluid.io import load, save, load_program_state, set_program_state, \
-        load_inference_model, save_inference_model, batch
-from ..reader import shuffle, buffered, cache, chain, firstn, compose, map_readers, xmap_readers
+from ..fluid.io import DataLoader  # noqa: F401
+from ..fluid.dataloader import Dataset  # noqa: F401
+from ..fluid.dataloader import IterableDataset  # noqa: F401
+from ..fluid.dataloader import BatchSampler  # noqa: F401
+from ..fluid.dataloader import get_worker_info  # noqa: F401
+from ..fluid.dataloader import TensorDataset  # noqa: F401
+from ..fluid.dataloader import Sampler  # noqa: F401
+from ..fluid.dataloader import SequenceSampler  # noqa: F401
+from ..fluid.dataloader import RandomSampler  # noqa: F401
+from ..fluid.dataloader import DistributedBatchSampler  # noqa: F401
+from ..fluid.dataloader import ComposeDataset  # noqa: F401
+from ..fluid.dataloader import ChainDataset  # noqa: F401
+from ..fluid.dataloader import WeightedRandomSampler  # noqa: F401
+from ..fluid.dataloader import Subset  # noqa: F401
+from ..fluid.dataloader import random_split  # noqa: F401
+
+__all__ = [ #noqa
+           'Dataset',
+           'IterableDataset',
+           'TensorDataset',
+           'ComposeDataset',
+           'ChainDataset',
+           'BatchSampler',
+           'DistributedBatchSampler',
+           'DataLoader',
+           'get_worker_info',
+           'Sampler',
+           'SequenceSampler',
+           'RandomSampler',
+           'WeightedRandomSampler',
+           'random_split',
+           'Subset'
+]

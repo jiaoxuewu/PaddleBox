@@ -16,10 +16,10 @@
 import paddle.fluid as fluid
 from paddle.fluid import core
 
-__all__ = ['manual_seed', 'get_cuda_rng_state', 'set_cuda_rng_state']
+__all__ = []
 
 
-def manual_seed(seed):
+def seed(seed):
     """
 
     Sets the seed for global default generator, which manages the random number generation.
@@ -34,7 +34,7 @@ def manual_seed(seed):
         .. code-block:: python
 
             import paddle
-            gen = paddle.manual_seed(102)
+            gen = paddle.seed(102)
 
     """
     #TODO(zhiqiu): 1. remove program.random_seed when all random-related op upgrade
@@ -57,7 +57,7 @@ def get_cuda_rng_state():
     Get random state of cuda generators.
 
     Args:
-        None
+        None.
 
     Returns:
         GeneratorState:  object.
@@ -80,13 +80,13 @@ def get_cuda_rng_state():
 def set_cuda_rng_state(state_list):
     """
 
-    Sets generator state for all cuda generators
+    Sets generator state for all cuda generators.
 
     Args:
-        state_list(list): The cuda states to set back to cuda generators. state_list is obtained from get_cuda_rng_state().
+        state_list(list|tuple): The cuda states to set back to cuda generators. state_list is obtained from get_cuda_rng_state().
 
     Returns:
-        None
+        None.
 
     Examples:
         .. code-block:: python
@@ -109,7 +109,7 @@ def _manual_program_seed(seed):
     """
     Sets global seed for generating random numbers.
   
-    NOTE(zhiqiu): This is the original implemention of manual_seed. Keeps it temporally 
+    NOTE(zhiqiu): This is the original implemention of seed. Keeps it temporally
     since CUDA generator is not developed, so we need it in the unittest.
 
     Args:
@@ -122,3 +122,11 @@ def _manual_program_seed(seed):
     fluid.default_startup_program().random_seed = seed
     program = fluid.Program()
     program.global_seed(seed)
+
+
+def set_random_seed_generator(name, seed):
+    core.set_random_seed_generator(name, seed)
+
+
+def get_random_seed_generator(name):
+    return core.get_random_seed_generator(name)

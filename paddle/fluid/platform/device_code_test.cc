@@ -18,6 +18,7 @@ limitations under the License. */
 #include "paddle/fluid/framework/lod_tensor.h"
 #include "paddle/fluid/platform/init.h"
 
+#ifdef PADDLE_WITH_CUDA
 constexpr auto saxpy_code = R"(
 extern "C" __global__
 void saxpy_kernel(float a, float *x, float* y, float* z, size_t n) {
@@ -27,15 +28,29 @@ void saxpy_kernel(float a, float *x, float* y, float* z, size_t n) {
   }
 }
 )";
+#endif
 
-#ifdef PADDLE_WITH_CUDA
+#ifdef PADDLE_WITH_HIP
+constexpr auto saxpy_code = R"(
+#include <hip/hip_runtime.h>
+extern "C" __global__
+void saxpy_kernel(float a, float *x, float* y, float* z, size_t n) {
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n;
+       tid += blockDim.x * gridDim.x) {
+    z[tid] = a * x[tid] + y[tid];
+  }
+}
+)";
+#endif
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 TEST(DeviceCode, cuda) {
   if (!paddle::platform::dynload::HasNVRTC() ||
       !paddle::platform::dynload::HasCUDADriver()) {
     return;
   }
 
-  paddle::framework::InitDevices(false, {0});
+  paddle::framework::InitDevices({0});
   paddle::platform::CUDAPlace place = paddle::platform::CUDAPlace(0);
   paddle::platform::CUDADeviceCode code(place, "saxpy_kernel", saxpy_code);
 
@@ -44,8 +59,8 @@ TEST(DeviceCode, cuda) {
   paddle::framework::Tensor cpu_z;
 
   float scale = 2;
-  auto dims = paddle::framework::make_ddim(
-      {static_cast<int64_t>(256), static_cast<int64_t>(1024)});
+  auto dims =
+      phi::make_ddim({static_cast<int64_t>(256), static_cast<int64_t>(1024)});
   cpu_x.mutable_data<float>(dims, paddle::platform::CPUPlace());
   cpu_y.mutable_data<float>(dims, paddle::platform::CPUPlace());
 
@@ -65,8 +80,8 @@ TEST(DeviceCode, cuda) {
   float* y_data = y.mutable_data<float>(dims, place);
   float* z_data = z.mutable_data<float>(dims, place);
 
-  TensorCopySync(cpu_x, place, &x);
-  TensorCopySync(cpu_y, place, &y);
+  paddle::framework::TensorCopySync(cpu_x, place, &x);
+  paddle::framework::TensorCopySync(cpu_y, place, &y);
 
   EXPECT_EQ(code.Compile(), true);
 
@@ -78,7 +93,7 @@ TEST(DeviceCode, cuda) {
   auto* dev_ctx = paddle::platform::DeviceContextPool::Instance().Get(place);
   dev_ctx->Wait();
 
-  TensorCopySync(z, paddle::platform::CPUPlace(), &cpu_z);
+  paddle::framework::TensorCopySync(z, paddle::platform::CPUPlace(), &cpu_z);
   for (size_t i = 0; i < n; i++) {
     EXPECT_EQ(cpu_z.data<float>()[i], static_cast<float>(i) * scale + 0.5);
   }
@@ -90,7 +105,7 @@ TEST(DeviceCodePool, cuda) {
     return;
   }
 
-  paddle::framework::InitDevices(false, {0});
+  paddle::framework::InitDevices({0});
   paddle::platform::CUDAPlace place = paddle::platform::CUDAPlace(0);
   paddle::platform::DeviceCodePool& pool =
       paddle::platform::DeviceCodePool::Init({place});

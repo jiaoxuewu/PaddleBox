@@ -20,11 +20,10 @@
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/fluid/framework/tensor_util.h"
 #include "paddle/fluid/inference/tensorrt/plugin/qkv_to_context_plugin.h"
-#include "paddle/fluid/inference/tensorrt/plugin/trt_plugin_factory.h"
 #include "paddle/fluid/inference/tensorrt/plugin/trt_plugin_utils.h"
 #include "paddle/fluid/operators/math/bert_encoder_functor.h"
-#include "paddle/fluid/operators/math/blas.h"
 #include "paddle/fluid/platform/device_context.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
 
 namespace paddle {
 namespace inference {
@@ -109,7 +108,6 @@ inline void TransposeQKV(const int batch, const int seq_len,
   }
 }
 
-#ifdef SUPPORTS_CUDA_FP16
 inline void TransposeQKV(const int batch, const int seq_len,
                          const int head_size, const int head_num,
                          const half *input, half *output, cudaStream_t stream) {
@@ -148,13 +146,12 @@ inline void TransposeQKV(const int batch, const int seq_len,
                                                          output);
   }
 }
-#endif
 
-int QkvToContextPluginDynamic::initialize() { return 0; }
+int QkvToContextPluginDynamic::initialize() TRT_NOEXCEPT { return 0; }
 
 nvinfer1::DimsExprs QkvToContextPluginDynamic::getOutputDimensions(
     int output_index, const nvinfer1::DimsExprs *inputs, int nb_inputs,
-    nvinfer1::IExprBuilder &expr_builder) {
+    nvinfer1::IExprBuilder &expr_builder) TRT_NOEXCEPT {
   // input[0], (B, S, 3 * N * H, 1, 1)
   // input[1], (B, head_num, seq_len, seq_len)
   // output, (B, seq_len, hidden)
@@ -171,18 +168,16 @@ nvinfer1::DimsExprs QkvToContextPluginDynamic::getOutputDimensions(
           "it has (%d) inputs",
           nb_inputs));
   nvinfer1::DimsExprs ret;
-  ret.nbDims = 5;
+  ret.nbDims = 3;
   ret.d[0] = inputs[0].d[0];
   ret.d[1] = inputs[0].d[1];
   ret.d[2] = expr_builder.constant(head_size_ * head_number_);
-  ret.d[3] = expr_builder.constant(1);
-  ret.d[4] = expr_builder.constant(1);
   return ret;
 }
 
 bool QkvToContextPluginDynamic::supportsFormatCombination(
     int pos, const nvinfer1::PluginTensorDesc *in_out, int nb_inputs,
-    int nb_outputs) {
+    int nb_outputs) TRT_NOEXCEPT {
   PADDLE_ENFORCE_NOT_NULL(
       in_out, platform::errors::InvalidArgument(
                   "The input of swish plugin shoule not be nullptr."));
@@ -195,19 +190,19 @@ bool QkvToContextPluginDynamic::supportsFormatCombination(
 
   const nvinfer1::PluginTensorDesc &in = in_out[pos];
   if (pos == 0) {
-#ifdef SUPPORTS_CUDA_FP16
-    if (ban_fp16_) {
-      return (in.type == nvinfer1::DataType::kFLOAT) &&
-             (in.format == nvinfer1::TensorFormat::kLINEAR);
-    } else {
+    if (with_fp16_) {
+#ifdef TRT_PLUGIN_FP16_AVALIABLE
       return (in.type == nvinfer1::DataType::kFLOAT ||
               in.type == nvinfer1::DataType::kHALF) &&
              (in.format == nvinfer1::TensorFormat::kLINEAR);
-    }
 #else
-    return (in.type == nvinfer1::DataType::kFLOAT) &&
-           (in.format == nvinfer1::TensorFormat::kLINEAR);
+      return (in.type == nvinfer1::DataType::kFLOAT) &&
+             (in.format == nvinfer1::TensorFormat::kLINEAR);
 #endif
+    } else {
+      return (in.type == nvinfer1::DataType::kFLOAT) &&
+             (in.format == nvinfer1::TensorFormat::kLINEAR);
+    }
   }
   const nvinfer1::PluginTensorDesc &prev = in_out[pos - 1];
 
@@ -220,7 +215,8 @@ bool QkvToContextPluginDynamic::supportsFormatCombination(
 }
 
 nvinfer1::DataType QkvToContextPluginDynamic::getOutputDataType(
-    int index, const nvinfer1::DataType *input_types, int nb_inputs) const {
+    int index, const nvinfer1::DataType *input_types,
+    int nb_inputs) const TRT_NOEXCEPT {
   PADDLE_ENFORCE_EQ(
       index, 0, platform::errors::InvalidArgument(
                     "The EmbEltwiseLayernorm Plugin only has one input, so the "
@@ -229,10 +225,38 @@ nvinfer1::DataType QkvToContextPluginDynamic::getOutputDataType(
   return input_types[0];
 }
 
+template <typename T>
+__global__ void apply_scale(T *data, T scale, int n) {
+#if CUDA_ARCH_FP16_SUPPORTED(__CUDA_ARCH__)
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < n) {
+    data[tid] = data[tid] * scale;
+  }
+#endif
+}
+
+inline int round_up(int seq_len, int multiple = 32) {
+  PADDLE_ENFORCE_GT(
+      multiple, 0,
+      platform::errors::InvalidArgument(
+          "multiple should be a positive number，but it's (%d)", multiple));
+  return ((seq_len + multiple - 1) / multiple) * multiple;
+}
+
+template <typename T>
+__global__ void broadcast(const T *src, T *dst, const int seq_len,
+                          const int head_num) {
+  int batch_id = blockIdx.x / (head_num * seq_len);
+  int dst_offset = blockIdx.x * seq_len;
+  if (threadIdx.x < seq_len) {
+    dst[threadIdx.x + dst_offset] = src[threadIdx.x + batch_id * seq_len];
+  }
+}
+
 int QkvToContextPluginDynamic::enqueue(
     const nvinfer1::PluginTensorDesc *input_desc,
     const nvinfer1::PluginTensorDesc *output_desc, const void *const *inputs,
-    void *const *outputs, void *workspace, cudaStream_t stream) {
+    void *const *outputs, void *workspace, cudaStream_t stream) TRT_NOEXCEPT {
   auto input_dims = input_desc[0].dims;
   int input_num = ProductDim(input_dims);
   // input[0], (B, S, 3 * N * H, 1, 1)
@@ -247,13 +271,28 @@ int QkvToContextPluginDynamic::enqueue(
 
   auto input_type = input_desc[0].type;
   if (input_type == nvinfer1::DataType::kFLOAT) {
+    VLOG(1) << "TRT Plugin DataType selected. QkvToContext-->fp32";
     auto *multihead_temp_data = multihead_temp_tensor.mutable_data<float>(
         platform::CUDAPlace(device_id));
     auto *qkptr = multihead_temp_data;
     auto *tptr = multihead_temp_data + scratch_size;
 
     const float *input0_data = static_cast<const float *>(inputs[0]);
-    const float *input1_data = static_cast<const float *>(inputs[1]);
+    // fit to [batch, head_num, length, length] + [batch, 1, 1, length]
+    framework::Tensor temp_qk_bias_tensor;
+    float *qk_bias = const_cast<float *>(static_cast<const float *>(inputs[1]));
+    if (ProductDim(input_desc[1].dims) == (batch * seq_len)) {
+      temp_qk_bias_tensor.Resize({batch, head_number_, seq_len, seq_len});
+      auto *temp_qk_bias = temp_qk_bias_tensor.mutable_data<float>(
+          platform::CUDAPlace(device_id));
+      int grid = batch * head_number_ * seq_len;
+      int block = round_up(seq_len);
+      broadcast<<<grid, block, 0, stream>>>(
+          static_cast<const float *>(inputs[1]), temp_qk_bias, seq_len,
+          head_number_);
+      qk_bias = temp_qk_bias;
+    }
+    const float *input1_data = static_cast<const float *>(qk_bias);
     // BxSx3xNxH => tptr: 3xBxNxSxH.
     TransposeQKV(batch, seq_len, head_size_, head_number_, input0_data, tptr,
                  stream);
@@ -275,7 +314,8 @@ int QkvToContextPluginDynamic::enqueue(
                                                  head_number_, head_size_);
 
   } else if (input_type == nvinfer1::DataType::kHALF) {
-#ifdef SUPPORTS_CUDA_FP16
+#ifdef TRT_PLUGIN_FP16_AVALIABLE
+    VLOG(1) << "TRT Plugin DataType selected. QkvToContext-->fp16";
     auto *multihead_temp_data =
         multihead_temp_tensor.mutable_data<int16_t>(  // NOLINT
             platform::CUDAPlace(device_id));
@@ -284,7 +324,22 @@ int QkvToContextPluginDynamic::enqueue(
     half *tptr = qkptr + scratch_size;
 
     const half *input0_data = static_cast<const half *>(inputs[0]);
-    const half *input1_data = static_cast<const half *>(inputs[1]);
+    // fit to [batch, head_num, length, length] + [batch, 1, 1, length]
+    framework::Tensor temp_qk_bias_tensor;
+    half *qk_bias = const_cast<half *>(static_cast<const half *>(inputs[1]));
+    if (ProductDim(input_desc[1].dims) == (batch * seq_len)) {
+      temp_qk_bias_tensor.Resize({batch, head_number_, seq_len, seq_len});
+      auto *temp_qk_bias =
+          reinterpret_cast<half *>(temp_qk_bias_tensor.mutable_data<int16_t>(
+              platform::CUDAPlace(device_id)));
+      int grid = batch * head_number_ * seq_len;
+      int block = round_up(seq_len);
+      broadcast<<<grid, block, 0, stream>>>(
+          static_cast<const half *>(inputs[1]), temp_qk_bias, seq_len,
+          head_number_);
+      qk_bias = temp_qk_bias;
+    }
+    const half *input1_data = static_cast<const half *>(qk_bias);
     // BxSx3xNxH => tptr: 3xBxNxSxH.
     TransposeQKV(batch, seq_len, head_size_, head_number_, input0_data, tptr,
                  stream);
@@ -293,10 +348,17 @@ int QkvToContextPluginDynamic::enqueue(
         platform::DeviceContextPool::Instance().Get(
             platform::CUDAPlace(device_id)));
 
+    int n_q = seq_len * head_number_ * head_size_ * batch;
+    constexpr int threads = 128;
+    int blocks = (n_q + threads - 1) / threads;
+
+    apply_scale<<<blocks, threads, 0, stream>>>(tptr, static_cast<half>(scale_),
+                                                n_q);
+
     const platform::CUDADeviceContext &dev_ctx = *device_ctx;
     operators::math::MultiHeadGPUComputeFunctor<half> multihead_compute_func;
     multihead_compute_func(dev_ctx, batch, seq_len, head_number_, head_size_,
-                           qkptr, input1_data, tptr, half(scale_), half(0.0));
+                           qkptr, input1_data, tptr, half(1.), half(0.0));
 
     int grid = batch * head_number_ * seq_len;
     int block = head_size_;
@@ -305,7 +367,11 @@ int QkvToContextPluginDynamic::enqueue(
                                                 head_number_, head_size_);
 #else
     PADDLE_THROW(platform::errors::Fatal(
-        "The cuda archs you specific should greater than 600."));
+        "The Ernie(Bert) TensorRT Plugin should be "
+        "complied with CUDA version >= 10.0 when running with fp16. "
+        "Please recomplie it or try to use fp32 by set "
+        "config.SetTRTDynamicShapeInfo(min_input_shape, "
+        "max_input_shape, opt_input_shape, true"));
 #endif
   } else {
     PADDLE_THROW(platform::errors::Fatal(

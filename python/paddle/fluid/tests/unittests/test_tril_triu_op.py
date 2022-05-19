@@ -16,8 +16,10 @@ from __future__ import print_function
 import unittest
 import numpy as np
 from op_test import OpTest
+import paddle
 import paddle.fluid as fluid
 import paddle.tensor as tensor
+from paddle.fluid.framework import Program, program_guard
 
 
 class TrilTriuOpDefaultTest(OpTest):
@@ -26,6 +28,7 @@ class TrilTriuOpDefaultTest(OpTest):
 
     def setUp(self):
         self.initTestCase()
+        self.python_api = paddle.tril if self.real_op_type == 'tril' else paddle.triu
         self.real_np_op = getattr(np, self.real_op_type)
 
         self.op_type = "tril_triu"
@@ -40,10 +43,10 @@ class TrilTriuOpDefaultTest(OpTest):
         }
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad_normal(self):
-        self.check_grad(['X'], 'Out')
+        self.check_grad(['X'], 'Out', check_eager=True)
 
     def initTestCase(self):
         self.real_op_type = np.random.choice(['triu', 'tril'])
@@ -68,6 +71,8 @@ def case_generator(op_type, Xshape, diagonal, expected):
 
     class FailureCase(unittest.TestCase):
         def test_failure(self):
+            paddle.enable_static()
+
             data = fluid.data(shape=Xshape, dtype='float64', name=cls_name)
             with self.assertRaisesRegexp(
                     eval(expected.split(':')[-1]), errmsg[expected]):
@@ -75,6 +80,8 @@ def case_generator(op_type, Xshape, diagonal, expected):
 
     class SuccessCase(TrilTriuOpDefaultTest):
         def initTestCase(self):
+            paddle.enable_static()
+
             self.real_op_type = op_type
             self.diagonal = diagonal
             self.X = np.random.random(Xshape).astype("float64")
@@ -120,39 +127,58 @@ class TestTrilTriuOpAPI(unittest.TestCase):
     """
 
     def test_api(self):
-        data = np.random.random([1, 9, 9, 4]).astype('float32')
-        x = fluid.data(shape=[1, 9, -1, 4], dtype='float32', name='x')
-        tril_out, triu_out = tensor.tril(x), tensor.triu(x)
+        paddle.enable_static()
 
-        place = fluid.CUDAPlace(0) if fluid.core.is_compiled_with_cuda(
-        ) else fluid.CPUPlace()
-        exe = fluid.Executor(place)
-        tril_out, triu_out = exe.run(
-            fluid.default_main_program(),
-            feed={"x": data},
-            fetch_list=[tril_out, triu_out], )
-        self.assertTrue(np.allclose(tril_out, np.tril(data)))
-        self.assertTrue(np.allclose(triu_out, np.triu(data)))
+        dtypes = ['float16', 'float32']
+        for dtype in dtypes:
+            prog = Program()
+            startup_prog = Program()
+            with program_guard(prog, startup_prog):
+                data = np.random.random([1, 9, 9, 4]).astype(dtype)
+                x = fluid.data(shape=[1, 9, -1, 4], dtype=dtype, name='x')
+                tril_out, triu_out = tensor.tril(x), tensor.triu(x)
+
+                place = fluid.CUDAPlace(0) if fluid.core.is_compiled_with_cuda(
+                ) else fluid.CPUPlace()
+                exe = fluid.Executor(place)
+                tril_out, triu_out = exe.run(
+                    fluid.default_main_program(),
+                    feed={"x": data},
+                    fetch_list=[tril_out, triu_out], )
+                self.assertTrue(np.allclose(tril_out, np.tril(data)))
+                self.assertTrue(np.allclose(triu_out, np.triu(data)))
 
     def test_api_with_dygraph(self):
-        with fluid.dygraph.guard():
-            data = np.random.random([1, 9, 9, 4]).astype('float32')
-            x = fluid.dygraph.to_variable(data)
-            tril_out, triu_out = tensor.tril(x).numpy(), tensor.triu(x).numpy()
-            self.assertTrue(np.allclose(tril_out, np.tril(data)))
-            self.assertTrue(np.allclose(triu_out, np.triu(data)))
+        paddle.disable_static()
+
+        dtypes = ['float16', 'float32']
+        for dtype in dtypes:
+            with fluid.dygraph.guard():
+                data = np.random.random([1, 9, 9, 4]).astype(dtype)
+                x = fluid.dygraph.to_variable(data)
+                tril_out, triu_out = tensor.tril(x).numpy(), tensor.triu(
+                    x).numpy()
+                self.assertTrue(np.allclose(tril_out, np.tril(data)))
+                self.assertTrue(np.allclose(triu_out, np.triu(data)))
 
     def test_fluid_api(self):
-        data = np.random.random([1, 9, 9, 4]).astype('float32')
-        x = fluid.data(shape=[1, 9, -1, 4], dtype='float32', name='x')
-        triu_out = fluid.layers.triu(x)
+        paddle.enable_static()
 
-        place = fluid.CUDAPlace(0) if fluid.core.is_compiled_with_cuda(
-        ) else fluid.CPUPlace()
-        exe = fluid.Executor(place)
-        triu_out = exe.run(fluid.default_main_program(),
-                           feed={"x": data},
-                           fetch_list=[triu_out])
+        dtypes = ['float16', 'float32']
+        for dtype in dtypes:
+            prog = Program()
+            startup_prog = Program()
+            with program_guard(prog, startup_prog):
+                data = np.random.random([1, 9, 9, 4]).astype(dtype)
+                x = fluid.data(shape=[1, 9, -1, 4], dtype=dtype, name='x')
+                triu_out = fluid.layers.triu(x)
+
+                place = fluid.CUDAPlace(0) if fluid.core.is_compiled_with_cuda(
+                ) else fluid.CPUPlace()
+                exe = fluid.Executor(place)
+                triu_out = exe.run(fluid.default_main_program(),
+                                   feed={"x": data},
+                                   fetch_list=[triu_out])
 
 
 if __name__ == '__main__':

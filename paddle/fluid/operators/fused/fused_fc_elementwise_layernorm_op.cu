@@ -12,10 +12,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#ifdef __NVCC__
 #include <cub/cub.cuh>
+#endif
+#ifdef __HIPCC__
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#endif
+
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/platform/cuda_device_function.h"
+#include "paddle/fluid/platform/device/gpu/gpu_device_function.h"
+#include "paddle/fluid/platform/device/gpu/gpu_launch_config.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
 
 namespace paddle {
 namespace operators {
@@ -135,14 +143,14 @@ class FusedFCElementwiseLayerNormOpKernel : public framework::OpKernel<T> {
     auto w_dims = w->dims();
     int N = w_dims[1];
     int K = w_dims[0];
-    int M = framework::product(x->dims()) / K;
+    int M = phi::product(x->dims()) / K;
 
     const T* x_data = x->data<T>();
     const T* w_data = w->data<T>();
     T* out_data = out->mutable_data<T>(ctx.GetPlace());
 
     auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
-    auto blas = math::GetBlas<platform::CUDADeviceContext, T>(dev_ctx);
+    auto blas = phi::funcs::GetBlas<platform::CUDADeviceContext, T>(dev_ctx);
     blas.GEMM(false, false, M, N, K, static_cast<T>(1.0), x_data, K, w_data, N,
               static_cast<T>(0.0), out_data, N);
 

@@ -16,11 +16,11 @@ limitations under the License. */
  * This file contains demo for mobilenet, se-resnext50 and ocr.
  */
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
+#include "gflags/gflags.h"
 #include "utils.h"  // NOLINT
 
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 DECLARE_double(fraction_of_gpu_memory_to_use);
 #endif
 DEFINE_string(modeldir, "", "Directory of the inference model.");
@@ -71,7 +71,7 @@ void Main(bool use_gpu) {
   auto& tensor = output.front();
 
   // compare with reference result
-  CheckOutput(FLAGS_refer, tensor);
+  CheckOutput(FLAGS_refer, tensor, 1e-4);
 
   // the analysis_output has some diff with native_output,
   // TODO(luotao): add CheckOutput for analysis_output later.
@@ -82,7 +82,7 @@ void Main(bool use_gpu) {
 }  // namespace paddle
 
 int main(int argc, char** argv) {
-  google::ParseCommandLineFlags(&argc, &argv, true);
+  ::GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_use_gpu) {
     paddle::demo::Main(true /*use_gpu*/);
   } else {

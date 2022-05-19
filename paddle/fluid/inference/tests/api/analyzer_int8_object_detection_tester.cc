@@ -17,6 +17,8 @@ limitations under the License. */
 #include "paddle/fluid/inference/api/paddle_analysis_config.h"
 #include "paddle/fluid/inference/tests/api/tester_helper.h"
 
+DEFINE_bool(enable_mkldnn, true, "Enable MKLDNN");
+
 // setting iterations to 0 means processing the whole dataset
 namespace paddle {
 namespace inference {
@@ -28,7 +30,7 @@ void SetConfig(AnalysisConfig *cfg) {
   cfg->SwitchIrOptim(true);
   cfg->SwitchSpecifyInputNames(false);
   cfg->SetCpuMathLibraryNumThreads(FLAGS_cpu_num_threads);
-  cfg->EnableMKLDNN();
+  if (FLAGS_enable_mkldnn) cfg->EnableMKLDNN();
 }
 
 std::vector<size_t> ReadObjectsNum(std::ifstream &file, size_t offset,
@@ -146,8 +148,9 @@ std::shared_ptr<std::vector<PaddleTensor>> GetWarmupData(
   auto iterations = test_data.size();
   PADDLE_ENFORCE_LE(
       static_cast<size_t>(num_images), iterations * test_data_batch_size,
-      "The requested quantization warmup data size " +
-          std::to_string(num_images) + " is bigger than all test data size.");
+      paddle::platform::errors::Fatal(
+          "The requested quantization warmup data size " +
+          std::to_string(num_images) + " is bigger than all test data size."));
 
   PaddleTensor images;
   images.name = "image";
@@ -237,8 +240,9 @@ std::shared_ptr<std::vector<PaddleTensor>> GetWarmupData(
   }
   PADDLE_ENFORCE_EQ(
       static_cast<size_t>(num_objects), static_cast<size_t>(objects_accum),
-      "The requested num of objects " + std::to_string(num_objects) +
-          " is the same as objects_accum.");
+      paddle::platform::errors::Fatal("The requested num of objects " +
+                                      std::to_string(num_objects) +
+                                      " is the same as objects_accum."));
 
   auto warmup_data = std::make_shared<std::vector<PaddleTensor>>(4);
   (*warmup_data)[0] = std::move(images);
@@ -266,13 +270,16 @@ TEST(Analyzer_int8_mobilenet_ssd, quantization) {
       GetWarmupData(input_slots_all);
 
   // configure quantizer
-  q_cfg.EnableMkldnnQuantizer();
-  q_cfg.mkldnn_quantizer_config();
-  std::unordered_set<std::string> quantize_operators(
-      {"conv2d", "depthwise_conv2d", "prior_box", "transpose2", "reshape2"});
-  q_cfg.mkldnn_quantizer_config()->SetEnabledOpTypes(quantize_operators);
-  q_cfg.mkldnn_quantizer_config()->SetWarmupData(warmup_data);
-  q_cfg.mkldnn_quantizer_config()->SetWarmupBatchSize(FLAGS_warmup_batch_size);
+  if (FLAGS_enable_mkldnn) {
+    q_cfg.EnableMkldnnQuantizer();
+    q_cfg.mkldnn_quantizer_config();
+    std::unordered_set<std::string> quantize_operators(
+        {"conv2d", "depthwise_conv2d", "prior_box", "transpose2", "reshape2"});
+    q_cfg.mkldnn_quantizer_config()->SetEnabledOpTypes(quantize_operators);
+    q_cfg.mkldnn_quantizer_config()->SetWarmupData(warmup_data);
+    q_cfg.mkldnn_quantizer_config()->SetWarmupBatchSize(
+        FLAGS_warmup_batch_size);
+  }
 
   // 0 is avg_cost, 1 is top1_acc, 2 is top5_acc or mAP
   CompareQuantizedAndAnalysis(&cfg, &q_cfg, input_slots_all, 2);

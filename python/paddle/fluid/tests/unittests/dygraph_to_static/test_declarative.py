@@ -14,12 +14,13 @@
 
 import numpy as np
 import unittest
-
+import os
+import tempfile
 import paddle
 import paddle.fluid as fluid
 from paddle.static import InputSpec
 from paddle.fluid.dygraph import to_variable, declarative, ProgramTranslator, Layer, jit
-from paddle.fluid.dygraph.dygraph_to_static.program_translator import ConcreteProgram, StaticLayer
+from paddle.fluid.dygraph.dygraph_to_static.program_translator import ConcreteProgram, StaticFunction
 
 from test_basic_api_transformation import dyfunc_to_variable
 
@@ -81,14 +82,14 @@ class SimpleNet(Layer):
         return z
 
 
-class TestStaticLayerInstance(unittest.TestCase):
+class TestStaticFunctionInstance(unittest.TestCase):
     def test_instance_same_class(self):
         with fluid.dygraph.guard(fluid.CPUPlace()):
             net_1 = SimpleNet()
             net_2 = SimpleNet()
 
-            self.assertTrue(isinstance(net_1.forward, StaticLayer))
-            self.assertTrue(isinstance(net_2.forward, StaticLayer))
+            self.assertTrue(isinstance(net_1.forward, StaticFunction))
+            self.assertTrue(isinstance(net_2.forward, StaticFunction))
             self.assertNotEqual(net_1.forward, net_2.forward)
 
             # convert layer into static progam of net_1
@@ -100,7 +101,11 @@ class TestStaticLayerInstance(unittest.TestCase):
 
 class TestInputSpec(unittest.TestCase):
     def setUp(self):
-        pass
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.model_path = os.path.join(self.temp_dir.name, 'simple_net')
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
     def test_with_input_spec(self):
         with fluid.dygraph.guard(fluid.CPUPlace()):
@@ -115,8 +120,9 @@ class TestInputSpec(unittest.TestCase):
             self.assertTrue(len(net.forward.program_cache) == 1)
 
             # 2. test save load
-            jit.save(net, './simple_net')
-            infer_net = fluid.dygraph.jit.load('./simple_net')
+            net.inner_function(x)
+            jit.save(net, self.model_path)
+            infer_net = fluid.dygraph.jit.load(self.model_path)
             pred = infer_net(x)
             self.assertTrue(np.allclose(out.numpy(), pred.numpy()))
 
@@ -213,6 +219,7 @@ class TestDifferentInputSpecCacheProgram(unittest.TestCase):
             self.assertTrue(np.allclose(x_data + y_data, out_1.numpy()))
             self.assertTrue(len(foo.program_cache) == 1)
             self.assertTrue(len(foo.program_cache.concrete_programs()) == 1)
+            first_program = foo.program_cache.last()
 
             # [16, 10] + [10] (numpy)
             out_2 = foo(to_variable(x_data), y_data)
@@ -230,6 +237,11 @@ class TestDifferentInputSpecCacheProgram(unittest.TestCase):
             self.assertTrue(np.allclose(x_data + z_data, out_4.numpy()))
             # create a new program
             self.assertTrue(len(foo.program_cache) == 2)
+
+            # test for recent program
+            foo(to_variable(x_data), y_data)
+            recent_program = foo.program_cache.last()
+            self.assertTrue(first_program == recent_program)
 
     def test_get_concrete_program(self):
 
@@ -263,8 +275,9 @@ class TestDifferentInputSpecCacheProgram(unittest.TestCase):
             concrete_program_5 = foo.get_concrete_program(InputSpec([10]))
 
         # 6. specific unknown kwargs `e`=4
-        concrete_program_5 = foo.get_concrete_program(
-            InputSpec([10]), InputSpec([10]), e=4)
+        with self.assertRaises(TypeError):
+            concrete_program_5 = foo.get_concrete_program(
+                InputSpec([10]), InputSpec([10]), e=4)
 
     def test_concrete_program(self):
         with fluid.dygraph.guard(fluid.CPUPlace()):
@@ -330,6 +343,127 @@ class TestDeclarativeAPI(unittest.TestCase):
             # AssertionError: We Only support to_variable in imperative mode,
             #  please use fluid.dygraph.guard() as context to run it in imperative Mode
             func(np.ones(5).astype("int32"))
+
+
+class TestDecorateModelDirectly(unittest.TestCase):
+    def setUp(self):
+        paddle.disable_static()
+        program_trans.enable(True)
+        self.x = to_variable(np.ones([4, 10]).astype('float32'))
+
+    def test_fake_input(self):
+        net = SimpleNet()
+        net = declarative(net)
+        y = net(self.x)
+        self.assertTrue(len(net.forward.program_cache) == 1)
+
+    def test_input_spec(self):
+        net = SimpleNet()
+        net = declarative(net, input_spec=[InputSpec([None, 8, 10])])
+        self.assertTrue(len(net.forward.inputs) == 1)
+        self.assertTrue(len(net.forward.program_cache) == 1)
+        input_shape = net.forward.inputs[0].shape
+        self.assertListEqual(list(input_shape), [-1, 8, 10])
+
+        # redecorate
+        net = declarative(net, input_spec=[InputSpec([None, 16, 10])])
+        input_shape = net.forward.inputs[0].shape
+        self.assertListEqual(list(input_shape), [-1, 16, 10])
+
+
+class TestErrorWithInitFromStaticMode(unittest.TestCase):
+    def test_raise_error(self):
+        # disable imperative
+        paddle.enable_static()
+
+        net = SimpleNet()
+        with self.assertRaisesRegexp(RuntimeError,
+                                     "only available in dynamic mode"):
+            net.forward.concrete_program
+
+        with self.assertRaisesRegexp(RuntimeError,
+                                     "only available in dynamic mode"):
+            net.forward.inputs
+
+        with self.assertRaisesRegexp(RuntimeError,
+                                     "only available in dynamic mode"):
+            net.forward.outputs
+
+
+class CallNonForwardFuncNet(paddle.nn.Layer):
+    def __init__(self):
+        super(CallNonForwardFuncNet, self).__init__()
+        self.sub = CallNonForwardFuncSubNet()
+
+    @paddle.jit.to_static
+    def forward(self):
+        return self.sub.func()
+
+
+class CallNonForwardFuncSubNet(paddle.nn.Layer):
+    def __init__(self):
+        super(CallNonForwardFuncSubNet, self).__init__()
+        self.a = paddle.to_tensor([1, 2])
+
+    def func(self):
+        x = self.a * 2
+        return x
+
+
+class TestCallNonForwardFunc(unittest.TestCase):
+    def test_call_non_forward(self):
+        paddle.disable_static()
+        net = CallNonForwardFuncNet()
+        out = net()
+        self.assertEqual(out.numpy().tolist(), [2, 4])
+        paddle.enable_static()
+
+
+class SetBuffersNet1(paddle.nn.Layer):
+    def __init__(self):
+        super(SetBuffersNet1, self).__init__()
+        self.a = paddle.to_tensor([1])
+
+    @paddle.jit.to_static
+    def forward(self):
+        self.a = self.a + 1
+        return self.a
+
+
+class SetBuffersNet2(paddle.nn.Layer):
+    def __init__(self):
+        super(SetBuffersNet2, self).__init__()
+        self.b = paddle.to_tensor([2])
+
+    @paddle.jit.to_static
+    def forward(self):
+        self.b = None
+        self.b = paddle.to_tensor([3])
+        return self.b
+
+
+class TestSetBuffers(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.model_path = os.path.join(self.temp_dir.name, 'SetBuffersNet1')
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_set_buffers1(self):
+        paddle.disable_static()
+        net = SetBuffersNet1()
+        out = net()
+        self.assertEqual(out.numpy().tolist(), [2])
+        paddle.jit.save(net, self.model_path)
+        paddle.enable_static()
+
+    def test_set_buffers2(self):
+        paddle.disable_static()
+        net = SetBuffersNet2()
+        with self.assertRaises(RuntimeError):
+            out = net()
+        paddle.enable_static()
 
 
 if __name__ == '__main__':

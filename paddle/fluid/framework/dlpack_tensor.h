@@ -15,6 +15,7 @@
 #pragma once
 
 #include <dlpack/dlpack.h>
+
 #include "paddle/fluid/framework/tensor.h"
 
 namespace paddle {
@@ -33,7 +34,7 @@ class DLPackTensor {
 
   inline operator ::DLTensor&() { return t_; }
 
-  ::DLManagedTensor* ToCudfCompatibleDLManagedTensor();
+  ::DLManagedTensor* ToDLManagedTensor();
 
  private:
   ::DLTensor t_;

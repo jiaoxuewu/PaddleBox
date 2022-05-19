@@ -18,10 +18,11 @@ import unittest
 import numpy as np
 import math
 from op_test import OpTest
+import paddle
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 import paddle.fluid.framework as framework
-from paddle.fluid.framework import Program, program_guard
+from paddle.fluid.framework import Program, program_guard, _test_eager_guard
 
 
 class TestOneHotOp(OpTest):
@@ -44,7 +45,7 @@ class TestOneHotOp(OpTest):
         self.outputs = {'Out': (out, x_lod)}
 
     def test_check_output(self):
-        self.check_output(check_dygraph=False)
+        self.check_output()
 
 
 class TestOneHotOp_attr(OpTest):
@@ -67,7 +68,7 @@ class TestOneHotOp_attr(OpTest):
         self.outputs = {'Out': (out, x_lod)}
 
     def test_check_output(self):
-        self.check_output(check_dygraph=False)
+        self.check_output()
 
 
 class TestOneHotOp_default_dtype(OpTest):
@@ -90,7 +91,7 @@ class TestOneHotOp_default_dtype(OpTest):
         self.outputs = {'Out': (out, x_lod)}
 
     def test_check_output(self):
-        self.check_output(check_dygraph=False)
+        self.check_output()
 
 
 class TestOneHotOp_default_dtype_attr(OpTest):
@@ -113,25 +114,7 @@ class TestOneHotOp_default_dtype_attr(OpTest):
         self.outputs = {'Out': (out, x_lod)}
 
     def test_check_output(self):
-        self.check_output(check_dygraph=False)
-
-
-class TestOneHotOp_out_of_range(OpTest):
-    def setUp(self):
-        self.op_type = 'one_hot_v2'
-        depth = 10
-        x_lod = [[4, 1, 3, 3]]
-        x = [np.random.choice([-1, depth]) for i in range(sum(x_lod[0]))]
-        x = np.array(x).astype('int32').reshape([sum(x_lod[0])])
-
-        out = np.zeros(shape=(np.product(x.shape), depth)).astype('float32')
-
-        self.inputs = {'X': (x, x_lod)}
-        self.attrs = {'depth': depth, 'allow_out_of_range': True}
-        self.outputs = {'Out': (out, x_lod)}
-
-    def test_check_output(self):
-        self.check_output(check_dygraph=False)
+        self.check_output()
 
 
 class TestOneHotOp_exception(unittest.TestCase):
@@ -169,7 +152,7 @@ class TestOneHotOp_exception(unittest.TestCase):
                         fetch_list=[one_hot_out],
                         return_numpy=False)
 
-            self.assertRaises(core.EnforceNotMet, run)
+            self.assertRaises(ValueError, run)
 
 
 class TestOneHotOpApi(unittest.TestCase):
@@ -188,6 +171,12 @@ class TestOneHotOpApi(unittest.TestCase):
         with fluid.dygraph.guard():
             one_hot_label = fluid.one_hot(
                 input=fluid.dygraph.to_variable(label), depth=depth)
+
+            one_hot_label = paddle.nn.functional.one_hot(
+                fluid.dygraph.to_variable(label), depth)
+            with _test_eager_guard():
+                one_hot_label = paddle.nn.functional.one_hot(
+                    paddle.to_tensor(label), depth)
 
     def _run(self, depth):
         label = fluid.layers.data(name="label", shape=[1], dtype="int64")
@@ -220,4 +209,5 @@ class BadInputTestOnehotV2(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

@@ -27,6 +27,8 @@ from paddle.fluid.framework import IrGraph
 from paddle.fluid.contrib.slim.quantization import Quant2Int8MkldnnPass
 from paddle.fluid import core
 
+paddle.enable_static()
+
 logging.basicConfig(format='%(asctime)s-%(levelname)s: %(message)s')
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
@@ -224,10 +226,7 @@ class Quant2Int8ImageClassificationComparisonTest(unittest.TestCase):
                 if iters == skip_batch_num:
                     total_samples = 0
                     infer_start_time = time.time()
-                if six.PY2:
-                    images = map(lambda x: x[0].reshape(dshape), data)
-                if six.PY3:
-                    images = list(map(lambda x: x[0].reshape(dshape), data))
+                images = list(map(lambda x: x[0].reshape(dshape), data))
                 images = np.array(images).astype('float32')
                 labels = np.array([x[1] for x in data]).astype('int64')
 

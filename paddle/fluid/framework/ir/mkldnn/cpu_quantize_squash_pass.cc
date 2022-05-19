@@ -14,9 +14,10 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/ir/mkldnn/cpu_quantize_squash_pass.h"
-#include <algorithm>
+
 #include <string>
 #include <vector>
+
 #include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/string/pretty_log.h"
 
@@ -25,6 +26,60 @@ namespace framework {
 namespace ir {
 
 using string::PrettyLogDetail;
+
+CPUQuantizeSquashPass::CPUQuantizeSquashPass() {
+  AddOpCompat(OpCompat("scale"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("bias")
+      .IsNumEQ(0.0f)
+      .End()
+      .AddAttr("scale")
+      .IsNumGT(0.0f)
+      .End()
+      .AddAttr("bias_after_scale")  // bias equal to 0.0, so this attribute is
+                                    // unconstrained.
+      .End();
+
+  AddOpCompat(OpCompat("conv2d"))
+      .AddInput("Input")
+      .IsTensor()
+      .End()
+      .AddInput("Filter")
+      .IsTensor()
+      .End()
+      .AddInput("Bias")
+      .IsTensor()
+      .End()
+      .AddInput("ResidualData")
+      .IsTensor()
+      .IsOptional()
+      .End()
+      .AddOutput("Output")
+      .IsTensor()
+      .End()
+      .AddAttr("strides")
+      .End()
+      .AddAttr("paddings")
+      .End()
+      .AddAttr("padding_algorithm")
+      .IsOptional()
+      .IsStringIn({"EXPLICIT", "SAME", "VALID"})
+      .End()
+      .AddAttr("groups")
+      .IsNumGE(1)
+      .End()
+      .AddAttr("dilations")
+      .End()
+      .AddAttr("data_format")
+      .IsOptional()
+      .IsStringIn({"NCHW", "NHWC", "AnyLayout"})
+      .End();
+}
 
 void CPUQuantizeSquashPass::FindNodesToKeep(
     Graph* graph,
@@ -49,6 +104,55 @@ void CPUQuantizeSquashPass::FindNodesToKeep(
   AddStatis(found_count);
 }
 
+bool CPUQuantizeSquashPass::IsDequantizeInputUint8(
+    const Node* dequant_in) const {
+  PADDLE_ENFORCE_EQ(
+      dequant_in->inputs.size(), 1,
+      platform::errors::InvalidArgument(
+          "Dequantize (id: %f) should have only one input.", dequant_in->id()));
+  if (dequant_in->inputs[0]->IsOp()) {
+    auto prev_op = dequant_in->inputs[0]->Op();
+    std::string act_name;
+    if (prev_op->Type() == "relu") {
+      return true;
+    } else {
+      if (prev_op->Type() == "conv2d") {
+        act_name = "fuse_activation";
+      } else if (prev_op->Type() == "fc") {
+        act_name = "activation_type";
+      }
+      if (!act_name.empty()) {
+        auto act = prev_op->GetAttrIfExists<std::string>(act_name);
+        if (act == "relu" || act == "relu6") {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool CPUQuantizeSquashPass::IsDequantizeQuantizeIncompatible(
+    Node* quant_op, Node* dequant_in, Node* next_op) const {
+  bool is_concat_signed =
+      quant_op->Op()->GetAttrIfExists<bool>("is_negative_input");
+  bool is_input_unsigned = IsDequantizeInputUint8(dequant_in);
+  /* TODO(sfraczek): remove elementwise from this condition when BinaryMKLDNN
+   kernel will support two different input data types */
+  bool is_next_op_concat_or_elementwise =
+      next_op->Op()->Type() == "concat" ||
+      next_op->Op()->Type().find("elementwise") == 0;
+  if (is_next_op_concat_or_elementwise && is_concat_signed &&
+      is_input_unsigned) {
+    VLOG(4) << "Do not squash dequant-quant, because "
+            << "next_op is: " << next_op->Op()->Type()
+            << ", is_concat_signed: " << is_concat_signed
+            << ", is_input_unsigned: " << is_input_unsigned << ".";
+    return true;
+  }
+  return false;
+}
+
 void CPUQuantizeSquashPass::DequantQuantSquash(
     Graph* graph,
     std::unordered_map<const Node*, int>* nodes_keep_counter) const {
@@ -68,11 +172,17 @@ void CPUQuantizeSquashPass::DequantQuantSquash(
     GET_IR_NODE_FROM_SUBGRAPH(quant_out, quant_out, squash_pattern);
     GET_IR_NODE_FROM_SUBGRAPH(next_op, next_op, squash_pattern);
 
+    if (IsDequantizeQuantizeIncompatible(quant_op, dequant_in, next_op)) {
+      return;
+    }
+
     auto* next_op_desc = next_op->Op();
     float dequant_scale =
         BOOST_GET_CONST(float, dequant_op->Op()->GetAttr("Scale"));
     float quant_scale =
         BOOST_GET_CONST(float, quant_op->Op()->GetAttr("Scale"));
+    float dequant_shift = dequant_op->Op()->GetAttrIfExists<float>("Shift");
+    float quant_shift = quant_op->Op()->GetAttrIfExists<float>("Shift");
     PADDLE_ENFORCE_NE(
         nodes_keep_counter->find(dequant_out), nodes_keep_counter->end(),
         platform::errors::NotFound("The dequant output node is not found."));
@@ -80,7 +190,7 @@ void CPUQuantizeSquashPass::DequantQuantSquash(
     // check if dequantize op should be kept or removed, decrease the counter
     bool keep_dequant = (*nodes_keep_counter)[dequant_out]-- > 1;
 
-    if (dequant_scale == quant_scale) {
+    if (dequant_scale == quant_scale && dequant_shift == quant_shift) {
       // squash dequantize-quantize to nothing
       auto quant_out_var_name = quant_out->Name();
       auto next_op_inputs = next_op_desc->InputNames();
@@ -107,7 +217,9 @@ void CPUQuantizeSquashPass::DequantQuantSquash(
       desc.SetInput("Input", std::vector<std::string>({dequant_in->Name()}));
       desc.SetOutput("Output", std::vector<std::string>({quant_out->Name()}));
       desc.SetAttr("Scale_in", dequant_scale);
+      desc.SetAttr("Shift_in", dequant_shift);
       desc.SetAttr("Scale_out", quant_scale);
+      desc.SetAttr("Shift_out", quant_shift);
 
       auto requant_op = g->CreateOpNode(&desc);
 
@@ -248,14 +360,21 @@ void CPUQuantizeSquashPass::OpDequantSquash(Graph* graph) const {
     GET_IR_NODE_FROM_SUBGRAPH(dequant_out, dequant_out, op_dequant_pattern);
 
     if (dequant_in->outputs.size() == 1) {
-      auto output_name = "Out";
-      if (any_op->Op()->Type() == "conv2d") {
+      if (any_op->Op()->Type() == "conv2d" ||
+          any_op->Op()->Type() == "conv2d_transpose") {
         // do not squash if fuse residual connection is true
         // because residual fusion does not support force output with fp32
         if (any_op->Op()->GetAttrIfExists<bool>("fuse_residual_connection"))
           return;
-        output_name = "Output";
       }
+      // Find the name of the output linking any_op to dequant_in
+      std::string output_name;
+      for (auto name : any_op->Op()->OutputNames())
+        for (auto out_name : any_op->Op()->Output(name))
+          if (out_name == dequant_in->Name()) output_name = name;
+
+      if (output_name.empty()) return;
+
       any_op->Op()->SetAttr("force_fp32_output", true);
       any_op->Op()->SetOutput(output_name,
                               std::vector<std::string>({dequant_out->Name()}));
@@ -290,6 +409,7 @@ void CPUQuantizeSquashPass::MultipleQuantizeSquash(Graph* graph) const {
         }));
     auto* first_quant_out = first_quant_op->outputs[0];
     float scale = first_quant_op->Op()->GetAttrIfExists<float>("Scale");
+    float shift = first_quant_op->Op()->GetAttrIfExists<float>("Shift");
 
     PADDLE_ENFORCE_NE(scale, 0,
                       platform::errors::InvalidArgument(
@@ -299,7 +419,8 @@ void CPUQuantizeSquashPass::MultipleQuantizeSquash(Graph* graph) const {
       auto quant_op = prev_out->outputs[iter];
       if (quant_op->IsOp() && quant_op->Op()->Type() == "quantize" &&
           quant_op->id() != first_quant_op->id() &&
-          quant_op->Op()->GetAttrIfExists<float>("Scale") == scale) {
+          quant_op->Op()->GetAttrIfExists<float>("Scale") == scale &&
+          quant_op->Op()->GetAttrIfExists<float>("Shift") == shift) {
         auto quant_out = quant_op->outputs[0];
         auto last_op = quant_out->outputs[0];
 
@@ -313,9 +434,17 @@ void CPUQuantizeSquashPass::MultipleQuantizeSquash(Graph* graph) const {
             platform::errors::NotFound("Operator after quantize operator(%s) "
                                        "should has quantize output as input.",
                                        quant_out->Name()));
-        last_op->Op()->SetInput(
-            last_op_input_name,
-            std::vector<std::string>({first_quant_out->Name()}));
+
+        // update the next operator input,
+        // by replacing quant_out with first_quant_out
+        auto last_op_names = last_op->Op()->Input(last_op_input_name);
+        last_op_names.erase(std::remove(last_op_names.begin(),
+                                        last_op_names.end(), quant_out->Name()),
+                            last_op_names.end());
+        last_op_names.push_back(first_quant_out->Name());
+        last_op->Op()->SetInput(last_op_input_name,
+                                std::vector<std::string>(last_op_names));
+
         IR_NODE_LINK_TO(first_quant_out, last_op);
         GraphSafeRemoveNodes(graph, {quant_op, quant_out});
         removed_quantize++;
@@ -338,6 +467,10 @@ void CPUQuantizeSquashPass::DequantScaleSquash(Graph* graph) const {
   int found_dequant_scale_squash_count = 0;
   auto handler = [&](const GraphPatternDetector::subgraph_t& subgraph,
                      Graph* g) {
+    if (!IsCompat(subgraph, g)) {
+      LOG(WARNING) << "Pass in op compat failed.";
+      return;
+    }
     VLOG(4) << "squash dequant-scale ops pair";
 
     GET_IR_NODE_FROM_SUBGRAPH(dequant_op, dequant_op, dequant_scale_pattern);
@@ -346,18 +479,19 @@ void CPUQuantizeSquashPass::DequantScaleSquash(Graph* graph) const {
     GET_IR_NODE_FROM_SUBGRAPH(scale_out, scale_out, dequant_scale_pattern);
 
     if (dequant_out->outputs.size() == 1 &&
-        scale_op->Op()->GetAttrIfExists<float>("bias") == 0.0) {
+        BOOST_GET_CONST(float, scale_op->Op()->GetAttr("bias")) == 0.0f) {
       auto dequant_scale = dequant_op->Op()->GetAttrIfExists<float>("Scale");
-      auto scale_scale = scale_op->Op()->GetAttrIfExists<float>("scale");
+      float scale_scale =
+          BOOST_GET_CONST(float, scale_op->Op()->GetAttr("scale"));
 
       PADDLE_ENFORCE_GT(dequant_scale, 0.0f,
                         platform::errors::InvalidArgument(
                             "Dequantize scale(%f) should have positive value.",
                             dequant_scale));
-      PADDLE_ENFORCE_GT(scale_scale, 0.0f,
-                        platform::errors::InvalidArgument(
-                            "Scale(%f) of scale op should have positive value.",
-                            scale_scale));
+      PADDLE_ENFORCE_NE(
+          scale_scale, 0.0f,
+          platform::errors::InvalidArgument(
+              "Scale(%f) should have a non-zero value", scale_scale));
 
       dequant_op->Op()->SetAttr("Scale", dequant_scale / scale_scale);
       dequant_op->Op()->SetOutput(
@@ -369,8 +503,94 @@ void CPUQuantizeSquashPass::DequantScaleSquash(Graph* graph) const {
   };
   gpd(graph, handler);
   AddStatis(found_dequant_scale_squash_count);
-  PrettyLogDetail("---    squashed %d scale with dequant",
+  PrettyLogDetail("---    squashed %d scale with dequantize op",
                   found_dequant_scale_squash_count);
+}
+
+// squash scale with quantize
+void CPUQuantizeSquashPass::ScaleQuantSquash(Graph* graph) const {
+  GraphPatternDetector gpd;
+  patterns::ScaleQuant scale_quant_pattern{gpd.mutable_pattern(),
+                                           "scale_quant"};
+  scale_quant_pattern();
+
+  int found_scale_quant_squash_count = 0;
+  auto handler = [&](const GraphPatternDetector::subgraph_t& subgraph,
+                     Graph* g) {
+    if (!IsCompat(subgraph, g)) {
+      LOG(WARNING) << "Pass in op compat failed.";
+      return;
+    }
+    VLOG(4) << "squash scale-quant ops pair";
+
+    GET_IR_NODE_FROM_SUBGRAPH(scale_in, scale_in, scale_quant_pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(scale_op, scale_op, scale_quant_pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(quant_in, quant_in, scale_quant_pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(quant_op, quant_op, scale_quant_pattern);
+
+    if (quant_in->outputs.size() == 1 &&
+        BOOST_GET_CONST(float, scale_op->Op()->GetAttr("bias")) == 0.0f) {
+      auto quant_scale = quant_op->Op()->GetAttrIfExists<float>("Scale");
+      float scale_scale =
+          BOOST_GET_CONST(float, scale_op->Op()->GetAttr("scale"));
+
+      PADDLE_ENFORCE_GT(
+          quant_scale, 0.0f,
+          platform::errors::InvalidArgument(
+              "Quantize scale(%f) should have positive value.", quant_scale));
+      PADDLE_ENFORCE_NE(
+          scale_scale, 0.0f,
+          platform::errors::InvalidArgument(
+              "Scale(%f) should have a non-zero value", scale_scale));
+
+      quant_op->Op()->SetAttr("Scale", quant_scale * scale_scale);
+      quant_op->Op()->SetInput("Input",
+                               std::vector<std::string>({scale_in->Name()}));
+      IR_NODE_LINK_TO(scale_in, quant_op);
+      GraphSafeRemoveNodes(graph, {scale_op, quant_in});
+      found_scale_quant_squash_count++;
+    }
+  };
+  gpd(graph, handler);
+  AddStatis(found_scale_quant_squash_count);
+  PrettyLogDetail("---    squashed %d scale with quantize op",
+                  found_scale_quant_squash_count);
+}
+
+// squash quantize if is before bfloat16 conv2d
+void CPUQuantizeSquashPass::QuantizeBf16Conv(Graph* graph) const {
+  GraphPatternDetector gpd;
+  patterns::QuantConv pattern{gpd.mutable_pattern(), "quant_conv"};
+  pattern();
+
+  int found_quant_conv_squash_count = 0;
+  auto handler = [&](const GraphPatternDetector::subgraph_t& subgraph,
+                     Graph* g) {
+    if (!IsCompat(subgraph, g)) {
+      LOG(WARNING) << "Pass in op compat failed.";
+      return;
+    }
+
+    VLOG(4) << "squash quant-conv2d ops pair";
+
+    GET_IR_NODE_FROM_SUBGRAPH(quant_in, quant_in, pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(quant_op, quant_op, pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(conv_in, conv_in, pattern);
+    GET_IR_NODE_FROM_SUBGRAPH(conv_op, conv_op, pattern);
+
+    if (conv_in->outputs.size() == 1 &&
+        quant_op->Op()->GetAttrIfExists<float>("Scale") == 1.0) {
+      conv_op->Op()->SetInput("Input",
+                              std::vector<std::string>({quant_in->Name()}));
+      IR_NODE_LINK_TO(quant_in, conv_op);
+      GraphSafeRemoveNodes(graph, {quant_op, conv_in});
+      found_quant_conv_squash_count++;
+    }
+  };
+  gpd(graph, handler);
+  AddStatis(found_quant_conv_squash_count);
+  PrettyLogDetail("---    squashed %d quantize with bfloat16 conv2d op",
+                  found_quant_conv_squash_count);
 }
 
 void CPUQuantizeSquashPass::ApplyImpl(ir::Graph* graph) const {
@@ -380,6 +600,8 @@ void CPUQuantizeSquashPass::ApplyImpl(ir::Graph* graph) const {
           "The graph in function CPUQuantizeSquashPass::ApplyImpl is null."));
   FusePassBase::Init("cpu_quantize_squash_pass", graph);
 
+  DequantScaleSquash(graph);
+  ScaleQuantSquash(graph);
   std::unordered_map<const Node*, int> nodes_keep_counter;
   FindNodesToKeep(graph, &nodes_keep_counter);
   DequantQuantSquash(graph, &nodes_keep_counter);
@@ -387,7 +609,7 @@ void CPUQuantizeSquashPass::ApplyImpl(ir::Graph* graph) const {
   RequantOpSquash(graph);
   OpDequantSquash(graph);
   MultipleQuantizeSquash(graph);
-  DequantScaleSquash(graph);
+  QuantizeBf16Conv(graph);
 }
 
 }  // namespace ir

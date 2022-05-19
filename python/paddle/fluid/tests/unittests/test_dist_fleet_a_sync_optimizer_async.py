@@ -18,6 +18,9 @@ import unittest
 
 import paddle
 import paddle.distributed.fleet.base.role_maker as role_maker
+import paddle.fluid.transpiler.details.program_utils as pu
+
+paddle.enable_static()
 
 
 class TestFleetGradientMergeMetaOptimizer(unittest.TestCase):
@@ -42,25 +45,22 @@ class TestFleetGradientMergeMetaOptimizer(unittest.TestCase):
         paddle.fluid.framework.switch_startup_program(startup_program)
 
         fleet.init(role_maker.PaddleCloudRoleMaker())
-        input_x = paddle.fluid.layers.data(
-            name="x", shape=[32], dtype='float32')
-        input_y = paddle.fluid.layers.data(name="y", shape=[1], dtype='int64')
 
-        fc_1 = paddle.fluid.layers.fc(input=input_x, size=64, act='tanh')
-        fc_2 = paddle.fluid.layers.fc(input=fc_1, size=64, act='tanh')
-        prediction = paddle.fluid.layers.fc(input=[fc_2], size=2, act='softmax')
-        cost = paddle.fluid.layers.cross_entropy(
-            input=prediction, label=input_y)
-        avg_cost = paddle.fluid.layers.mean(x=cost)
+        x = paddle.fluid.layers.data(name='x', shape=[1], dtype='float32')
+        y = paddle.fluid.layers.data(name='y', shape=[1], dtype='float32')
+        cost = paddle.fluid.layers.square_error_cost(input=x, label=y)
+        avg_cost = paddle.fluid.layers.mean(cost)
 
         strategy = paddle.distributed.fleet.DistributedStrategy()
-        strategy.a_sync = True
+        strategy.a_sync = False
+        strategy.a_sync_configs = {"launch_barrier": False}
+
         optimizer = paddle.fluid.optimizer.SGD(learning_rate=0.01)
         optimizer = fleet.distributed_optimizer(optimizer, strategy=strategy)
         optimizer.minimize(avg_cost)
 
         prog = paddle.fluid.default_main_program()
-        self.assertNotEqual(prog.global_block().ops[-1].type, "send_barrier")
+        self.assertEqual(prog.global_block().ops[-1].type, "send_barrier")
 
         sends = 0
         sgds = 0
@@ -69,12 +69,8 @@ class TestFleetGradientMergeMetaOptimizer(unittest.TestCase):
                 sends += 1
             if op.type == "sgd":
                 sgds += 1
-        self.assertEqual(sends, 7)
+        self.assertEqual(sends, 0)
         self.assertEqual(sgds, 0)
-
-        fleet.init_worker()
-        time.sleep(8)
-        fleet.stop_worker()
 
     def test_a_sync_optimizer_pserver(self):
         os.environ["TRAINING_ROLE"] = "PSERVER"
@@ -87,25 +83,19 @@ class TestFleetGradientMergeMetaOptimizer(unittest.TestCase):
         paddle.fluid.framework.switch_startup_program(startup_program)
 
         fleet.init(role_maker.PaddleCloudRoleMaker())
-        input_x = paddle.fluid.layers.data(
-            name="x", shape=[32], dtype='float32')
-        input_y = paddle.fluid.layers.data(name="y", shape=[1], dtype='int64')
 
-        fc_1 = paddle.fluid.layers.fc(input=input_x, size=64, act='tanh')
-        fc_2 = paddle.fluid.layers.fc(input=fc_1, size=64, act='tanh')
-        prediction = paddle.fluid.layers.fc(input=[fc_2], size=2, act='softmax')
-        cost = paddle.fluid.layers.cross_entropy(
-            input=prediction, label=input_y)
-        avg_cost = paddle.fluid.layers.mean(x=cost)
+        x = paddle.fluid.layers.data(name='x', shape=[1], dtype='float32')
+        y = paddle.fluid.layers.data(name='y', shape=[1], dtype='float32')
+        cost = paddle.fluid.layers.square_error_cost(input=x, label=y)
+        avg_cost = paddle.fluid.layers.mean(cost)
 
         strategy = paddle.distributed.fleet.DistributedStrategy()
         strategy.a_sync = True
+        strategy.a_sync_configs = {"launch_barrier": False}
         optimizer = paddle.fluid.optimizer.SGD(learning_rate=0.01)
         optimizer = fleet.distributed_optimizer(optimizer, strategy=strategy)
         optimizer.minimize(avg_cost)
 
-        prog = paddle.fluid.default_main_program()
-        self.assertEqual(prog.global_block().ops[0].type, "listen_and_serv")
         fleet.init_server()
 
 

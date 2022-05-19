@@ -16,6 +16,16 @@ limitations under the License. */
 #include "paddle/fluid/inference/tensorrt/plugin/hard_swish_op_plugin.h"
 
 namespace paddle {
+namespace framework {
+class Scope;
+
+namespace proto {
+class OpDesc;
+}  // namespace proto
+}  // namespace framework
+}  // namespace paddle
+
+namespace paddle {
 namespace inference {
 namespace tensorrt {
 
@@ -31,17 +41,7 @@ class HardSwishOpConverter : public OpConverter {
     framework::OpDesc op_desc(op, nullptr);
     // Declare inputs
     int input_num = op_desc.Input("X").size();
-    PADDLE_ENFORCE_EQ(
-        input_num, 1,
-        platform::errors::InvalidArgument(
-            "HardSwish op has only 1 input, but got %d", input_num));
     auto* input = engine_->GetITensor(op_desc.Input("X")[0]);
-    // Get output
-    size_t output_num = op_desc.Output("Out").size();
-    PADDLE_ENFORCE_EQ(
-        output_num, 1,
-        platform::errors::InvalidArgument(
-            "HardSwish op has only 1 output, but got %d", output_num));
 
     const float threshold =
         op_desc.HasAttr("threshold")
@@ -53,13 +53,33 @@ class HardSwishOpConverter : public OpConverter {
     const float offset = op_desc.HasAttr("offset")
                              ? BOOST_GET_CONST(float, op_desc.GetAttr("offset"))
                              : 3.0f;
-
     nvinfer1::ILayer* layer = nullptr;
-
-    plugin::HardSwishPlugin* plugin =
-        new plugin::HardSwishPlugin(threshold, scale, offset);
-    layer = engine_->AddPlugin(&input, input_num, plugin);
-
+    if (threshold == scale) {
+      auto* hsig_layer = TRT_ENGINE_ADD_LAYER(
+          engine_, Activation, *input, nvinfer1::ActivationType::kHARD_SIGMOID);
+      hsig_layer->setAlpha(1.0 / scale);
+      hsig_layer->setBeta(offset / scale);
+      nvinfer1::IElementWiseLayer* eltwise_layer = TRT_ENGINE_ADD_LAYER(
+          engine_, ElementWise, *input, *(hsig_layer->getOutput(0)),
+          nvinfer1::ElementWiseOperation::kPROD);
+      layer = eltwise_layer;
+    } else {
+      if (engine_->with_dynamic_shape()) {
+#if IS_TRT_VERSION_GE(6000)
+        plugin::HardSwishPluginDynamic* plugin =
+            new plugin::HardSwishPluginDynamic(threshold, scale, offset);
+        layer = engine_->AddDynamicPlugin(&input, input_num, plugin);
+#else
+        PADDLE_THROW(platform::errors::Fatal(
+            "You are running the TRT Dynamic Shape mode, need to confirm that "
+            "your TRT version is no less than 6.0"));
+#endif
+      } else {
+        plugin::HardSwishPlugin* plugin =
+            new plugin::HardSwishPlugin(threshold, scale, offset);
+        layer = engine_->AddPlugin(&input, input_num, plugin);
+      }
+    }
     auto output_name = op_desc.Output("Out")[0];
     RreplenishLayerAndOutput(layer, "hard_swish", {output_name}, test_mode);
   }

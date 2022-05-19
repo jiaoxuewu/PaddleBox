@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paddle/fluid/framework/framework.pb.h"
+#include "paddle/fluid/framework/convert_utils.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/reader.h"
-#include "paddle/fluid/platform/profiler.h"
+#include "paddle/fluid/platform/profiler/event_tracing.h"
 
 namespace paddle {
 namespace operators {
@@ -106,7 +106,8 @@ class ReadOp : public framework::OperatorBase {
     std::vector<framework::LoDTensor> ins;
 
     // For profiling
-    platform::RecordEvent record_event(Type());
+    platform::RecordEvent record_event(
+        Type().c_str(), platform::TracerEventType::UserDefined, 1);
 
     reader->ReadNext(&ins);
     if (ins.empty()) {
@@ -122,10 +123,13 @@ class ReadOp : public framework::OperatorBase {
     const std::vector<framework::proto::VarType::Type>& var_types =
         reader->VarTypes();
     const std::vector<bool>& need_check_feed = reader->NeedCheckFeed();
-    PADDLE_ENFORCE_EQ(out_arg_names.size(), need_check_feed.size(),
-                      platform::errors::InvalidArgument(
-                          "output size of read_op and the number of fed "
-                          "variables of reader do not match"));
+    PADDLE_ENFORCE_EQ(
+        out_arg_names.size(), need_check_feed.size(),
+        platform::errors::InvalidArgument(
+            "Output size of read_op and the number of fed "
+            "variables of reader do not match. Received size of output is %d, "
+            "number of fed variables of reader is %d",
+            out_arg_names.size(), need_check_feed.size()));
 
     for (size_t i = 0; i < out_arg_names.size(); ++i) {
       auto* out =
@@ -139,7 +143,7 @@ class ReadOp : public framework::OperatorBase {
                 "shape = [%s], but received fed shape [%s]",
                 out_arg_names[i], shapes[i].size(), shapes[i], in_dims));
         PADDLE_ENFORCE_EQ(
-            ins[i].type(), var_types[i],
+            framework::TransToProtoVarType(ins[i].dtype()), var_types[i],
             platform::errors::InvalidArgument(
                 "The data type of fed Variable %s must be %s, but received %s",
                 out_arg_names[i], var_types[i], ins[i].type()));

@@ -14,11 +14,9 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/collective/barrier_op.h"
 
-#include <memory>
-
-#if defined(PADDLE_WITH_NCCL)
+#if defined(PADDLE_WITH_NCCL) || defined(PADDLE_WITH_RCCL)
 #include "paddle/fluid/platform/collective_helper.h"
-#include "paddle/fluid/platform/nccl_helper.h"
+#include "paddle/fluid/platform/device/gpu/nccl_helper.h"
 #endif
 
 namespace paddle {
@@ -28,14 +26,15 @@ template <typename T>
 class BarrierOpCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-#if defined(PADDLE_WITH_NCCL)
+#if defined(PADDLE_WITH_NCCL) || defined(PADDLE_WITH_RCCL)
     auto in = ctx.Input<framework::Tensor>("X");
     auto out = ctx.Output<framework::Tensor>("Out");
 
     auto place = ctx.GetPlace();
-    ncclDataType_t dtype = platform::ToNCCLDataType(in->type());
+    ncclDataType_t dtype =
+        platform::ToNCCLDataType(framework::TransToProtoVarType(in->dtype()));
     int64_t numel = in->numel();
-    const void* sendbuff = in->data<void>();
+    const void* sendbuff = in->data();
     void* recvbuff = out->mutable_data<T>(place);
 
     int rid = ctx.Attr<int>("ring_id");
@@ -43,11 +42,9 @@ class BarrierOpCUDAKernel : public framework::OpKernel<T> {
     auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
     auto stream = static_cast<platform::CUDADeviceContext*>(dev_ctx)->stream();
     ncclRedOp_t nccl_red_type = ncclSum;
-    PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::ncclAllReduce(
+    PADDLE_ENFORCE_GPU_SUCCESS(platform::dynload::ncclAllReduce(
         sendbuff, recvbuff, numel, dtype, nccl_red_type, comm->comm(), stream));
-    auto comm_stream =
-        platform::NCCLCommContext::Instance().Get(rid, place)->stream();
-    PADDLE_ENFORCE_CUDA_SUCCESS(cudaStreamSynchronize(comm_stream));
+    platform::GpuStreamSync(stream);
 #else
     PADDLE_THROW(platform::errors::Unavailable(
         "PaddlePaddle should compile with NCCL."));

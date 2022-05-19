@@ -1,24 +1,10 @@
-# Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2022 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# Copyright(c) 2019 PaddlePaddle Authors.All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0(the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http:  // www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -45,11 +31,12 @@ from paddle.fluid.initializer import Normal, Constant, NumpyArrayInitializer
 from paddle.fluid.data_feeder import check_variable_and_dtype, check_type, check_dtype, convert_dtype
 
 from paddle.fluid import core
-from paddle.fluid.entry_attr import ProbabilityEntry, CountFilterEntry
+from paddle.fluid.param_attr import ParamAttr
 
 from paddle.fluid.framework import Variable, convert_np_dtype_to_dtype_
 from paddle.fluid.layers import slice, reshape
 import warnings
+from paddle import _C_ops
 
 __all__ = [
     'fused_elemwise_activation', 'sequence_topk_avg_pooling', 'var_conv_2d',
@@ -57,7 +44,7 @@ __all__ = [
     'multiclass_nms2', 'search_pyramid_hash', 'shuffle_batch', 'partial_concat',
     'sparse_embedding', 'partial_sum', 'tdm_child', 'rank_attention',
     'tdm_sampler', 'batch_fc', '_pull_box_extended_sparse', 'bilateral_slice',
-    'correlation'
+    'correlation', 'fused_bn_add_act', 'fused_seqpool_cvm'
 ]
 
 
@@ -136,7 +123,7 @@ def var_conv_2d(input,
                 act=None,
                 dtype='float32',
                 name=None):
-    """
+    r"""
     The var_conv_2d layer calculates the output base on the :attr:`input` with variable length,
     row, col, input channel, filter size and strides. Both :attr:`input`, :attr:`row`,
     and :attr:`col` are 1-level LodTensor. The convolution operation is same as conv2d layer with
@@ -476,7 +463,7 @@ def fused_embedding_seq_pool(input,
                              combiner='sum',
                              param_attr=None,
                              dtype='float32'):
-    """
+    r"""
     **Embedding Sequence pool**
 
     This layer is the fusion of lookup table and sequence_pool.
@@ -534,6 +521,87 @@ def fused_embedding_seq_pool(input,
             'padding_idx': padding_idx
         })
     return out
+
+
+def fused_seqpool_cvm(input,
+                      pool_type,
+                      cvm,
+                      pad_value=0.0,
+                      use_cvm=True,
+                      cvm_offset=2):
+    """
+    :api_attr: Static Graph
+
+    This OP is the fusion of sequence_pool and continuous_value_model op.
+
+    **Note:** The Op only receives List of LoDTensor as input, only support SUM pooling now.
+
+    Args:
+        input(Variable|list of Variable): Input is List of LoDTensor.
+        pool_type(str): pooling type, only support SUM pooling now.
+        cvm(Variable): cvm Variable.
+        pad_value(float, optional): padding value of sequence pool. Default: 0.0.
+        use_cvm(bool, optional): use cvm or not. Default: True.
+        cvm_offset(int, optional): cvm offset. Default: 2, which means cvm contains show, click.
+
+    Returns:
+        Variable|list of Variable: The tensor variable storing sequence pool and cvm
+        of input.
+
+    Examples:
+        .. code-block:: python
+
+            import paddle
+            import paddle.fluid as fluid
+            paddle.enable_static()
+
+            data = paddle.static.data(name='x', shape=[-1, 1], dtype='int64', lod_level=1)
+            data2 = paddle.static.data(name='y', shape=[-1, 1], dtype='int64', lod_level=1)
+            inputs = [data, data2]
+            embs = fluid.layers.nn._pull_box_sparse(input=inputs, size=11, is_distributed=True, is_sparse=True)
+
+            label = paddle.static.data(name="label", shape=[-1, 1], dtype="int64", lod_level=1)
+            ones = fluid.layers.fill_constant_batch_size_like(input=label, shape=[-1, 1], dtype="int64", value=1)
+            show_clk = paddle.cast(paddle.concat([ones, label], axis=1), dtype='float32')
+            show_clk.stop_gradient = True
+
+            cvms = fluid.contrib.layers.fused_seqpool_cvm(embs, 'sum', show_clk)
+
+
+    """
+    helper = LayerHelper('fused_seqpool_cvm', **locals())
+
+    if pool_type.upper() != 'SUM':
+        raise ValueError(
+            "fused_seqpool_cvm only support SUM pooling now, and your type is: "
+            + pool_type)
+
+    check_type(input, 'input', list, 'fused_seqpool_cvm')
+    if isinstance(input, list):
+        for _input in input:
+            check_variable_and_dtype(_input, 'input', ['float32'],
+                                     'fused_seqpool_cvm')
+
+    dtype = helper.input_dtype()
+    inputs = helper.multiple_input()
+    outs = [
+        helper.create_variable_for_type_inference(dtype)
+        for i in range(len(inputs))
+    ]
+
+    helper.append_op(
+        type="fused_seqpool_cvm",
+        inputs={"X": inputs,
+                "CVM": cvm},
+        outputs={"Out": outs},
+        attrs={
+            "pooltype": pool_type.upper(),
+            "pad_value": pad_value,
+            "use_cvm": use_cvm,
+            "cvm_offset": cvm_offset,
+        })
+
+    return outs
 
 
 def multiclass_nms2(bboxes,
@@ -967,15 +1035,125 @@ def sparse_embedding(input,
                      padding_idx=None,
                      is_test=False,
                      entry=None,
+                     table_class="MemorySparseTable",
                      param_attr=None,
                      dtype='float32'):
+    r"""
+    :api_attr: Static Graph
+
+    The OP is used as the operator of the Embedding Lookup layer in the large-scale 
+    sparse training of the parameter server mode, instead of using the paddle.nn.functional.embedding.
+
+    The operator is used to lookup embeddings vector of ids provided by :attr:`input` . 
+    It automatically constructs a 2D embedding matrix based on the input :attr:`size` 
+    (vocab_size, emb_size) and :attr:`dtype` .
+
+    The shape of output Tensor is generated by appending an emb_size dimension to the
+    last dimension of the input Tensor shape.
+
+    **Note:** The id in :attr:`input` must satisfy :math:`0 =< id < size[0]` , otherwise 
+    the program will throw an exception and exit.
+
+    .. code-block:: text
+
+        Case 1:
+
+        input is a Tensor. padding_idx = -1
+            input.data = [[1, 3], [2, 4], [4, 127]]
+            input.shape = [3, 2]
+        Given size = [128, 16]
+        output is a Tensor:
+            out.shape = [3, 2, 16]
+            out.data = [[[0.129435295, 0.244512452, ..., 0.436322452],
+                        [0.345421456, 0.524563927, ..., 0.144534654]],
+
+                        [[0.345249859, 0.124939536, ..., 0.194353745],
+                        [0.945345345, 0.435394634, ..., 0.435345365]],
+                        
+                        [[0.945345345, 0.435394634, ..., 0.435345365],
+                        [0.0,         0.0,         ..., 0.0        ]]]  # padding data
+        The input padding_idx is less than 0, it is automatically converted to padding_idx = -1 + 128 = 127
+        It will pad all-zero data when ids is 127.
+        
+        Case 2:
+
+        input is a LoDTensor with 1-level LoD. padding_idx = 0
+            input.lod = [[2, 3]]
+            input.data = [[1], [3], [2], [4], [0]]
+            input.shape = [5, 1]
+        Given size = [128, 16]
+        output is a LoDTensor:
+            out.lod = [[2, 3]]
+            out.shape = [5, 1, 16]
+            out.data = [[[0.129435295, 0.244512452, ..., 0.436322452]],
+                        [[0.345421456, 0.524563927, ..., 0.144534654]],
+                        [[0.345249859, 0.124939536, ..., 0.194353745]],
+                        [[0.945345345, 0.435394634, ..., 0.435345365]],
+                        [[0.0,         0.0,         ..., 0.0        ]]]  # padding data
+        It will pad all-zero data when ids is 0.
+
+    Args:
+        input(Variable): A Tensor or LoDTensor with type int64, which contains the id 
+            information. The value of the input id should satisfy :math:`0<= id < size[0]` .
+        size(tuple|list): The shape of lookup table parameter (vocab_size, emb_size). It 
+            should have two elements which indicates the size of the dictionary of embeddings 
+            and the size of each embedding vector respectively. The initial parameter size 
+            is 0 in the large-scale sparse scenario, which will gradually expand with the 
+            training. So if vocab_size is temporarily useless, its value can be any integer.
+            The emb_size is the dimensional configuration of the word embedding weight parameter.
+        padding_idx(int|long|None, optional): padding_idx needs to be in the interval [-vocab_size, vocab_size). 
+            If :math:`padding\_idx < 0`, the :math:`padding\_idx` will automatically be converted
+            to :math:`vocab\_size + padding\_idx` . It will output all-zero padding data whenever 
+            lookup encounters :math:`padding\_idx` in id. And the padding data will not be updated 
+            while training. If set None, it makes no efe mfect to output. Default: None.
+        is_test(bool, optional): Training or prediction mode. In prediction mode (is_test=False), 
+            the output is not initialized and created, and it is filled with 0 and returned. Default: False.
+        entry(str, optional): Entry config with parameter server whose value is ProbabilityEntry, 
+            CountFilterEntry or None. Default: None.
+        table_class(str, optional): The type of the sparse table. The value can be CommonSparseTable 
+            or SSDSparseTable. The default is CommonSparseTable.
+        param_attr(ParamAttr, optional): To specify the weight parameter property. Default: None, which means the
+            default weight parameter property is used. In addition, user-defined or pre-trained word 
+            vectors can be loaded with the :attr:`param_attr` parameter. The local word vector needs 
+            to be transformed into numpy format, and the shape of local word vector should be consistent 
+            with :attr:`size` .
+        dtype(str): It refers to the data type of output Tensor. It must be float32 or 
+            float64. Default: float32.
+            
+    Returns:
+        Variable: Embedding Tensor or LoDTensor mapped by input. The data type is the same as :attr:`dtype` .
+    
+    Examples:
+        .. code-block:: python
+
+            import paddle
+            
+            paddle.enable_static()
+            sparse_feature_dim = 1024
+            embedding_size = 64
+
+            # Only when the feature appear more than 10 times or more will be participated in the training.
+            entry = paddle.distributed.CountFilterEntry(10)
+
+            input = paddle.static.data(name='ins', shape=[1], dtype='int64')
+        
+            emb = paddle.static.nn.sparse_embedding(
+                input=input,
+                size=[sparse_feature_dim, embedding_size],
+                is_test=False,
+                entry=entry,
+                param_attr=paddle.ParamAttr(name="SparseFeatFactors",
+                initializer=paddle.nn.initializer.Uniform()))
+
+    """
+
     helper = LayerHelper('sparse_embedding', **locals())
 
     check_variable_and_dtype(input, 'input', ['int64'],
                              'fluid.contrib.layers.sparse_embedding')
 
-    check_dtype(dtype, 'dtype', ['float32'],
-                'fluid.contrib.layers.sparse_embedding')
+    check_dtype(dtype, 'dtype', ['float32', 'float64'],
+                'paddle.static.nn.sparse_embedding')
 
     w = helper.create_parameter(
         attr=helper.param_attr,
@@ -989,14 +1167,23 @@ def sparse_embedding(input,
     padding_idx = -1 if padding_idx is None else padding_idx if padding_idx >= 0 else (
         size[0] + padding_idx)
 
+    if table_class not in [
+            "CommonSparseTable", "SSDSparseTable", "MemorySparseTable"
+    ]:
+        raise ValueError(
+            "table_class must be in [CommonSparseTable, SSDSparseTable, MemorySparseTable]"
+        )
+
     entry_str = "none"
 
     if entry is not None:
-        if not isinstance(entry, ProbabilityEntry) and not isinstance(
-                entry, CountFilterEntry):
+        if entry.__class__.__name__ not in [
+                "ProbabilityEntry", "CountFilterEntry", "ShowClickEntry"
+        ]:
             raise ValueError(
-                "entry must be instance in [ProbabilityEntry, CountFilterEntry]")
-        entry_str = entry.to_attr()
+                "entry must be instance in [paddle.distributed.ProbabilityEntry, paddle.distributed.CountFilterEntry, paddle.distributed.ShowClickEntry]"
+            )
+        entry_str = entry._to_attr()
 
     helper.append_op(
         type='lookup_table',
@@ -1009,7 +1196,8 @@ def sparse_embedding(input,
             'is_distributed': True,
             'remote_prefetch': True,
             'is_test': is_test,
-            'entry': entry_str
+            'entry': entry_str,
+            'table_class': table_class
         })
 
     return tmp
@@ -1441,7 +1629,7 @@ def batch_fc(input, param_size, param_attr, bias_size, bias_attr, act=None):
 
 
 def _pull_box_extended_sparse(input, size, extend_size=64, dtype='float32'):
-    """
+    r"""
     **Pull Box Extended Sparse Layer**
     This layer is used to lookup embeddings of IDs, provided by :attr:`input`, in
     BoxPS lookup table. The result of this lookup is the embedding of each ID in the
@@ -1524,23 +1712,24 @@ def bilateral_slice(x, guide, grid, has_offset, name=None):
             grid = fluid.data(name='grid', shape=[None, 12, 8, 10, 6], dtype='float32')
 
             # without offset
-            output = fluid.layers.bilateral_slice(x, guide, grid, has_offset=False)
+            output = fluid.contrib.bilateral_slice(x, guide, grid, has_offset=False)
             
             # has offset
-            output = fluid.layers.bilateral_slice(x, guide, grid, has_offset=True)
+            output = fluid.contrib.bilateral_slice(x, guide, grid, has_offset=True)
 
     """
-    helper = LayerHelper("bilateral_slice", **locals())
+    if paddle.fluid._non_static_mode():
+        attrs = ('has_offset', has_offset)
+        return getattr(_C_ops, "bilateral_slice")(x, grid, guide, *attrs)
 
     check_variable_and_dtype(x, 'x', ['float32', 'float64'], 'bilateral_slice')
     check_variable_and_dtype(guide, 'guide', ['float32', 'float64'],
                              'bilateral_slice')
     check_variable_and_dtype(grid, 'grid', ['float32', 'float64'],
                              'bilateral_slice')
-
+    helper = LayerHelper("bilateral_slice", **locals())
     out = helper.create_variable_for_type_inference(x.dtype)
     inputs = {'X': x, 'Guide': guide, 'Grid': grid}
-
     helper.append_op(
         type='bilateral_slice',
         inputs=inputs,
@@ -1603,14 +1792,14 @@ def correlation(x,
 
     """
 
-    helper = LayerHelper("correlation", **locals())
-    output = helper.create_variable_for_type_inference(dtype=x.dtype)
-    if paddle.fluid.in_dygraph_mode():
+    if paddle.fluid._non_static_mode():
         attrs = ("pad_size", pad_size, "kernel_size", kernel_size,
                  "max_displacement", max_displacement, "stride1", stride1,
                  "stride2", stride2, "corr_type_multiply", corr_type_multiply)
-        output = getattr(core.ops, "correlation")(x, y, *attrs)
+        output = getattr(_C_ops, "correlation")(x, y, *attrs)
     else:
+        helper = LayerHelper("correlation", **locals())
+        output = helper.create_variable_for_type_inference(dtype=x.dtype)
         helper.append_op(
             type="correlation",
             inputs={"Input1": x,
@@ -1625,3 +1814,226 @@ def correlation(x,
             },
             outputs={"Output": output})
     return output
+
+
+def fused_bn_add_act(x,
+                     y,
+                     momentum=0.9,
+                     epsilon=1e-05,
+                     param_attr=None,
+                     bias_attr=None,
+                     moving_mean_name=None,
+                     moving_variance_name=None,
+                     act=None,
+                     name=None):
+    r"""
+    This Op performs batch norm on input x, and adds the result to input y. Then
+    it performs activation on the sum. The data format of inputs must be NHWC
+    `[batch, in_height, in_width, in_channels]`.
+
+    Args:
+        x(Tensor): The rank of input tensor can be 2, 3, 4, 5. The data type
+            is float16.
+        y(Tensor): The rank of input tensor can be 2, 3, 4, 5. The data type
+            is float16.
+        momentum(float|Tensor, optional): The value used for the moving_mean and
+            moving_var computation. This should be a float number or a tensor with
+            shape [1] and data type as float32. The updated formula is:
+            :math:`moving\_mean = moving\_mean * momentum + new\_mean * (1. - momentum)`
+            :math:`moving\_var = moving\_var * momentum + new\_var * (1. - momentum)`
+            Default is 0.9.
+        epsilon(float, optional): A value added to the denominator for
+            numerical stability. Default is 1e-5.
+        param_attr(ParamAttr, optional): The parameter attribute for Parameter `scale`
+            of batch_norm. If it is set to None or one attribute of ParamAttr, batch_norm
+	        will create ParamAttr as param_attr, the name of scale can be set in ParamAttr.
+	        If the Initializer of the param_attr is not set, the parameter is initialized
+	        with Xavier. Default: None.
+        bias_attr(ParamAttr, optional): The parameter attribute for the bias of batch_norm.
+            If it is set to None or one attribute of ParamAttr, batch_norm
+	        will create ParamAttr as bias_attr, the name of bias can be set in ParamAttr.
+	        If the Initializer of the bias_attr is not set, the bias is initialized zero.
+	        Default: None.
+        moving_mean_name(str, optional): The name of moving_mean which store the global Mean. If it
+            is set to None, batch_norm will save global mean with a random name, otherwise, batch_norm
+            will save global mean with the string.
+        moving_variance_name(str, optional): The name of the moving_variance which store the global Variance.
+            If it is set to None, batch_norm will save global variance with a random name, otherwise, batch_norm
+            will save global variance with the string.
+        act(string, optional): Activation type, linear|relu|prelu|...
+        name(str, optional): For detailed information, please refer to :ref:`api_guide_Name`.
+            Usually name is no need to set and None by default.
+
+    Examples:
+            .. code-block:: python
+
+            import paddle.fluid as fluid
+
+            def build_program(main_program, startup_program):
+                with fluid.program_guard(main_program, startup_program):
+                    x = fluid.layers.data(name='x', shape=[1, 28, 28], dtype='float32')
+                    y = fluid.layers.data(name="y", shape=[1], dtype='int64')
+                    conv1_1 = fluid.layers.conv2d(
+                        input=x,
+                        filter_size=3,
+                        num_filters=32,
+                        stride=1,
+                        padding=1,
+                        act=None,
+                        bias_attr=False,
+                        data_format='NHWC')
+                    conv1_2 = fluid.layers.conv2d(
+                        input=x,
+                        filter_size=3,
+                        num_filters=32,
+                        stride=1,
+                        padding=1,
+                        act=None,
+                        bias_attr=False,
+                        data_format='NHWC')
+                    bn = fluid.layers.batch_norm(
+                        input=conv1_1,
+                        act=None,
+                        data_layout='NHWC')
+                    fused_bn_add_act = fluid.contrib.layers.fused_bn_add_act(conv1_2, bn)
+                    prediction = fluid.layers.fc(input=fused_bn_add_act, size=10, act='softmax')
+                    loss = fluid.layers.cross_entropy(input=prediction, label=y)
+                    loss = fluid.layers.mean(loss)
+                    sgd = fluid.optimizer.SGD(learning_rate=0.001)
+                    sgd = fluid.contrib.mixed_precision.decorate(
+                        sgd, use_dynamic_loss_scaling=True, init_loss_scaling=128.0)
+                    sgd.minimize(loss)
+
+                return x, y, loss
+
+            iters = 5
+            batch_size = 16
+            support_gpu = fluid.is_compiled_with_cuda()
+            if support_gpu:
+                main_program = fluid.Program()
+                startup_program = fluid.Program()
+                place = fluid.CUDAPlace(0)
+                x, y, loss = build_program(main_program, startup_program)
+  
+                feeder = fluid.DataFeeder(feed_list=[x, y], place=place)
+                train_reader = paddle.batch(
+                    paddle.dataset.mnist.train(), batch_size=batch_size)
+                exe = fluid.Executor(place)
+                scope = fluid.Scope()
+                with fluid.scope_guard(scope):
+                    exe.run(startup_program)
+                    for _ in range(iters):
+                        data = next(train_reader())
+                        loss_v = exe.run(main_program, feed=feeder.feed(data), fetch_list=[loss])
+    """
+    helper = LayerHelper('fused_bn_add_act', **locals())
+
+    check_variable_and_dtype(x, 'input', ['float16', 'float32', 'float64'],
+                             'fused_bn_add_act')
+    check_variable_and_dtype(y, 'input', ['float16', 'float32', 'float64'],
+                             'fused_bn_add_act')
+    bn_param_dtype = core.VarDesc.VarType.FP32
+
+    x_shape = x.shape
+    channel_num = x_shape[-1]
+    param_shape = [channel_num]
+
+    # create parameter
+    scale = helper.create_parameter(
+        attr=helper.param_attr,
+        shape=param_shape,
+        dtype=bn_param_dtype,
+        default_initializer=Constant(1.0))
+    bias = helper.create_parameter(
+        attr=helper.bias_attr,
+        shape=param_shape,
+        dtype=bn_param_dtype,
+        is_bias=True)
+    mean = helper.create_parameter(
+        attr=ParamAttr(
+            name=moving_mean_name, initializer=Constant(0.0), trainable=False),
+        shape=param_shape,
+        dtype=bn_param_dtype)
+    mean.stop_gradient = True
+    variance = helper.create_parameter(
+        attr=ParamAttr(
+            name=moving_variance_name,
+            initializer=Constant(1.0),
+            trainable=False),
+        shape=param_shape,
+        dtype=bn_param_dtype)
+    variance.stop_gradient = True
+
+    # create output
+    # mean and mean_out share the same memory
+    mean_out = mean
+    # variance and variance out share the same memory
+    variance_out = variance
+    saved_mean = helper.create_variable_for_type_inference(
+        dtype=bn_param_dtype, stop_gradient=True)
+    saved_variance = helper.create_variable_for_type_inference(
+        dtype=bn_param_dtype, stop_gradient=True)
+    reserve_space = helper.create_variable_for_type_inference(
+        dtype=core.VarDesc.VarType.FP16, stop_gradient=True)
+    batch_norm_out = helper.create_variable_for_type_inference(
+        core.VarDesc.VarType.FP16)
+
+    inputs = {
+        "X": x,
+        "Z": y,
+        "Scale": scale,
+        "Bias": bias,
+    }
+    attrs = {"epsilon": epsilon, 'momentum': momentum}
+
+    outputs = {
+        "Y": batch_norm_out,
+        "MeanOut": mean_out,
+        "VarianceOut": variance_out,
+        "SavedMean": saved_mean,
+        "SavedVariance": saved_variance,
+        "ReserveSpace": reserve_space
+    }
+
+    helper.append_op(
+        type="fused_bn_add_activation",
+        inputs=inputs,
+        outputs=outputs,
+        attrs=attrs)
+
+    return batch_norm_out
+
+
+def pow2_decay_with_linear_warmup(warmup_steps,
+                                  total_steps,
+                                  base_lr,
+                                  end_lr,
+                                  dtype='float32',
+                                  name=None):
+    if paddle.fluid._non_static_mode():
+        raise NotImplementedError(
+            "pow2_decay_with_linear_warmup does not support dygraph mode yet.")
+
+    helper = LayerHelper("pow2_decay_with_linear_warmup", **locals())
+    lr = helper.create_global_variable(persistable=True, dtype=dtype, shape=[1])
+    helper.set_variable_initializer(
+        lr, Constant(value=float(base_lr) / warmup_steps))
+
+    step = helper.create_global_variable(
+        persistable=True, dtype='int64', shape=[1])
+    helper.set_variable_initializer(step, Constant(value=0))
+    assert warmup_steps <= total_steps, "warmup_steps cannot be larger than total_steps"
+
+    helper.append_op(
+        type="pow2_decay_with_linear_warmup",
+        inputs={"LearningRate": lr,
+                "Step": step},
+        outputs={"LearningRateOut": lr,
+                 "StepOut": step},
+        attrs={
+            "warmup_steps": warmup_steps,
+            "total_steps": total_steps,
+            "base_lr": base_lr,
+            "end_lr": end_lr,
+        })
+    return lr

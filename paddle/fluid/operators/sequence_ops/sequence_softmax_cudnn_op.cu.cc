@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/operators/math/math_function.h"
 #include "paddle/fluid/operators/math/softmax.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -54,11 +54,11 @@ class SequenceSoftmaxCUDNNKernel : public framework::OpKernel<T> {
 
       // Reshape from (end_pos - start_pos) x 1UL to 1UL x (end_pos - start_pos)
       framework::DDim dims_i =
-          // framework::make_ddim({1UL, end_pos - start_pos, 1UL, 1UL});
-          framework::make_ddim({1UL, end_pos - start_pos});
+          // phi::make_ddim({1UL, end_pos - start_pos, 1UL, 1UL});
+          phi::make_ddim({1UL, end_pos - start_pos});
       x_i.Resize(dims_i);
       out_i.Resize(dims_i);
-      math::SoftmaxCUDNNFunctor<T>()(
+      math::SoftmaxCUDNNFunctor<T, platform::CUDADeviceContext>()(
           ctx.template device_context<platform::CUDADeviceContext>(), &x_i,
           &out_i);
     }
@@ -89,11 +89,11 @@ class SequenceSoftmaxGradCUDNNKernel : public framework::OpKernel<T> {
       Tensor x_grad_i = x_grad->Slice(start_pos, end_pos);
 
       // Reshape from (end_pos - start_pos) x 1UL to 1UL x (end_pos - start_pos)
-      framework::DDim dims_i = framework::make_ddim({1UL, end_pos - start_pos});
+      framework::DDim dims_i = phi::make_ddim({1UL, end_pos - start_pos});
       out_i.Resize(dims_i);
       out_grad_i.Resize(dims_i);
       x_grad_i.Resize(dims_i);
-      math::SoftmaxGradCUDNNFunctor<T>()(
+      math::SoftmaxGradCUDNNFunctor<T, platform::CUDADeviceContext>()(
           ctx.template device_context<platform::CUDADeviceContext>(), &out_i,
           &out_grad_i, &x_grad_i);
     }
@@ -104,9 +104,18 @@ class SequenceSoftmaxGradCUDNNKernel : public framework::OpKernel<T> {
 }  // namespace paddle
 
 namespace ops = paddle::operators;
+
+#ifdef PADDLE_WITH_HIP
+// MIOPEN not support float64
+REGISTER_OP_KERNEL(sequence_softmax, CUDNN, ::paddle::platform::CUDAPlace,
+                   ops::SequenceSoftmaxCUDNNKernel<float>);
+REGISTER_OP_KERNEL(sequence_softmax_grad, CUDNN, ::paddle::platform::CUDAPlace,
+                   ops::SequenceSoftmaxGradCUDNNKernel<float>);
+#else
 REGISTER_OP_KERNEL(sequence_softmax, CUDNN, ::paddle::platform::CUDAPlace,
                    ops::SequenceSoftmaxCUDNNKernel<float>,
                    ops::SequenceSoftmaxCUDNNKernel<double>);
 REGISTER_OP_KERNEL(sequence_softmax_grad, CUDNN, ::paddle::platform::CUDAPlace,
                    ops::SequenceSoftmaxGradCUDNNKernel<float>,
                    ops::SequenceSoftmaxGradCUDNNKernel<double>);
+#endif

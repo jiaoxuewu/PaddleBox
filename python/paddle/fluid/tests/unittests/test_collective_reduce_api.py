@@ -15,8 +15,11 @@
 from __future__ import print_function
 import unittest
 import numpy as np
+import paddle
 
 from test_collective_api_base import TestDistBase
+
+paddle.enable_static()
 
 
 class TestCollectiveReduceAPI(TestDistBase):
@@ -24,7 +27,12 @@ class TestCollectiveReduceAPI(TestDistBase):
         pass
 
     def test_reduce_nccl(self):
-        self.check_with_place("collective_reduce_api.py", "reduce", "nccl")
+        if paddle.fluid.core.is_compiled_with_cuda():
+            self.check_with_place("collective_reduce_api.py", "reduce", "nccl")
+
+    def test_reduce_bkcl(self):
+        if paddle.fluid.core.is_compiled_with_xpu():
+            self.check_with_place("collective_reduce_api.py", "reduce", "bkcl")
 
     def test_reduce_gloo(self):
         self.check_with_place("collective_reduce_api.py", "reduce", "gloo", "1")

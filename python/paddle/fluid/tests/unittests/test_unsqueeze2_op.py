@@ -13,11 +13,15 @@
 # limitations under the License.
 
 from __future__ import print_function
-
 import unittest
+
 import numpy as np
+
+import paddle
 import paddle.fluid as fluid
 from op_test import OpTest
+
+paddle.enable_static()
 
 
 # Correct: General.
@@ -25,6 +29,8 @@ class TestUnsqueezeOp(OpTest):
     def setUp(self):
         self.init_test_case()
         self.op_type = "unsqueeze2"
+        self.python_api = paddle.unsqueeze
+        self.python_out_sig = ["Out"]
         self.inputs = {"X": np.random.random(self.ori_shape).astype("float64")}
         self.init_attrs()
         self.outputs = {
@@ -33,10 +39,10 @@ class TestUnsqueezeOp(OpTest):
         }
 
     def test_check_output(self):
-        self.check_output(no_check_set=["XShape"])
+        self.check_output(no_check_set=["XShape"], check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(["X"], "Out")
+        self.check_grad(["X"], "Out", check_eager=True)
 
     def init_test_case(self):
         self.ori_shape = (3, 40)
@@ -84,6 +90,8 @@ class TestUnsqueezeOp_AxesTensorList(OpTest):
     def setUp(self):
         self.init_test_case()
         self.op_type = "unsqueeze2"
+        self.python_out_sig = ["Out"]
+        self.python_api = paddle.unsqueeze
 
         axes_tensor_list = []
         for index, ele in enumerate(self.axes):
@@ -101,10 +109,10 @@ class TestUnsqueezeOp_AxesTensorList(OpTest):
         }
 
     def test_check_output(self):
-        self.check_output(no_check_set=["XShape"])
+        self.check_output(no_check_set=["XShape"], check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(["X"], "Out")
+        self.check_grad(["X"], "Out", check_eager=True)
 
     def init_test_case(self):
         self.ori_shape = (20, 5)
@@ -148,6 +156,8 @@ class TestUnsqueezeOp_AxesTensor(OpTest):
     def setUp(self):
         self.init_test_case()
         self.op_type = "unsqueeze2"
+        self.python_out_sig = ["Out"]
+        self.python_api = paddle.unsqueeze
 
         self.inputs = {
             "X": np.random.random(self.ori_shape).astype("float64"),
@@ -160,10 +170,10 @@ class TestUnsqueezeOp_AxesTensor(OpTest):
         }
 
     def test_check_output(self):
-        self.check_output(no_check_set=["XShape"])
+        self.check_output(no_check_set=["XShape"], check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(["X"], "Out")
+        self.check_grad(["X"], "Out", check_eager=True)
 
     def init_test_case(self):
         self.ori_shape = (20, 5)
@@ -204,26 +214,31 @@ class TestUnsqueezeOp4_AxesTensor(TestUnsqueezeOp_AxesTensor):
 
 # test api
 class TestUnsqueezeAPI(unittest.TestCase):
+    def setUp(self):
+        self.executed_api()
+
+    def executed_api(self):
+        self.unsqueeze = paddle.unsqueeze
+
     def test_api(self):
         input = np.random.random([3, 2, 5]).astype("float64")
-        x = fluid.data(name='x', shape=[3, 2, 5], dtype="float64")
+        x = paddle.static.data(name='x', shape=[3, 2, 5], dtype="float64")
         positive_3_int32 = fluid.layers.fill_constant([1], "int32", 3)
         positive_1_int64 = fluid.layers.fill_constant([1], "int64", 1)
-        axes_tensor_int32 = fluid.data(
+        axes_tensor_int32 = paddle.static.data(
             name='axes_tensor_int32', shape=[3], dtype="int32")
-        axes_tensor_int64 = fluid.data(
+        axes_tensor_int64 = paddle.static.data(
             name='axes_tensor_int64', shape=[3], dtype="int64")
 
-        out_1 = fluid.layers.unsqueeze(x, axes=[3, 1, 1])
-        out_2 = fluid.layers.unsqueeze(
-            x, axes=[positive_3_int32, positive_1_int64, 1])
-        out_3 = fluid.layers.unsqueeze(x, axes=axes_tensor_int32)
-        out_4 = fluid.layers.unsqueeze(x, axes=3)
-        out_5 = fluid.layers.unsqueeze(x, axes=axes_tensor_int64)
+        out_1 = self.unsqueeze(x, axis=[3, 1, 1])
+        out_2 = self.unsqueeze(x, axis=[positive_3_int32, positive_1_int64, 1])
+        out_3 = self.unsqueeze(x, axis=axes_tensor_int32)
+        out_4 = self.unsqueeze(x, axis=3)
+        out_5 = self.unsqueeze(x, axis=axes_tensor_int64)
 
-        exe = fluid.Executor(place=fluid.CPUPlace())
+        exe = paddle.static.Executor(place=paddle.CPUPlace())
         res_1, res_2, res_3, res_4, res_5 = exe.run(
-            fluid.default_main_program(),
+            paddle.static.default_main_program(),
             feed={
                 "x": input,
                 "axes_tensor_int32": np.array([3, 1, 1]).astype("int32"),
@@ -239,10 +254,15 @@ class TestUnsqueezeAPI(unittest.TestCase):
 
     def test_error(self):
         def test_axes_type():
-            x2 = fluid.data(name="x2", shape=[2, 25], dtype="int32")
-            fluid.layers.unsqueeze(x2, axes=2.1)
+            x2 = paddle.static.data(name="x2", shape=[2, 25], dtype="int32")
+            self.unsqueeze(x2, axis=2.1)
 
         self.assertRaises(TypeError, test_axes_type)
+
+
+class TestUnsqueezeInplaceAPI(TestUnsqueezeAPI):
+    def executed_api(self):
+        self.unsqueeze = paddle.unsqueeze_
 
 
 if __name__ == "__main__":

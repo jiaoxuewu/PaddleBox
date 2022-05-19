@@ -20,6 +20,10 @@ if(WITH_TESTING)
     add_definitions(-DPADDLE_WITH_TESTING)
 endif(WITH_TESTING)
 
+if(WITH_INFERENCE_API_TEST)
+    add_definitions(-DPADDLE_WITH_INFERENCE_API_TEST)
+endif(WITH_INFERENCE_API_TEST)
+
 if(NOT WITH_PROFILER)
     add_definitions(-DPADDLE_DISABLE_PROFILER)
 endif(NOT WITH_PROFILER)
@@ -27,8 +31,13 @@ endif(NOT WITH_PROFILER)
 if(WITH_AVX AND AVX_FOUND)
     set(SIMD_FLAG ${AVX_FLAG})
     add_definitions(-DPADDLE_WITH_AVX)
-elseif(SSE3_FOUND)
+elseif(SSE3_FOUND AND NOT WIN32)
     set(SIMD_FLAG ${SSE3_FLAG})
+endif()
+
+if (SSE3_FOUND)
+    # TODO: Runtime detection should be used here.
+    add_definitions(-DPADDLE_WITH_SSE3)
 endif()
 
 if(WIN32)
@@ -51,8 +60,22 @@ if(WIN32)
   endif(NOT MSVC)
 endif(WIN32)
 
+if(WITH_MUSL)
+    add_definitions(-DPADDLE_WITH_MUSL)
+
+    message(STATUS, "Set compile option WITH_MKL=OFF when WITH_MUSL=ON")
+    SET(WITH_MKL OFF)
+
+    message(STATUS, "Set compile option WITH_GPU=OFF when WITH_MUSL=ON")
+    SET(WITH_GPU OFF)
+endif()
+
 if(WITH_PSLIB)
     add_definitions(-DPADDLE_WITH_PSLIB)
+endif()
+
+if(WITH_ARM_BRPC)
+    add_definitions(-DPADDLE_WITH_ARM_BRPC)
 endif()
 
 if(WITH_GLOO)
@@ -63,9 +86,36 @@ if(WITH_BOX_PS)
     add_definitions(-DPADDLE_WITH_BOX_PS)
 endif()
 
+if(WITH_ASCEND)
+    add_definitions(-DPADDLE_WITH_ASCEND)
+endif()
+
+if(WITH_ASCEND_CL)
+    add_definitions(-DPADDLE_WITH_ASCEND_CL)
+endif()
+
+if(WITH_ASCEND_INT64)
+    add_definitions(-DPADDLE_WITH_ASCEND_INT64)
+endif()
+
 if(WITH_XPU)
     message(STATUS "Compile with XPU!")
     add_definitions(-DPADDLE_WITH_XPU)
+endif()
+
+if(WITH_XPU_KP)
+    message(STATUS "Compile with XPU_KP!")
+    add_definitions(-DPADDLE_WITH_XPU_KP)
+endif()
+
+if(WITH_IPU)
+    message(STATUS "Compile with IPU!")
+    add_definitions(-DPADDLE_WITH_IPU)
+endif()
+
+if(WITH_MLU)
+    message(STATUS "Compile with MLU!")
+    add_definitions(-DPADDLE_WITH_MLU)
 endif()
 
 if(WITH_GPU)
@@ -74,13 +124,18 @@ if(WITH_GPU)
 
     FIND_PACKAGE(CUDA REQUIRED)
 
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_LESS 7)
-        message(FATAL_ERROR "Paddle needs CUDA >= 7.0 to compile")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_LESS 10.1)
+        message(FATAL_ERROR "Paddle needs CUDA >= 10.1 to compile")
     endif()
 
     if(NOT CUDNN_FOUND)
         message(FATAL_ERROR "Paddle needs cudnn to compile")
     endif()
+
+    if(${CUDNN_MAJOR_VERSION} VERSION_LESS 7)
+        message(FATAL_ERROR "Paddle needs CUDNN >= 7.0 to compile")
+    endif()
+
     if(CUPTI_FOUND)
         include_directories(${CUPTI_INCLUDE_DIR})
         add_definitions(-DPADDLE_WITH_CUPTI)
@@ -111,10 +166,18 @@ if(WITH_GPU)
         endif()
         include_directories(${TENSORRT_INCLUDE_DIR})
     endif()
-elseif(WITH_AMD_GPU)
+elseif(WITH_ROCM)
     add_definitions(-DPADDLE_WITH_HIP)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__HIP_PLATFORM_HCC__")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__HIP_PLATFORM_HCC__")
+    add_definitions(-DEIGEN_USE_GPU)
+    add_definitions(-DEIGEN_USE_HIP)
+
+    if(NOT MIOPEN_FOUND)
+        message(FATAL_ERROR "Paddle needs MIOpen to compile")
+    endif()
+
+    if(${MIOPEN_VERSION} VERSION_LESS 2090)
+        message(FATAL_ERROR "Paddle needs MIOPEN >= 2.9 to compile")
+    endif()
 else()
     add_definitions(-DHPPL_STUB_FUNC)
     list(APPEND CMAKE_CXX_SOURCE_FILE_EXTENSIONS cu)
@@ -141,9 +204,13 @@ if(WITH_DISTRIBUTE)
   add_definitions(-DPADDLE_WITH_DISTRIBUTE)
 endif()
 
-if(WITH_GRPC)
-    add_definitions(-DPADDLE_WITH_GRPC)
-endif(WITH_GRPC)
+if(WITH_PSCORE)
+    add_definitions(-DPADDLE_WITH_PSCORE)
+endif()
+
+if(WITH_HETERPS)
+    add_definitions(-DPADDLE_WITH_HETERPS)
+endif()
 
 if(WITH_BRPC_RDMA)
     add_definitions(-DPADDLE_WITH_BRPC_RDMA)
@@ -156,3 +223,7 @@ endif(ON_INFER)
 if(WITH_CRYPTO)
     add_definitions(-DPADDLE_WITH_CRYPTO)
 endif(WITH_CRYPTO)
+
+if(WITH_CUSTOM_DEVICE AND NOT WIN32)
+    add_definitions(-DPADDLE_WITH_CUSTOM_DEVICE)
+endif()

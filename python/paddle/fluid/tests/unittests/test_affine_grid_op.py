@@ -15,6 +15,7 @@
 import unittest
 import numpy as np
 from op_test import OpTest
+import paddle
 
 
 def AffineGrid(theta, size, align_corners):
@@ -82,6 +83,8 @@ class TestAffineGridOpCase1(TestAffineGridOp):
         self.output_shape = np.array([20, 2, 5, 7]).astype("int32")
         self.dynamic_shape = True
         self.use_cudnn = True
+        if paddle.fluid.core.is_compiled_with_rocm():
+            self.use_cudnn = False  # ROCM platform do not have MIOPEN kernel for affine_grid
         self.align_corners = True
 
 
@@ -113,4 +116,5 @@ class TestAffineGridOpCase4(TestAffineGridOp):
 
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

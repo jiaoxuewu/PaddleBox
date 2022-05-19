@@ -20,8 +20,11 @@ namespace paddle {
 namespace framework {
 namespace ir {
 
+class Graph;
+
 class ConvElementwiseAddFusePass : public FusePassBase {
  public:
+  ConvElementwiseAddFusePass();
   virtual ~ConvElementwiseAddFusePass() {}
 
  protected:

@@ -19,6 +19,7 @@ limitations under the License. */
 #ifdef PADDLE_WITH_MKLDNN
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #endif
+#include "paddle/fluid/framework/op_version_registry.h"
 
 namespace paddle {
 namespace operators {
@@ -118,8 +119,8 @@ class DataNormOp : public framework::OperatorWithKernel {
                                             bias_dim, bias_dim.size()));
 
       bool check = true;
-      if ((!ctx->IsRuntime()) && (framework::product(scale_dim) <= 0 ||
-                                  framework::product(bias_dim) <= 0)) {
+      if ((!ctx->IsRuntime()) &&
+          (phi::product(scale_dim) <= 0 || phi::product(bias_dim) <= 0)) {
         check = false;
       }
 
@@ -183,7 +184,7 @@ class DataNormOp : public framework::OperatorWithKernel {
     framework::DataLayout layout = framework::DataLayout::kAnyLayout;
 #ifdef PADDLE_WITH_MKLDNN
     if (library == framework::LibraryType::kPlain &&
-        platform::CanMKLDNNBeUsed(ctx)) {
+        this->CanMKLDNNBeUsed(ctx, input_data_type)) {
       library = framework::LibraryType::kMKLDNN;
       layout = framework::DataLayout::kMKLDNN;
     }
@@ -231,7 +232,8 @@ class DataNormOpMaker : public framework::OpProtoAndCheckerMaker {
         .SetDefault(false);
     AddAttr<bool>("use_mkldnn",
                   "(bool, default false) Only used in mkldnn kernel")
-        .SetDefault(false);
+        .SetDefault(false)
+        .AsExtra();
     AddInput("X", "The input tensor");
     AddInput("BatchSize",
              "BatchSize is a 1-dimensional tensor of size C "
@@ -388,7 +390,8 @@ class DataNormKernel<platform::CPUDeviceContext, T>
         break;
       }
       default:
-        PADDLE_THROW("Unknown storage order: %d", data_layout);
+        PADDLE_THROW(platform::errors::InvalidArgument(
+            "Unknown storage order: %d, please use NCHW or NHWC", data_layout));
     }
   }
 };
@@ -464,7 +467,8 @@ class DataNormGradOp : public framework::OperatorWithKernel {
       const framework::ExecutionContext &ctx) const override {
     const auto *var = ctx.InputVar(framework::GradVarName("Y"));
     if (var == nullptr) {
-      PADDLE_THROW("can't find Y@GRAD");
+      PADDLE_THROW(platform::errors::InvalidArgument(
+          "Y@GRAD can not be found for computation"));
     }
     const Tensor *t = nullptr;
     if (var->IsType<Tensor>()) {
@@ -473,24 +477,24 @@ class DataNormGradOp : public framework::OperatorWithKernel {
       t = &var->Get<LoDTensor>();
     }
     if (t == nullptr) {
-      PADDLE_THROW("can't find Y@GRAD");
+      PADDLE_THROW(platform::errors::InvalidArgument(
+          "Y@GRAD can not be found for computation"));
     }
 
     // TODO(pzelazko-intel): enable MKLDNN layout when it's ready
     framework::LibraryType library = framework::LibraryType::kPlain;
     framework::DataLayout layout = framework::DataLayout::kAnyLayout;
+    auto data_type = OperatorWithKernel::IndicateVarDataType(ctx, "X");
 
 #ifdef PADDLE_WITH_MKLDNN
     if (library == framework::LibraryType::kPlain &&
-        platform::CanMKLDNNBeUsed(ctx)) {
+        this->CanMKLDNNBeUsed(ctx, data_type)) {
       library = framework::LibraryType::kMKLDNN;
       layout = framework::DataLayout::kMKLDNN;
     }
 #endif
 
-    return framework::OpKernelType(
-        OperatorWithKernel::IndicateVarDataType(ctx, "X"), ctx.GetPlace(),
-        layout, library);
+    return framework::OpKernelType(data_type, ctx.GetPlace(), layout, library);
   }
 };
 
@@ -696,7 +700,9 @@ class DataNormGradKernel<platform::CPUDeviceContext, T>
         break;
       }
       default:
-        PADDLE_THROW("Unknown storage order: %s", data_layout_str);
+        PADDLE_THROW(platform::errors::InvalidArgument(
+            "Unknown storage order: %s, please use NCHW or NHWC",
+            data_layout_str));
     }
   }
 };
@@ -751,3 +757,10 @@ REGISTER_OP_CPU_KERNEL(
     data_norm_grad,
     ops::DataNormGradKernel<paddle::platform::CPUDeviceContext, float>,
     ops::DataNormGradKernel<paddle::platform::CPUDeviceContext, double>);
+REGISTER_OP_VERSION(data_norm)
+    .AddCheckpoint(
+        R"ROC(
+              upgrad data_norm op by adding scale_w to support scale and shift.)ROC",
+        paddle::framework::compatible::OpVersionDesc().NewInput(
+            "scale_w",
+            "scale_w is used to do scale duirng data_norm like batchnorm "));

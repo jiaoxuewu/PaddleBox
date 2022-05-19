@@ -27,6 +27,8 @@ from paddle.fluid.contrib.slim.quantization import OutScaleForInferencePass
 from paddle.fluid.contrib.slim.quantization import AddQuantDequantPass
 from paddle.fluid import core
 
+paddle.enable_static()
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["CPU_NUM"] = "1"
 
@@ -167,9 +169,11 @@ class TestQuantizationScalePass(unittest.TestCase):
             f.write(str(server_program))
 
         with fluid.scope_guard(scope):
-            fluid.io.save_inference_model('quant_scale_model' + dev_name,
-                                          ['image', 'label'], [loss], exe,
-                                          server_program)
+            fluid.io.save_inference_model(
+                'quant_scale_model' + dev_name, ['image', 'label'], [loss],
+                exe,
+                server_program,
+                clip_extra=True)
 
     def test_quant_scale_cuda(self):
         if fluid.core.is_compiled_with_cuda():

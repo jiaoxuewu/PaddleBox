@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
+import tempfile
+import shutil
 import numpy as np
 
 import paddle
@@ -23,27 +26,48 @@ import paddle.vision.models as models
 # test the predicted resutls of static graph and dynamic graph are equal
 # when used pretrained model
 class TestPretrainedModel(unittest.TestCase):
-    def infer(self, x, arch, dygraph=True):
-        if dygraph:
-            paddle.disable_static()
+    def infer(self, arch):
+        path = os.path.join(tempfile.mkdtemp(), '.cache_test_pretrained_model')
+        if not os.path.exists(path):
+            os.makedirs(path)
+        x = np.array(np.random.random((2, 3, 224, 224)), dtype=np.float32)
+        res = {}
+        for dygraph in [True, False]:
+            if not dygraph:
+                paddle.enable_static()
 
-        net = models.__dict__[arch](pretrained=True, classifier_activation=None)
-        inputs = [InputSpec([None, 3, 224, 224], 'float32', 'image')]
-        model = paddle.Model(network=net, inputs=inputs)
-        model.prepare()
-        res = model.test_batch(x)
+            net = models.__dict__[arch](pretrained=True)
+            inputs = [InputSpec([None, 3, 224, 224], 'float32', 'image')]
+            model = paddle.Model(network=net, inputs=inputs)
+            model.prepare()
 
-        if dygraph:
-            paddle.enable_static()
-        return res
+            if dygraph:
+                model.save(path)
+                res['dygraph'] = model.predict_batch(x)
+            else:
+                model.load(path)
+                res['static'] = model.predict_batch(x)
+
+            if not dygraph:
+                paddle.disable_static()
+
+        shutil.rmtree(path)
+        np.testing.assert_allclose(res['dygraph'], res['static'])
 
     def test_models(self):
-        arches = ['mobilenet_v1', 'mobilenet_v2', 'resnet18']
+        # TODO (LielinJiang): when model file cache is ok. add following test back
+        # 'resnet18', 'vgg16', 'alexnet', 'resnext50_32x4d', 'inception_v3', 
+        # 'densenet121', 'googlenet', 'wide_resnet50_2', 'wide_resnet101_2'  
+        arches = [
+            'mobilenet_v1',
+            'mobilenet_v2',
+            'mobilenet_v3_small',
+            'mobilenet_v3_large',
+            'squeezenet1_0',
+            'shufflenet_v2_x0_25',
+        ]
         for arch in arches:
-            x = np.array(np.random.random((2, 3, 224, 224)), dtype=np.float32)
-            y_dygraph = self.infer(x, arch)
-            y_static = self.infer(x, arch, dygraph=False)
-            np.testing.assert_allclose(y_dygraph, y_static)
+            self.infer(arch)
 
 
 if __name__ == '__main__':

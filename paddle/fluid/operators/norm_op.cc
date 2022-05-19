@@ -12,10 +12,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/norm_op.h"
 #include <memory>
 #include <string>
 #include <vector>
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/fluid/framework/op_registry.h"
+#include "paddle/phi/infermeta/unary.h"
 
 namespace paddle {
 namespace operators {
@@ -35,7 +37,12 @@ class NormOpMaker : public framework::OpProtoAndCheckerMaker {
     AddOutput("Norm",
               "(Tensor) A tensor saved the `sqrt(sum(x) + epsion)` will "
               "be used in backward kernel.")
-        .AsIntermediate();
+        .AsIntermediate()
+        .AsExtra();
+    AddAttr<bool>("is_test",
+                  "(bool, default false) Set to true for inference only, false "
+                  "for training.")
+        .SetDefault(false);
     AddOutput("Out", "(Tensor) A tensor of the same shape as X.");
     AddComment(R"DOC(
 
@@ -52,18 +59,7 @@ where, $\sum {x^2}$ is calculated along the `axis` dimension.
 };
 
 class NormOp : public framework::OperatorWithKernel {
- public:
   using framework::OperatorWithKernel::OperatorWithKernel;
-  void InferShape(framework::InferShapeContext* ctx) const override {
-    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "NormOp");
-    OP_INOUT_CHECK(ctx->HasOutput("Out"), "Output", "Out", "NormOp");
-    auto xdim = ctx->GetInputDim("X");
-    ctx->SetOutputDim("Out", xdim);
-    int axis = ctx->Attrs().Get<int>("axis");
-    if (axis < 0) axis = xdim.size() + axis;
-    xdim[axis] = 1;
-    ctx->SetOutputDim("Norm", xdim);
-  }
 };
 
 class NormOpGrad : public framework::OperatorWithKernel {
@@ -88,7 +84,11 @@ class NormOpGradOpMaker : public framework::SingleGradOpMaker<T> {
     op->SetAttrMap(this->Attrs());
     op->SetInput("X", this->Input("X"));
     op->SetInput(framework::GradVarName("Out"), this->OutputGrad("Out"));
+#ifndef PADDLE_WITH_ASCEND_CL
     op->SetInput("Norm", this->Output("Norm"));
+#else
+    op->SetInput("Out", this->Output("Out"));
+#endif
     op->SetOutput(framework::GradVarName("X"), this->InputGrad("X"));
   }
 };
@@ -99,11 +99,11 @@ class NormOpGradOpMaker : public framework::SingleGradOpMaker<T> {
 namespace ops = paddle::operators;
 using CPU = paddle::platform::CPUDeviceContext;
 
+DECLARE_INFER_SHAPE_FUNCTOR(norm, NormInferShapeFunctor,
+                            PD_INFER_META(phi::NormInferMeta));
+
 REGISTER_OPERATOR(norm, ops::NormOp, ops::NormOpMaker,
                   ops::NormOpGradOpMaker<paddle::framework::OpDesc>,
-                  ops::NormOpGradOpMaker<paddle::imperative::OpBase>);
+                  ops::NormOpGradOpMaker<paddle::imperative::OpBase>,
+                  NormInferShapeFunctor);
 REGISTER_OPERATOR(norm_grad, ops::NormOpGrad);
-REGISTER_OP_CPU_KERNEL(norm, ops::NormKernel<CPU, float>,
-                       ops::NormKernel<CPU, double>);
-REGISTER_OP_CPU_KERNEL(norm_grad, ops::NormGradKernel<CPU, float>,
-                       ops::NormGradKernel<CPU, double>);

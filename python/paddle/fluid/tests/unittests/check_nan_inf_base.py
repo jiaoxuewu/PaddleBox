@@ -28,6 +28,8 @@ import paddle
 import paddle.fluid as fluid
 import paddle.compat as cpt
 
+paddle.enable_static()
+
 np.random.seed(0)
 
 
@@ -101,6 +103,14 @@ def check(use_cuda):
 
 
 if __name__ == '__main__':
+    try:
+        check(use_cuda=False)
+        assert False
+    except Exception as e:
+        print(e)
+        print(type(e))
+        assert type(e) == RuntimeError
+
     if core.is_compiled_with_cuda():
         try:
             check(use_cuda=True)
@@ -110,11 +120,4 @@ if __name__ == '__main__':
             print(type(e))
             # Note. Enforce in cuda kernel may not catch in paddle, and
             # Exception type will be RuntimeError
-            assert type(e) == core.EnforceNotMet or type(e) == RuntimeError
-    try:
-        check(use_cuda=False)
-        assert False
-    except Exception as e:
-        print(e)
-        print(type(e))
-        assert type(e) == core.EnforceNotMet
+            assert type(e) == OSError or type(e) == RuntimeError

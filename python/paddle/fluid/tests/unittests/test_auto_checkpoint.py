@@ -31,6 +31,7 @@ from paddle.io import Dataset, BatchSampler, DataLoader
 
 from paddle.fluid.tests.unittests.auto_checkpoint_utils import AutoCheckpointBase, get_logger
 
+paddle.enable_static()
 logger = get_logger()
 
 
@@ -267,7 +268,7 @@ class AutoCheckpointTest(AutoCheckPointACLBase):
     def test_checker(self):
         os.environ.pop("PADDLE_JOB_ID", None)
         try:
-            checker = AutoCheckpointChecker()
+            checker = acp.AutoCheckpointChecker()
             self.assertFalse(True)
         except Exception as e:
             pass

@@ -15,7 +15,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include "paddle/fluid/operators/sequence_ops/sequence_enumerate_op.h"
-#include "paddle/fluid/platform/cuda_primitives.h"
+#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
 
 namespace paddle {
 namespace operators {
@@ -58,7 +58,10 @@ class SequenceEnumerateOpCUDAKernel : public framework::OpKernel<T> {
 
     PADDLE_ENFORCE_EQ(
         static_cast<uint64_t>(in_dims[0]), in_lod[0].back(),
-        "The actual input data's size mismatched with LoD information.");
+        platform::errors::InvalidArgument(
+            "The actual input data's size mismatched with LoD information."
+            "Received input data size is %d (actual) vs %d (loD information).",
+            static_cast<uint64_t>(in_dims[0]), in_lod[0].back()));
 
     /* Generate enumerate sequence set */
     auto stream = context.cuda_device_context().stream();
@@ -68,7 +71,8 @@ class SequenceEnumerateOpCUDAKernel : public framework::OpKernel<T> {
     out->Resize({in_dims[0], win_size});
     auto out_data = out->mutable_data<T>(context.GetPlace());
     // Copy LoD to GPU
-    const size_t* dev_in_lod_ptr = lod0.CUDAData(context.GetPlace());
+    paddle::framework::MixVector<size_t> mixv_lod0(&lod0);
+    const size_t* dev_in_lod_ptr = mixv_lod0.CUDAData(context.GetPlace());
     // Calc output tensor
     CalcOutPut<<<(in_len - 1) / PADDLE_CUDA_NUM_THREADS + 1,
                  PADDLE_CUDA_NUM_THREADS, 0, stream>>>(

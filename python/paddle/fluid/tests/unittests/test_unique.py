@@ -21,6 +21,7 @@ import paddle
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 from paddle.fluid.op import Operator
+from paddle.fluid.framework import _test_eager_guard
 
 
 class TestUniqueOp(OpTest):
@@ -251,10 +252,16 @@ class TestUniqueAPI(unittest.TestCase):
         self.assertTrue((counts.numpy() == np_counts).all(), True)
         paddle.enable_static()
 
+    def test_dygraph_final_state_api(self):
+        with _test_eager_guard():
+            self.test_dygraph_api_out()
+            self.test_dygraph_api_attr()
+            self.test_dygraph_attr_dtype()
+
     def test_static_graph(self):
         with paddle.static.program_guard(paddle.static.Program(),
                                          paddle.static.Program()):
-            x = paddle.data(name='x', shape=[3, 2], dtype='float64')
+            x = paddle.fluid.data(name='x', shape=[3, 2], dtype='float64')
             unique, inverse, counts = paddle.unique(
                 x, return_inverse=True, return_counts=True, axis=0)
             place = paddle.CPUPlace()
@@ -274,13 +281,13 @@ class TestUniqueError(unittest.TestCase):
         def test_x_dtype():
             with paddle.static.program_guard(paddle.static.Program(),
                                              paddle.static.Program()):
-                x = paddle.data(name='x', shape=[10, 10], dtype='float16')
+                x = paddle.fluid.data(name='x', shape=[10, 10], dtype='float16')
                 result = paddle.unique(x)
 
             self.assertRaises(TypeError, test_x_dtype)
 
     def test_attr(self):
-        x = paddle.data(name='x', shape=[10, 10], dtype='float64')
+        x = paddle.fluid.data(name='x', shape=[10, 10], dtype='float64')
 
         def test_return_index():
             result = paddle.unique(x, return_index=0)

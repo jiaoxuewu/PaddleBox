@@ -15,6 +15,8 @@
 from __future__ import print_function
 
 import unittest
+import os
+import tempfile
 from time import time
 
 import numpy as np
@@ -25,12 +27,16 @@ from paddle.fluid.dygraph.base import switch_to_static_graph
 from paddle.fluid.dygraph import to_variable
 from paddle.fluid.dygraph.nn import Conv2D, Linear, Pool2D
 from paddle.fluid.optimizer import AdamOptimizer
-from paddle.fluid.dygraph.io import VARIABLE_FILENAME
+from paddle.fluid.dygraph.io import INFER_MODEL_SUFFIX, INFER_PARAMS_SUFFIX
 from paddle.fluid.dygraph.dygraph_to_static import ProgramTranslator
+from paddle.fluid.framework import _test_eager_guard
 
 from predictor_utils import PredictorTools
 
 SEED = 2020
+
+if paddle.fluid.is_compiled_with_cuda():
+    paddle.fluid.set_flags({'FLAGS_cudnn_deterministic': True})
 
 
 class SimpleImgConvPool(fluid.dygraph.Layer):
@@ -48,7 +54,7 @@ class SimpleImgConvPool(fluid.dygraph.Layer):
                  conv_dilation=1,
                  conv_groups=1,
                  act=None,
-                 use_cudnn=False,
+                 use_cudnn=True,
                  param_attr=None,
                  bias_attr=None):
         super(SimpleImgConvPool, self).__init__()
@@ -101,7 +107,6 @@ class MNIST(fluid.dygraph.Layer):
                     loc=0.0, scale=scale)),
             act="softmax")
 
-    @paddle.jit.to_static
     def forward(self, inputs, label=None):
         x = self.inference(inputs)
         if label is not None:
@@ -131,6 +136,10 @@ class TestMNIST(unittest.TestCase):
             paddle.dataset.mnist.train(),
             batch_size=self.batch_size,
             drop_last=True)
+        self.temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
 
 class TestMNISTWithToStatic(TestMNIST):
@@ -153,6 +162,13 @@ class TestMNISTWithToStatic(TestMNIST):
             np.allclose(dygraph_loss, static_loss),
             msg='dygraph is {}\n static_res is \n{}'.format(dygraph_loss,
                                                             static_loss))
+        with _test_eager_guard():
+            dygraph_loss = self.train_dygraph()
+            static_loss = self.train_static()
+            self.assertTrue(
+                np.allclose(dygraph_loss, static_loss),
+                msg='dygraph is {}\n static_res is \n{}'.format(dygraph_loss,
+                                                                static_loss))
 
     def test_mnist_declarative_cpu_vs_mkldnn(self):
         dygraph_loss_cpu = self.train_dygraph()
@@ -167,14 +183,14 @@ class TestMNISTWithToStatic(TestMNIST):
                 dygraph_loss_cpu, dygraph_loss_mkldnn))
 
     def train(self, to_static=False):
-        prog_trans = ProgramTranslator()
-        prog_trans.enable(to_static)
 
         loss_data = []
         with fluid.dygraph.guard(self.place):
             fluid.default_main_program().random_seed = SEED
             fluid.default_startup_program().random_seed = SEED
             mnist = MNIST()
+            if to_static:
+                mnist = paddle.jit.to_static(mnist)
             adam = AdamOptimizer(
                 learning_rate=0.001, parameter_list=mnist.parameters())
 
@@ -217,35 +233,41 @@ class TestMNISTWithToStatic(TestMNIST):
 
     def check_jit_save_load(self, model, inputs, input_spec, to_static, gt_out):
         if to_static:
-            infer_model_path = "./test_mnist_inference_model_by_jit_save"
-            configs = fluid.dygraph.jit.SaveLoadConfig()
-            configs.output_spec = [gt_out]
+            infer_model_path = os.path.join(
+                self.temp_dir.name, 'test_mnist_inference_model_by_jit_save')
+            model_save_dir = os.path.join(self.temp_dir.name, 'inference')
+            model_save_prefix = os.path.join(model_save_dir, 'mnist')
+            model_filename = "mnist" + INFER_MODEL_SUFFIX
+            params_filename = "mnist" + INFER_PARAMS_SUFFIX
             fluid.dygraph.jit.save(
                 layer=model,
-                model_path=infer_model_path,
+                path=model_save_prefix,
                 input_spec=input_spec,
-                configs=configs)
+                output_spec=[gt_out])
             # load in static mode
             static_infer_out = self.jit_load_and_run_inference_static(
-                infer_model_path, inputs)
+                model_save_dir, model_filename, params_filename, inputs)
             self.assertTrue(np.allclose(gt_out.numpy(), static_infer_out))
             # load in dygraph mode
             dygraph_infer_out = self.jit_load_and_run_inference_dygraph(
-                infer_model_path, inputs)
+                model_save_prefix, inputs)
             self.assertTrue(np.allclose(gt_out.numpy(), dygraph_infer_out))
             # load in Paddle-Inference
             predictor_infer_out = self.predictor_load_and_run_inference_analysis(
-                infer_model_path, inputs)
+                model_save_dir, model_filename, params_filename, inputs)
             self.assertTrue(np.allclose(gt_out.numpy(), predictor_infer_out))
 
     @switch_to_static_graph
-    def jit_load_and_run_inference_static(self, model_path, inputs):
+    def jit_load_and_run_inference_static(self, model_path, model_filename,
+                                          params_filename, inputs):
+        paddle.enable_static()
         exe = fluid.Executor(self.place)
         [inference_program, feed_target_names,
          fetch_targets] = fluid.io.load_inference_model(
              dirname=model_path,
              executor=exe,
-             params_filename=VARIABLE_FILENAME)
+             model_filename=model_filename,
+             params_filename=params_filename)
         assert len(inputs) == len(feed_target_names)
         results = exe.run(inference_program,
                           feed=dict(zip(feed_target_names, inputs)),
@@ -258,8 +280,10 @@ class TestMNISTWithToStatic(TestMNIST):
         pred = infer_net(inputs[0])
         return pred.numpy()
 
-    def predictor_load_and_run_inference_analysis(self, model_path, inputs):
-        output = PredictorTools(model_path, VARIABLE_FILENAME, inputs)
+    def predictor_load_and_run_inference_analysis(
+            self, model_path, model_filename, params_filename, inputs):
+        output = PredictorTools(model_path, model_filename, params_filename,
+                                inputs)
         out = output()
         return out
 

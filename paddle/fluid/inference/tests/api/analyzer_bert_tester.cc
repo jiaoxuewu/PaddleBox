@@ -156,6 +156,9 @@ void profile(bool use_mkldnn = false) {
 
   if (use_mkldnn) {
     config.EnableMKLDNN();
+    config.pass_builder()->AppendPass("fc_mkldnn_pass");
+    config.pass_builder()->AppendPass("fc_act_mkldnn_fuse_pass");
+    config.pass_builder()->AppendPass("fc_elementwise_add_mkldnn_fuse_pass");
   }
 
   std::vector<std::vector<PaddleTensor>> outputs;
@@ -245,8 +248,14 @@ TEST(Analyzer_bert, transfer_scope_cache) {
   // Since paddle::framework::global_transfer_scope_cache() and
   // paddle::framework::global_transfer_data_cache() are thread_local,
   // their pointer should be different among different thread id.
-  PADDLE_ENFORCE(global_transfer_scope_cache.size(), threads_num);
-  PADDLE_ENFORCE(global_transfer_data_cache.size(), threads_num);
+  PADDLE_ENFORCE_EQ(
+      global_transfer_scope_cache.size(), threads_num,
+      paddle::platform::errors::Fatal(
+          "The size of scope cache is not equal to thread number."));
+  PADDLE_ENFORCE_EQ(
+      global_transfer_data_cache.size(), threads_num,
+      paddle::platform::errors::Fatal(
+          "The size of data cache is not equal to thread number."));
 }
 
 }  // namespace inference

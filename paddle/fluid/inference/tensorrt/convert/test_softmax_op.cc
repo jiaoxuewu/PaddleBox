@@ -25,9 +25,8 @@ TEST(SoftMaxOpConverter, main) {
   TRTConvertValidation validator(8, parameters, scope, 1000);
 
   std::vector<int> tensor_shape{8, 10};
-  validator.DeclInputVar("softmax-X", tensor_shape,
-                         nvinfer1::DimsCHW(10, 1, 1));
-  validator.DeclOutputVar("softmax-Out", nvinfer1::DimsCHW(10, 1, 1));
+  validator.DeclInputVar("softmax-X", tensor_shape, nvinfer1::Dims3(10, 1, 1));
+  validator.DeclOutputVar("softmax-Out", nvinfer1::Dims3(10, 1, 1));
 
   // Prepare Op description
   framework::OpDesc desc;
@@ -46,4 +45,4 @@ TEST(SoftMaxOpConverter, main) {
 }  // namespace inference
 }  // namespace paddle
 
-USE_OP(softmax);
+USE_OP_ITSELF(softmax);

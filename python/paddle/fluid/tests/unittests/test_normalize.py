@@ -20,6 +20,7 @@ import paddle.nn.functional as F
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 import numpy as np
+from paddle.fluid.framework import _test_eager_guard
 
 
 def p_normalize(x, axis=1, p=2, epsilon=1e-12, keepdims=True):
@@ -56,8 +57,8 @@ class TestNNFunctionalNormalize(unittest.TestCase):
         self.assertRaises(BaseException, F.normalize, x)
 
     def run_static(self, use_gpu=False):
-        x = paddle.data(name='input', shape=[10, 10], dtype='float32')
-        x2 = paddle.data(name='input2', shape=[2], dtype='float32')
+        x = paddle.fluid.data(name='input', shape=[10, 10], dtype='float32')
+        x2 = paddle.fluid.data(name='input2', shape=[2], dtype='float32')
         result0 = F.normalize(x)
         result1 = F.normalize(x, p=1.5)
         result2 = F.normalize(x, axis=0)
@@ -87,6 +88,12 @@ class TestNNFunctionalNormalize(unittest.TestCase):
         with fluid.program_guard(fluid.Program()):
             self.run_static()
 
+    def test_cpu_eager(self):
+        with _test_eager_guard():
+            paddle.disable_static(place=paddle.fluid.CPUPlace())
+            self.run_imperative()
+            paddle.enable_static()
+
     def test_gpu(self):
         if not fluid.core.is_compiled_with_cuda():
             return
@@ -97,6 +104,15 @@ class TestNNFunctionalNormalize(unittest.TestCase):
 
         with fluid.program_guard(fluid.Program()):
             self.run_static(use_gpu=True)
+
+    def test_gpu_eager(self):
+        with _test_eager_guard():
+            if not fluid.core.is_compiled_with_cuda():
+                return
+
+            paddle.disable_static(place=paddle.fluid.CUDAPlace(0))
+            self.run_imperative()
+            paddle.enable_static()
 
 
 if __name__ == "__main__":

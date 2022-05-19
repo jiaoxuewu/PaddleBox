@@ -16,8 +16,8 @@ limitations under the License. */
 #include <memory>
 #include <string>
 #include <vector>
-#include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 #ifdef PADDLE_WITH_MKLDNN
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #endif
@@ -35,8 +35,8 @@ struct LRNFunctor<platform::CPUDeviceContext, T> {
                   framework::Tensor* mid, int N, int C, int H, int W, int n,
                   T k, T alpha, T beta, const DataLayout data_layout) {
     auto place = ctx.GetPlace();
-    auto blas = math::GetBlas<platform::CPUDeviceContext, T>(ctx);
-    math::Transpose<platform::CPUDeviceContext, T, 4> transpose;
+    auto blas = phi::funcs::GetBlas<platform::CPUDeviceContext, T>(ctx);
+    phi::funcs::Transpose<platform::CPUDeviceContext, T, 4> transpose;
     auto& dev_ctx = ctx.template device_context<platform::CPUDeviceContext>();
     Tensor in_transpose, mid_transpose, out_transpose;
     // if channel_last, transpose to channel_first
@@ -44,9 +44,9 @@ struct LRNFunctor<platform::CPUDeviceContext, T> {
       auto in_dims = input.dims();
       std::vector<int64_t> shape(
           {in_dims[0], in_dims[3], in_dims[1], in_dims[2]});
-      in_transpose.mutable_data<T>(framework::make_ddim(shape), place);
-      mid_transpose.mutable_data<T>(framework::make_ddim(shape), place);
-      out_transpose.mutable_data<T>(framework::make_ddim(shape), place);
+      in_transpose.mutable_data<T>(phi::make_ddim(shape), place);
+      mid_transpose.mutable_data<T>(phi::make_ddim(shape), place);
+      out_transpose.mutable_data<T>(phi::make_ddim(shape), place);
       std::vector<int> axis = {0, 3, 1, 2};
       transpose(dev_ctx, input, &in_transpose, axis);
     } else {
@@ -199,16 +199,16 @@ class LRNOp : public framework::OperatorWithKernel {
     framework::LibraryType library_{framework::LibraryType::kPlain};
     // TODO(pzelazko-intel): enable MKLDNN layout when it's ready
     framework::DataLayout layout_ = framework::DataLayout::kAnyLayout;
+    auto data_type = OperatorWithKernel::IndicateVarDataType(ctx, "X");
 #ifdef PADDLE_WITH_MKLDNN
     if (library_ == framework::LibraryType::kPlain &&
-        platform::CanMKLDNNBeUsed(ctx)) {
+        this->CanMKLDNNBeUsed(ctx, data_type)) {
       library_ = framework::LibraryType::kMKLDNN;
       layout_ = framework::DataLayout::kMKLDNN;
     }
 #endif
-    return framework::OpKernelType(
-        OperatorWithKernel::IndicateVarDataType(ctx, "X"), ctx.GetPlace(),
-        layout_, library_);
+    return framework::OpKernelType(data_type, ctx.GetPlace(), layout_,
+                                   library_);
   }
 
   framework::OpKernelType GetKernelTypeForVar(
@@ -221,7 +221,7 @@ class LRNOp : public framework::OperatorWithKernel {
       auto ar = paddle::framework::AttrReader(attrs);
       const std::string data_format = ar.Get<std::string>("data_format");
       auto dl = framework::StringToDataLayout(data_format);
-      // Some models may have intentionally set "AnyLayout" for pool
+      // Some models may have intentionally set "AnyLayout" for lrn
       // op. Treat this as NCHW (default data_format value)
       if (dl != framework::DataLayout::kAnyLayout) {
         return framework::OpKernelType(expected_kernel_type.data_type_,
@@ -274,7 +274,8 @@ class LRNOpMaker : public framework::OpProtoAndCheckerMaker {
         .GreaterThan(0.0);
     AddAttr<bool>("use_mkldnn",
                   "(bool, default false) Only used in mkldnn kernel")
-        .SetDefault(false);
+        .SetDefault(false)
+        .AsExtra();
     AddAttr<std::string>(
         "data_format",
         "(string, default NCHW) Only used in "
@@ -285,7 +286,8 @@ class LRNOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<bool>("is_test",
                   "(bool, default false) Set to true for inference only, false "
                   "for training. Some layers may run faster when this is true.")
-        .SetDefault(false);
+        .SetDefault(false)
+        .AsExtra();
 
     AddComment(R"DOC(
 Local Response Normalization Operator.
@@ -339,16 +341,16 @@ class LRNOpGrad : public framework::OperatorWithKernel {
     framework::LibraryType library_{framework::LibraryType::kPlain};
     // TODO(pzelazko-intel): enable MKLDNN layout when it's ready
     framework::DataLayout layout_ = framework::DataLayout::kAnyLayout;
+    auto data_type = OperatorWithKernel::IndicateVarDataType(ctx, "X");
 #ifdef PADDLE_WITH_MKLDNN
     if (library_ == framework::LibraryType::kPlain &&
-        platform::CanMKLDNNBeUsed(ctx)) {
+        this->CanMKLDNNBeUsed(ctx, data_type)) {
       library_ = framework::LibraryType::kMKLDNN;
       layout_ = framework::DataLayout::kMKLDNN;
     }
 #endif
-    return framework::OpKernelType(
-        OperatorWithKernel::IndicateVarDataType(ctx, "X"), ctx.GetPlace(),
-        layout_, library_);
+    return framework::OpKernelType(data_type, ctx.GetPlace(), layout_,
+                                   library_);
   }
 
   framework::OpKernelType GetKernelTypeForVar(

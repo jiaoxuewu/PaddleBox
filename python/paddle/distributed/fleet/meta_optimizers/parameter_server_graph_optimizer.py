@@ -15,6 +15,8 @@ from paddle import fluid
 from paddle.fluid import compiler
 from .parameter_server_optimizer import ParameterServerOptimizer
 
+__all__ = []
+
 
 class ParameterServerGraphOptimizer(ParameterServerOptimizer):
     def __init__(self, optimizer):
@@ -24,11 +26,14 @@ class ParameterServerGraphOptimizer(ParameterServerOptimizer):
         self.meta_optimizers_white_list = []
 
     def _can_apply(self):
+        if self.role_maker._is_collective:
+            return False
+
         k_steps = self.user_defined_strategy.a_sync_configs["k_steps"]
         if k_steps < 0:
             return False
 
-        if self.role_maker.is_server():
+        if self.role_maker._is_server():
             return False
 
         if self.role_maker._is_heter_parameter_server_mode:
@@ -37,12 +42,11 @@ class ParameterServerGraphOptimizer(ParameterServerOptimizer):
         return True
 
     def _disable_strategy(self, dist_strategy):
-        dist_strategy.a_sync_configs = {}
+        return
 
-    def _enable_strategy(self, dist_strategy):
+    def _enable_strategy(self, dist_strategy, context):
         # only open up the async mode for auto-parallel
-        dist_strategy.a_sync = True
-        dist_strategy.a_sync_configs = {}
+        return
 
     def _is_graph_out(self):
         return True

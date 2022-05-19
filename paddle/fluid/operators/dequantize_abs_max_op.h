@@ -15,9 +15,14 @@ limitations under the License. */
 #pragma once
 
 #include <vector>
-#include "paddle/fluid/framework/ddim.h"
+
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
+#include "paddle/phi/core/ddim.h"
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
 
 namespace paddle {
 namespace operators {
@@ -35,6 +40,7 @@ class DequantizeMaxAbsKernel : public framework::OpKernel<T> {
   virtual void Compute(const framework::ExecutionContext& ctx) const {
     auto* in = ctx.Input<framework::Tensor>("X");
     auto* scale = ctx.Input<framework::Tensor>("Scale");
+
     auto* out = ctx.Output<framework::Tensor>("Out");
 
     float max_range = ctx.Attr<float>("max_range");

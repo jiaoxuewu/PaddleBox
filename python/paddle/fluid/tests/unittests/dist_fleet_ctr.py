@@ -28,7 +28,10 @@ import numpy as np
 
 import ctr_dataset_reader
 from test_dist_fleet_base import runtime_main, FleetDistRunnerBase
-from paddle.distributed.fleet.base.util_factory import fleet_util
+from paddle.distributed.fleet.utils.ps_util import DistributedInfer
+import paddle.distributed.fleet as fleet
+
+paddle.enable_static()
 
 # Fix seed for test
 fluid.default_startup_program().random_seed = 1
@@ -51,7 +54,7 @@ class TestDistCTR2x2(FleetDistRunnerBase):
     For test CTR model, using Fleet api
     """
 
-    def net(self, args, batch_size=4, lr=0.01):
+    def net(self, args, is_train=True, batch_size=4, lr=0.01):
         """
         network definition
 
@@ -85,13 +88,20 @@ class TestDistCTR2x2(FleetDistRunnerBase):
         datas = [dnn_data, lr_data, label]
 
         if args.reader == "pyreader":
-            self.reader = fluid.io.PyReader(
-                feed_list=datas,
-                capacity=64,
-                iterable=False,
-                use_double_buffer=False)
+            if is_train:
+                self.reader = fluid.io.PyReader(
+                    feed_list=datas,
+                    capacity=64,
+                    iterable=False,
+                    use_double_buffer=False)
+            else:
+                self.test_reader = fluid.io.PyReader(
+                    feed_list=datas,
+                    capacity=64,
+                    iterable=False,
+                    use_double_buffer=False)
 
-        # build dnn model
+# build dnn model
         dnn_layer_dims = [128, 128, 64, 32, 1]
         dnn_embedding = fluid.layers.embedding(
             is_distributed=False,
@@ -100,7 +110,8 @@ class TestDistCTR2x2(FleetDistRunnerBase):
             param_attr=fluid.ParamAttr(
                 name="deep_embedding",
                 initializer=fluid.initializer.Constant(value=0.01)),
-            is_sparse=True)
+            is_sparse=True,
+            padding_idx=0)
         dnn_pool = fluid.layers.sequence_pool(
             input=dnn_embedding, pool_type="sum")
         dnn_out = dnn_pool
@@ -122,7 +133,8 @@ class TestDistCTR2x2(FleetDistRunnerBase):
             param_attr=fluid.ParamAttr(
                 name="wide_embedding",
                 initializer=fluid.initializer.Constant(value=0.01)),
-            is_sparse=True)
+            is_sparse=True,
+            padding_idx=0)
         lr_pool = fluid.layers.sequence_pool(input=lr_embbding, pool_type="sum")
 
         merge_layer = fluid.layers.concat(input=[dnn_out, lr_pool], axis=1)
@@ -144,6 +156,7 @@ class TestDistCTR2x2(FleetDistRunnerBase):
         return avg_cost
 
     def check_model_right(self, dirname):
+        dirname = dirname + '/dnn_plugin/'
         model_filename = os.path.join(dirname, "__model__")
 
         with open(model_filename, "rb") as f:
@@ -153,16 +166,46 @@ class TestDistCTR2x2(FleetDistRunnerBase):
         with open(os.path.join(dirname, "__model__.proto"), "w") as wn:
             wn.write(str(program))
 
+    def do_distributed_testing(self, fleet):
+        """
+        do distributed
+        """
+        exe = self.get_executor()
+
+        batch_size = 4
+        test_reader = paddle.batch(fake_ctr_reader(), batch_size=batch_size)
+        self.test_reader.decorate_sample_list_generator(test_reader)
+
+        pass_start = time.time()
+        batch_idx = 0
+
+        self.test_reader.start()
+        try:
+            while True:
+                batch_idx += 1
+                loss_val = exe.run(program=paddle.static.default_main_program(),
+                                   fetch_list=[self.avg_cost.name])
+                loss_val = np.mean(loss_val)
+                message = "TEST ---> batch_idx: {} loss: {}\n".format(batch_idx,
+                                                                      loss_val)
+                fleet.util.print_on_rank(message, 0)
+        except fluid.core.EOFException:
+            self.test_reader.reset()
+
+        pass_time = time.time() - pass_start
+        message = "Distributed Test Succeed, Using Time {}\n".format(pass_time)
+        fleet.util.print_on_rank(message, 0)
+
     def do_pyreader_training(self, fleet):
         """
         do training using dataset, using fetch handler to catch variable
         Args:
             fleet(Fleet api): the fleet object of Parameter Server, define distribute training role
         """
-
-        exe = fluid.Executor(fluid.CPUPlace())
-        fleet.init_worker()
+        exe = self.get_executor()
         exe.run(fluid.default_startup_program())
+        fleet.init_worker()
+
         batch_size = 4
         train_reader = paddle.batch(fake_ctr_reader(), batch_size=batch_size)
         self.reader.decorate_sample_list_generator(train_reader)
@@ -176,46 +219,50 @@ class TestDistCTR2x2(FleetDistRunnerBase):
                                        fetch_list=[self.avg_cost.name])
                     loss_val = np.mean(loss_val)
                     # TODO(randomly fail)
-                    #   reduce_output = fleet_util.all_reduce(
+                    #   reduce_output = fleet.util.all_reduce(
                     #       np.array(loss_val), mode="sum")
-                    #   loss_all_trainer = fleet_util.all_gather(float(loss_val))
+                    #   loss_all_trainer = fleet.util.all_gather(float(loss_val))
                     #   loss_val = float(reduce_output) / len(loss_all_trainer)
                     message = "TRAIN ---> pass: {} loss: {}\n".format(epoch_id,
                                                                       loss_val)
-                    fleet_util.print_on_rank(message, 0)
+                    fleet.util.print_on_rank(message, 0)
 
                 pass_time = time.time() - pass_start
             except fluid.core.EOFException:
                 self.reader.reset()
+
+        dirname = os.getenv("SAVE_DIRNAME", None)
+        if dirname:
+            fleet.save_persistables(exe, dirname=dirname)
 
         model_dir = tempfile.mkdtemp()
         fleet.save_inference_model(
             exe, model_dir, [feed.name for feed in self.feeds], self.avg_cost)
         self.check_model_right(model_dir)
         shutil.rmtree(model_dir)
-        fleet.stop_worker()
 
-    def do_dataset_training(self, fleet):
+    def do_dataset_training_queuedataset(self, fleet):
         train_file_list = ctr_dataset_reader.prepare_fake_data()
 
-        exe = fluid.Executor(fluid.CPUPlace())
-
-        fleet.init_worker()
+        exe = self.get_executor()
         exe.run(fluid.default_startup_program())
+        fleet.init_worker()
 
         thread_num = 2
         batch_size = 128
         filelist = train_file_list
 
         # config dataset
-        dataset = paddle.distributed.fleet.DatasetFactory().create_dataset()
-        dataset.set_batch_size(batch_size)
-        dataset.set_use_var(self.feeds)
+        dataset = paddle.distributed.QueueDataset()
         pipe_command = 'python ctr_dataset_reader.py'
-        dataset.set_pipe_command(pipe_command)
+
+        dataset.init(
+            batch_size=batch_size,
+            use_var=self.feeds,
+            pipe_command=pipe_command,
+            thread_num=thread_num)
 
         dataset.set_filelist(filelist)
-        dataset.set_thread(thread_num)
 
         for epoch_id in range(1):
             pass_start = time.time()
@@ -237,8 +284,64 @@ class TestDistCTR2x2(FleetDistRunnerBase):
             self.check_model_right(model_dir)
             shutil.rmtree(model_dir)
 
-        fleet.stop_worker()
+        dirname = os.getenv("SAVE_DIRNAME", None)
+        if dirname:
+            fleet.save_persistables(exe, dirname=dirname)
 
+    def do_dataset_training(self, fleet):
+        train_file_list = ctr_dataset_reader.prepare_fake_data()
+
+        exe = self.get_executor()
+        exe.run(fluid.default_startup_program())
+        fleet.init_worker()
+
+        thread_num = 2
+        batch_size = 128
+        filelist = train_file_list
+
+        # config dataset
+        dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
+        dataset.set_use_var(self.feeds)
+        dataset.set_batch_size(128)
+        dataset.set_thread(2)
+        dataset.set_filelist(filelist)
+        dataset.set_pipe_command('python ctr_dataset_reader.py')
+        dataset.load_into_memory()
+
+        dataset.global_shuffle(fleet, 12)  ##TODO: thread configure
+        shuffle_data_size = dataset.get_shuffle_data_size(fleet)
+        local_data_size = dataset.get_shuffle_data_size()
+        data_size_list = fleet.util.all_gather(local_data_size)
+        print('after global_shuffle data_size_list: ', data_size_list)
+        print('after global_shuffle data_size: ', shuffle_data_size)
+
+        for epoch_id in range(1):
+            pass_start = time.time()
+            exe.train_from_dataset(
+                program=fluid.default_main_program(),
+                dataset=dataset,
+                fetch_list=[self.avg_cost],
+                fetch_info=["cost"],
+                print_period=2,
+                debug=int(os.getenv("Debug", "0")))
+            pass_time = time.time() - pass_start
+        dataset.release_memory()
+
+        if os.getenv("SAVE_MODEL") == "1":
+            model_dir = tempfile.mkdtemp()
+            fleet.save_inference_model(exe, model_dir,
+                                       [feed.name for feed in self.feeds],
+                                       self.avg_cost)
+            self.check_model_right(model_dir)
+            shutil.rmtree(model_dir)
+
+        dirname = os.getenv("SAVE_DIRNAME", None)
+        if dirname:
+            fleet.save_persistables(exe, dirname=dirname)
+
+        cache_dirname = os.getenv("SAVE_CACHE_DIRNAME", None)
+        if cache_dirname:
+            fleet.save_cache_model(cache_dirname)
 
 if __name__ == "__main__":
     runtime_main(TestDistCTR2x2)

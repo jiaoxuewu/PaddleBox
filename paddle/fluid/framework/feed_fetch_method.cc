@@ -13,15 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/feed_fetch_method.h"
+
 #include <string>
-#include <vector>
+
+#include <boost/variant.hpp>
 #include "glog/logging.h"
-#include "paddle/fluid/framework/var_type.h"
-#include "paddle/fluid/framework/variable.h"
-#include "paddle/fluid/platform/place.h"
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
 
 namespace paddle {
 namespace framework {
+
+class Variable;
 
 void SetFeedVariable(Scope* scope, const LoDTensor& input,
                      const std::string& var_name, size_t index) {
@@ -34,9 +39,24 @@ void SetFeedVariable(Scope* scope, const LoDTensor& input,
     feed_inputs.resize(index + 1);
   }
   // shared data with input tensor
-  feed_inputs[index].ShareDataWith(input);
+  auto& val = BOOST_GET(LoDTensor, feed_inputs[index]);
+  val.ShareDataWith(input);
   // set lod
-  feed_inputs[index].set_lod(input.lod());
+  val.set_lod(input.lod());
+}
+
+void SetFeedVariable(Scope* scope, const Strings& input,
+                     const std::string& var_name, size_t index) {
+  // If var_name Variable is not found in GlobalScope, a new variable will
+  // be created.
+  VLOG(3) << "SetFeedStringVariable name=" << var_name << " index=" << index;
+  Variable* g_feed_value = scope->Var(var_name);
+  auto& feed_inputs = *(g_feed_value->GetMutable<FeedList>());
+  if (index >= feed_inputs.size()) {
+    feed_inputs.resize(index + 1);
+  }
+  // shared data with input tensor
+  feed_inputs[index] = input;
 }
 
 FetchType& GetFetchVariable(const Scope& scope, const std::string& var_name,

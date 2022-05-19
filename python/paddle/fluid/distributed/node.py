@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 
 import ps_pb2 as pslib
+# NOTE: reduce removed in fuctools in python3
+from functools import reduce
 
 
 class Server(object):
@@ -47,12 +49,11 @@ class DownpourServer(Server):
         self.server_.downpour_server_param.service_param.server_class = "DownpourBrpcPsServer"
         self.server_.downpour_server_param.service_param.client_class = "DownpourBrpcPsClient"
         self.server_.downpour_server_param.service_param.service_class = "DownpourPsService"
-        self.server_.downpour_server_param.service_param.start_server_port = 0
         self.server_.downpour_server_param.service_param.server_thread_num = 12
 
     def add_sparse_table(self, table_id, learning_rate, slot_key_vars,
                          slot_value_var):
-        """
+        r"""
         Args:
             table_id(int): id of sparse params table
             learning_rate(float): the learning rate used to update parameters. \
@@ -84,7 +85,7 @@ class DownpourServer(Server):
         table.accessor.downpour_accessor_param.delete_threshold = 0.8
 
     def add_dense_table(self, table_id, learning_rate, param_var, grad_var):
-        """
+        r"""
         Args:
             table_id(int): id of sparse params table
             learning_rate(float): the learning rate used to update parameters. \
@@ -135,7 +136,7 @@ class DownpourWorker(Worker):
 
     def add_sparse_table(self, table_id, learning_rate, slot_key_vars,
                          slot_value_vars):
-        """
+        r"""
         Args:
             table_id(int): id of sparse params table
             learning_rate(float): the learning rate used to update parameters. \
@@ -153,7 +154,7 @@ class DownpourWorker(Worker):
             [var.name + "@GRAD" for var in slot_value_vars])
 
     def add_dense_table(self, table_id, learning_rate, param_vars, grad_vars):
-        """
+        r"""
         Args:
             table_id(int): id of sparse params table
             learning_rate(float): the learning rate used to update parameters. \

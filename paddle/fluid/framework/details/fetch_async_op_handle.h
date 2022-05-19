@@ -22,6 +22,19 @@
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/platform/device_context.h"
 
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+namespace paddle {
+namespace framework {
+
+namespace ir {
+class Node;
+}  // namespace ir
+}  // namespace framework
+}  // namespace paddle
+
 namespace paddle {
 namespace framework {
 namespace details {

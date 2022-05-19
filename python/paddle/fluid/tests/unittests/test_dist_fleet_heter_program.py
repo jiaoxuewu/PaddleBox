@@ -19,8 +19,10 @@ import os
 import math
 import paddle.fluid as fluid
 import paddle.distributed.fleet.base.role_maker as role_maker
-from paddle.distributed.fleet.base.util_factory import fleet_util
 from paddle.distributed.fleet import fleet
+import paddle
+
+paddle.enable_static()
 
 
 class TestDistFleetHeterProgram(unittest.TestCase):
@@ -30,9 +32,15 @@ class TestDistFleetHeterProgram(unittest.TestCase):
             "PADDLE_PSERVERS_IP_PORT_LIST"] = "127.0.0.1:36012,127.0.0.1:36013"
         environs["PADDLE_TRAINER_ENDPOINTS"] = "127.0.0.1:36014,127.0.0.1:36015"
         environs[
-            "PADDLE_HETER_TRAINER_IP_PORT_LIST"] = "127.0.0.1:36016,127.0.0.1:36017"
+            "PADDLE_ALL_HETER_TRAINER_IP_PORT_LIST"] = "127.0.0.1:36016,127.0.0.1:36017"
+        environs[
+            "PADDLE_PREVIOUS_HETER_TRAINER_IP_PORT_LIST"] = "127.0.0.1:36014,127.0.0.1:36015"
         environs["PADDLE_HETER_TRAINER_DEVICE"] = "gpu"
         environs["TRAINING_ROLE"] = "HETER_TRAINER"
+        environs["STAGE_ID"] = 2
+        environs["STAGE_NUM"] = 2
+        environs["HETER_DEVICE_TYPE"] = "gpu"
+        environs["PADDLE_STAGE_TRAINERS_NUM"] = [2, 2]
         environs["PADDLE_TRAINERS_NUM"] = 2
         environs["PADDLE_TRAINER_ID"] = 0
         environs["POD_IP"] = "127.0.0.1"
@@ -48,6 +56,10 @@ class TestDistFleetHeterProgram(unittest.TestCase):
     def build_strategy(self):
         self.strategy = paddle.distributed.fleet.DistributedStrategy()
         self.strategy.a_sync = True
+        self.strategy.a_sync_configs = {
+            "launch_barrier": False,
+            "heter_worker_device_guard": "gpu"
+        }
         return self.strategy
 
     def build_input(self):

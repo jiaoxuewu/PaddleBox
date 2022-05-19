@@ -13,10 +13,10 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/details/fetch_op_handle.h"
+
 #include <string>
-#include <utility>
-#include <vector>
-#include "paddle/fluid/platform/profiler.h"
+
+#include "paddle/fluid/platform/profiler/event_tracing.h"
 
 namespace paddle {
 namespace framework {
@@ -81,7 +81,7 @@ void FetchOpHandle::WaitAndMergeCPUFetchVars() const {
       }
       auto &val = BOOST_GET(FetchList, *data_);
       LoDTensor var;
-      var.MergeLoDTensor(tensors_ptr, platform::CPUPlace());
+      MergeLoDTensor(&var, tensors_ptr, platform::CPUPlace());
       val.at(offset_) = std::move(var);
     } else {
       auto &array = BOOST_GET_CONST(LoDTensorArray, tensors_[0]);
@@ -99,7 +99,7 @@ void FetchOpHandle::WaitAndMergeCPUFetchVars() const {
           tensors_ptr.push_back(&element[i]);
         }
         tmp_array.emplace_back();
-        tmp_array.back().MergeLoDTensor(tensors_ptr, platform::CPUPlace());
+        MergeLoDTensor(&(tmp_array.back()), tensors_ptr, platform::CPUPlace());
       }
       auto &val = BOOST_GET(FetchList, *data_);
       val.at(offset_) = std::move(tmp_array);
@@ -114,7 +114,7 @@ static void TransData(const framework::LoDTensor &src_item,
                       framework::LoDTensor *dst_item) {
   if (src_item.IsInitialized() && src_item.numel() > 0) {
     if (platform::is_gpu_place(src_item.place())) {
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
       TensorCopy(src_item, platform::CPUPlace(), dst_item);
 #endif
     } else {
@@ -128,7 +128,8 @@ static void TransData(const framework::LoDTensor &src_item,
 }
 
 void FetchOpHandle::RunImpl() {
-  platform::RecordEvent record_event(Name());
+  platform::RecordEvent record_event(Name(),
+                                     platform::TracerEventType::Operator, 1);
   WaitInputVarGenerated(platform::CPUPlace());
 
   tensors_.resize(inputs_.size());
@@ -138,8 +139,10 @@ void FetchOpHandle::RunImpl() {
     auto *var_handle = static_cast<VarHandle *>(inputs_[i]);
     auto &scope = scopes.at(var_handle->scope_idx());
     auto *var = scope->FindVar(var_handle->name());
-    PADDLE_ENFORCE_NOT_NULL(var, "Cannot find variable %s in execution scope",
-                            var_handle->name());
+    PADDLE_ENFORCE_NOT_NULL(
+        var,
+        platform::errors::NotFound(
+            "Cannot find variable %s in execution scope.", var_handle->name()));
 
     if (var->IsType<LoDTensor>()) {
       auto &t = var->Get<framework::LoDTensor>();

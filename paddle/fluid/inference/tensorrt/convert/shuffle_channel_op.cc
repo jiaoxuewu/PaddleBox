@@ -15,6 +15,16 @@ limitations under the License. */
 #include "paddle/fluid/inference/tensorrt/convert/op_converter.h"
 
 namespace paddle {
+namespace framework {
+class Scope;
+
+namespace proto {
+class OpDesc;
+}  // namespace proto
+}  // namespace framework
+}  // namespace paddle
+
+namespace paddle {
 namespace inference {
 namespace tensorrt {
 
@@ -29,22 +39,11 @@ class ShuffleChannelOpConverter : public OpConverter {
     // Declare inputs
     auto* input = engine_->GetITensor(op_desc.Input("X")[0]);
     auto input_dims = input->getDimensions();
-    PADDLE_ENFORCE_EQ(
-        input_dims.nbDims, 3,
-        platform::errors::InvalidArgument("ShuffleChannel TRT op converter "
-                                          "input dims is invalid. The input "
-                                          "dims size should be 3, but got %d.",
-                                          input_dims.nbDims));
+
     int c = input_dims.d[0];
     int h = input_dims.d[1];
     int w = input_dims.d[2];
     int group = BOOST_GET_CONST(int, op_desc.GetAttr("group"));
-
-    if (engine_->with_dynamic_shape()) {
-      PADDLE_THROW(platform::errors::Fatal(
-          "You are running the TRT Dynamic Shape mode, "
-          "the shuffle_channel op does not support dynamic shape yet"));
-    }
 
     auto* layer = TRT_ENGINE_ADD_LAYER(engine_, Shuffle, *input);
     nvinfer1::Dims4 reshape_dim(group, c / group, h, w);
@@ -53,11 +52,12 @@ class ShuffleChannelOpConverter : public OpConverter {
     auto* output = layer->getOutput(0);
 
     auto* reshape_layer = TRT_ENGINE_ADD_LAYER(engine_, Shuffle, *output);
-    nvinfer1::DimsCHW reshape_dim2(c, h, w);
+    nvinfer1::Dims3 reshape_dim2(c, h, w);
     reshape_layer->setReshapeDimensions(reshape_dim2);
 
     auto output_name = op_desc.Output("Out")[0];
-    RreplenishLayerAndOutput(reshape_layer, "concat", {output_name}, test_mode);
+    RreplenishLayerAndOutput(reshape_layer, "shuffle_channel", {output_name},
+                             test_mode);
   }
 };
 

@@ -275,7 +275,7 @@ class Args(object):
     lr = 0.01
     vocab_size = 1000
     padding_size = 50
-    log_step = 2
+    log_step = 5
     train_step = 10
 
 
@@ -286,7 +286,7 @@ def train(args, to_static):
 
     with fluid.dygraph.guard(place):
         np.random.seed(SEED)
-        paddle.manual_seed(SEED)
+        paddle.seed(SEED)
         paddle.framework.random._manual_program_seed(SEED)
 
         train_reader = fake_data_reader(args.class_num, args.vocab_size,
@@ -324,6 +324,9 @@ def train(args, to_static):
                 if batch_id % args.log_step == 0:
                     time_end = time.time()
                     used_time = time_end - time_begin
+                    # used_time may be 0.0, cause zero division error
+                    if used_time < 1e-5:
+                        used_time = 1e-5
                     print("step: %d, ave loss: %f, speed: %f steps/s" %
                           (batch_id, avg_cost.numpy()[0],
                            args.log_step / used_time))
@@ -355,4 +358,5 @@ class TestSentiment(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    with fluid.framework._test_eager_guard():
+        unittest.main()

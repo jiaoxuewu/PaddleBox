@@ -12,23 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <algorithm>
-#include <cstdlib>
-#include <memory>
-#include <random>
-#include <string>
-#include <vector>
 #include "gtest/gtest.h"
-#include "paddle/fluid/framework/lod_tensor.h"
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/framework/operator.h"
-#include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/operators/elementwise/test_elementwise_op_grad_grad.h"
-#include "paddle/fluid/platform/device_context.h"
-#include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/place.h"
+#include "paddle/phi/core/ddim.h"
+#include "paddle/phi/core/kernel_registry.h"
 
-USE_OP(elementwise_add);
+USE_OP_ITSELF(elementwise_add);
+PD_DECLARE_KERNEL(add_double_grad, CPU, ALL_LAYOUT);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+PD_DECLARE_KERNEL(add_double_grad, GPU, ALL_LAYOUT);
+#endif
 
 namespace paddle {
 namespace operators {
@@ -46,7 +41,7 @@ class TestElementwiseAddGradGradWithoutDDX
   using TestElementwiseOpGradGrad<T>::expected_outs_;
   using TestElementwiseOpGradGrad<T>::dims_;
   void ComputeExpectedOuts() override {
-    size_t numel = static_cast<size_t>(framework::product(dims_));
+    size_t numel = static_cast<size_t>(phi::product(dims_));
     std::vector<T> dy(numel);
     std::vector<T> ddout(numel);
     for (size_t i = 0; i < numel; ++i) {
@@ -70,7 +65,7 @@ TEST(test_elementwise_add_grad_grad_without_ddx, cpu_place) {
   TestElementwiseAddGradGradWithoutDDX<float> test(p, dims);
   ASSERT_TRUE(test.Check());
 }
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 TEST(test_elementwise_add_grad_grad_without_ddx, gpu_place) {
   framework::DDim dims({32, 64});
   platform::CUDAPlace p(0);

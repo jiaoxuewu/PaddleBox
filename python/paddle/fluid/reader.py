@@ -18,15 +18,20 @@ import six
 import numpy as np
 import threading
 import paddle
-from .framework import Program, Variable, program_guard, default_main_program, default_startup_program, in_dygraph_mode, cpu_places, _current_expected_place
+import time
+import copy
+
+from .framework import Program, Variable, program_guard, default_main_program, default_startup_program, _non_static_mode, cpu_places, _current_expected_place, _in_eager_without_dygraph_check
 from .executor import global_scope
 from .data_feeder import DataFeeder, BatchedTensorProvider
 from .multiprocess_utils import multiprocess_queue_set, CleanupFuncRegistrar, _cleanup_mmap, _cleanup, _set_SIGCHLD_handler
-from .dataloader import BatchSampler, Dataset, IterableDataset
+from .dataloader import BatchSampler, Dataset, IterableDataset, Subset
 from .dataloader.dataloader_iter import _DataLoaderIterSingleProcess, _DataLoaderIterMultiProcess, _DatasetKind, default_collate_fn
 from .dataloader.batch_sampler import _InfiniteIterableSampler
 from .layers.io import monkey_patch_reader_methods, _copy_reader_var_, double_buffer
 from .unique_name import UniqueNameGenerator
+from .framework import _get_paddle_place, _get_paddle_place_list
+from paddle.fluid.framework import _set_expected_place, _current_expected_place
 import logging
 import warnings
 
@@ -34,13 +39,8 @@ import warnings
 import os
 import multiprocessing
 import signal
-
 # NOTE: queue has a different name in python2 and python3
-if six.PY2:
-    import Queue as queue
-else:
-    import queue
-
+import queue
 # NOTE: [ avoid hanging & failed quickly ] These value is used in getting data from another process
 QUEUE_GET_TIMEOUT = 60
 
@@ -50,6 +50,16 @@ data_loader_unique_name_generator = UniqueNameGenerator()
 
 KEEP_DATA_LOADER_ORDER = True
 USE_PINNED_MEMORY = None
+# AutoTune Flags
+USE_AUTOTUNE = False
+TUNING_STEPS = 500
+
+
+def set_autotune_config(use_autotune, tuning_steps=500):
+    global USE_AUTOTUNE
+    USE_AUTOTUNE = use_autotune
+    global TUNING_STEPS
+    TUNING_STEPS = tuning_steps
 
 
 def keep_data_loader_order(*args):
@@ -83,6 +93,30 @@ def _convert_places(places):
 
         ret.append(p)
     return ret
+
+
+# NOTE(chenweihang): _reader_process_loop must be top level method to be pickled
+def _reader_process_loop(batch_reader, data_queue):
+    try:
+        # set signal handler
+        core._set_process_signal_handler()
+
+        # NOTE: [ mmap files clear ] When the child process exits unexpectedly,
+        # some shared memory objects may have been applied for but have not yet
+        # been put into the inter-process Queue. This part of the object needs
+        # to be cleaned up when the process ends.
+        CleanupFuncRegistrar.register(_cleanup_mmap)
+
+        for batch in batch_reader():
+            tensor_list = core._convert_to_tensor_list(batch)
+            data_queue.put(tensor_list)
+            core._remove_tensor_list_mmap_fds(tensor_list)
+        data_queue.put(None)
+    except KeyboardInterrupt:
+        # NOTE: Main process will raise KeyboardInterrupt anyways, ignore it in child process
+        pass
+    except:
+        six.reraise(*sys.exc_info())
 
 
 class DataLoaderBase(object):
@@ -120,6 +154,122 @@ class DataLoaderBase(object):
         return arr
 
 
+class AuToTune(object):
+    def __init__(self, loader):
+        self.loader = loader
+        self.max_num_worker = multiprocessing.cpu_count() / 2
+
+    def __call__(self):
+        # use default loader
+        if (not USE_AUTOTUNE) or (not self.need_autotune()):
+            return self.loader.num_workers
+
+        # get autotune loader
+        auto_tune_loader = self.get_autotune_loader()
+        if auto_tune_loader is None:
+            return self.loader.num_workers
+
+        # pick the best num_workers
+        auto_tune_start = time.time()
+        logging.debug("========= DataLoader Auto Tune =========")
+        logging.debug("User config for DataLoader: " + str(
+            self.loader.num_workers))
+        best_num_workers = 0
+        min_cost = float("inf")
+        logging.debug("Tuning Range for num_workers: 0 ~ " + str(
+            self.max_num_worker))
+        num_workers = 0
+        while num_workers < self.max_num_worker:
+            auto_tune_loader.num_workers = num_workers
+            avg_cost = self.evaluate_reader_cost(auto_tune_loader)
+            if min_cost * 0.75 > avg_cost:
+                min_cost = avg_cost
+                best_num_workers = num_workers
+            else:
+                update_num = self.is_best(auto_tune_loader, best_num_workers,
+                                          min_cost, self.max_num_worker)
+                if update_num == best_num_workers:
+                    break
+                else:
+                    best_num_workers = update_num
+            logging.debug("num_workers: " + str(num_workers) + " avg_cost: " +
+                          str(avg_cost))
+            num_workers += 2
+        logging.info("auto_tune dataLoader best_num_workers: " + str(
+            best_num_workers))
+        logging.debug("AutoTuning Cost for DataLoader: " + str(time.time(
+        ) - auto_tune_start) + ' seconds')
+
+        # tune the default loader's num_workers
+        return best_num_workers
+
+    def need_autotune(self):
+        if (sys.platform == 'darwin' or sys.platform == 'win32'):
+            return False
+        else:
+            return True
+
+    def get_sub_dataset(self, dataset, batch_size):
+        num_samples = min(batch_size * TUNING_STEPS, len(dataset))
+        sub_dataset = Subset(dataset, indices=list(range(num_samples)))
+        return sub_dataset
+
+    def get_autotune_loader(self):
+        loader = copy.copy(self.loader)
+        batch_size = self.loader.batch_sampler.batch_size
+        if isinstance(self.loader.batch_sampler,
+                      paddle.io.DistributedBatchSampler):
+            dataset = self.loader.batch_sampler.dataset
+            sub_dataset = self.get_sub_dataset(dataset, batch_size)
+            loader.batch_sampler = paddle.io.DistributedBatchSampler(
+                dataset=sub_dataset,
+                batch_size=batch_size,
+                num_replicas=self.loader.batch_sampler.nranks,
+                rank=self.loader.batch_sampler.local_rank,
+                shuffle=self.loader.batch_sampler.shuffle,
+                drop_last=self.loader.batch_sampler.drop_last)
+        elif isinstance(self.loader.batch_sampler, paddle.io.BatchSampler):
+            dataset = self.loader.batch_sampler.sampler.data_source
+            sub_dataset = self.get_sub_dataset(dataset, batch_size)
+            loader.batch_sampler = paddle.io.BatchSampler(
+                dataset=sub_dataset,
+                batch_size=batch_size,
+                drop_last=self.loader.batch_sampler.drop_last)
+        else:
+            loader = None
+        return loader
+
+    def evaluate_reader_cost(self, reader):
+        costs = []
+        avg_cost = 0
+        start = time.time()
+        for i, data in enumerate(reader):
+            costs.append(time.time() - start)
+            start = time.time()
+        if len(costs) > 2:
+            avg_cost = sum(costs[2:]) / len(costs[2:])
+        else:
+            avg_cost = sum(costs[0:]) / len(costs[0:])
+        return avg_cost
+
+    def is_best(self, reader, best_workers, best_time, num_work_boundary):
+        step = 0
+        num_workers = best_workers + 1
+        boundary = 1
+        while num_workers < num_work_boundary and step < 5:
+            self.loader.num_workers = num_workers
+            time = self.evaluate_reader_cost(reader)
+            logging.debug("for back num_workers: " + str(num_workers) +
+                          " avg_cost: " + str(time))
+            step += 1
+            if (time < best_time * 0.70 * boundary):
+                return num_workers
+            else:
+                num_workers += 1
+            boundary *= 0.80
+        return best_workers
+
+
 class DataLoader(object):
     """
     DataLoader prodives an iterator which iterates given dataset
@@ -129,35 +279,62 @@ class DataLoader(object):
     multi-process workers will be used to load data asynchronously if
     :attr:`num_workers` is set as a positive number.
 
-    DataLoader only supports map-style dataset(can get a sample from
-    dataset with a given index) currently, for a map-style dataset,
-    please see :code:`paddle.io.Dataset`.
+    DataLoader supports map-style dataset and iterable-style dataset.
 
-    batch_sampler please see :code:`paddle.io.BatchSampler`
+    For map-style datast(can get a sample from dataset with a given
+    index), please see :code:`paddle.io.Dataset`.
+
+    For iterable-style datast(get samples from dataset iteratively,
+    like a Python iterator), please see :code:`paddle.io.IterableDataset`.
+
+    For :code:`batch_sampler` please see :code:`paddle.io.BatchSampler`
+
+    .. note::
+        GPU tensor operation is not supported in subprocess currently,
+        please don't use GPU tensor operations in pipeline which will
+        be performed in subprocess, such as dataset transforms, collte_fn,
+        etc. Numpy array and CPU tensor operation is supported.
+
+    **Disable automatic batching**
+
+    In certain cases such as some NLP tasks, instead of automatic batching,
+    handling batching manually in dataset is needed by users. For these
+    cases, automatic batching is disabled if both :attr:`batch_size` and
+    :attr:`batch_sampler` is set as None, each data got from :attr:`dataset`
+    should be batched data and will be processed with function define by
+    :attr:`collate_fn` or :attr:`default_collate_fn`.
+
+
+    .. note::
+        When automatic batching is disabled, :attr:`default_collate_fn` will
+        do nothing to data from dataset.
+
 
     Args:  
         dataset(Dataset): the dataset to load data from, should be an
             instance of subclass of :code:`paddle.io.Dataset` or
             :code:`paddle.io.IterableDataset`.
-        feed_list (list(Tensor)|tuple(Tensor)): feed variable list.
-            The variables should be created by :code:`fluid.data()`.
+        feed_list (list(Tensor)|tuple(Tensor)): feed Tensor list.
+            The Tensors should be created by :code:`paddle.static.data()`.
             :attr:`feed_list` must be set if :attr:`return_list` is
             False. Default None.
-        places(list(Place)|tuple(Place)): a list of Place, to put data
-            onto, :attr:`places` must be set in both static graph and 
-            dynamic graph mode, in dynamic graph mode, place number must
-            be 1. Default None.
+        places(list(Place)|tuple(Place)|list(str)|optional): a list of Place,
+            to put data onto, :attr:`places` can be None, if 
+            :attr:`places` is None, default place(CPUPlace or CUDAPlace(0))
+            will be used. Default None. If ``places`` is list of string,
+            the string in the list can be ``cpu``, ``gpu:x`` and ``gpu_pinned``,
+            where ``x`` is the index of the GPUs.
         return_list (bool): whether the return value on each device is 
             presented as a list. If :attr:`return_list=False`, the return
-            value on each device would be a dict of str -> LoDTensor, where
-            the key of the dict is the name of each fed variables. If 
+            value on each device would be a dict of str -> Tensor, where
+            the key of the dict is the name of each fed Tensors. If 
             :attr:`return_list=True`, the return value on each device would
-            be a list(LoDTensor). :attr:`return_list` can only be True
-            in dynamic graph mode. Default False.
+            be a list(Tensor). :attr:`return_list` can only be True
+            in dynamic graph mode. Default True.
         batch_sampler(BatchSampler): an instance of `paddle.io.BatchSampler`
             to generate batch indices to draw samples from :attr:`dataset`
             and combine a batch. Default None.
-        batch_size(int): sample number in a mini-batch, a substitution
+        batch_size(int|None): sample number in a mini-batch, a substitution
             parameter for :attr:`batch_sampler`, if :attr:`batch_sampler`
             is not set, a default `paddle.io.BatchSampler` will be used
             and initialize by :attr:`batch_size`, :attr:`shuffle` and
@@ -191,14 +368,17 @@ class DataLoader(object):
             None.
 
     Returns:
-        DataLoader: an iterable object for data iterating
+        DataLoader: an iterable object for data iterating, each elemnet of the generated data is a Tensor.
 
     Examples:
         
         .. code-block:: python
 
             import numpy as np
-            import paddle.fluid as fluid
+
+            import paddle
+            import paddle.nn as nn
+            import paddle.nn.functional as F
             from paddle.io import Dataset, BatchSampler, DataLoader
 
             BATCH_NUM = 20
@@ -207,8 +387,6 @@ class DataLoader(object):
 
             IMAGE_SIZE = 784
             CLASS_NUM = 10
-
-            USE_GPU = False # whether use GPU to run model
 
             # define a random dataset
             class RandomDataset(Dataset):
@@ -223,79 +401,36 @@ class DataLoader(object):
                 def __len__(self):
                     return self.num_samples
 
-            # get places
-            places = fluid.cuda_places() if USE_GPU else fluid.cpu_places()
-
-            # -------------------- static graph ---------------------
-
-            def simple_net(image, label):
-                fc_tmp = fluid.layers.fc(image, size=CLASS_NUM, act='softmax')
-                cross_entropy = fluid.layers.softmax_with_cross_entropy(image, label)
-                loss = fluid.layers.reduce_mean(cross_entropy)
-                sgd = fluid.optimizer.SGD(learning_rate=1e-3)
-                sgd.minimize(loss)
-                return loss
-
-            image = fluid.data(name='image', shape=[None, IMAGE_SIZE], dtype='float32')
-            label = fluid.data(name='label', shape=[None, 1], dtype='int64')
-
-            loss = simple_net(image, label)
-
-            exe = fluid.Executor(places[0])
-            exe.run(fluid.default_startup_program())
-
-            prog = fluid.CompiledProgram(fluid.default_main_program()).with_data_parallel(loss_name=loss.name)
-
             dataset = RandomDataset(BATCH_NUM * BATCH_SIZE)
 
+            class SimpleNet(nn.Layer):
+                def __init__(self):
+                    super(SimpleNet, self).__init__()
+                    self.fc = nn.Linear(IMAGE_SIZE, CLASS_NUM)
+
+                def forward(self, image, label=None):
+                    return self.fc(image)
+
+            simple_net = SimpleNet()
+            opt = paddle.optimizer.SGD(learning_rate=1e-3,
+                                      parameters=simple_net.parameters())
+
             loader = DataLoader(dataset,
-                                feed_list=[image, label],
-                                places=places,
-                                batch_size=BATCH_SIZE, 
+                                batch_size=BATCH_SIZE,
                                 shuffle=True,
                                 drop_last=True,
                                 num_workers=2)
 
             for e in range(EPOCH_NUM):
-                for i, data in enumerate(loader()):
-                    l = exe.run(prog, feed=data, fetch_list=[loss], return_numpy=True)
-                    print("Epoch {} batch {}: loss = {}".format(e, i, l[0][0]))
+                for i, (image, label) in enumerate(loader()):
+                    out = simple_net(image)
+                    loss = F.cross_entropy(out, label)
+                    avg_loss = paddle.mean(loss)
+                    avg_loss.backward()
+                    opt.minimize(avg_loss)
+                    simple_net.clear_gradients()
+                    print("Epoch {} batch {}: loss = {}".format(e, i, np.mean(loss.numpy())))
 
-            # -------------------------------------------------------
-                
-            # --------------------- dygraph mode --------------------
-
-            class SimpleNet(fluid.dygraph.Layer):
-                def __init__(self):
-                    super(SimpleNet, self).__init__()
-                    self.fc = fluid.dygraph.nn.Linear(IMAGE_SIZE, CLASS_NUM, act='softmax')
-
-                def forward(self, image, label=None):
-                    return self.fc(image)
-
-            with fluid.dygraph.guard(places[0]):
-                simple_net = SimpleNet()
-                opt = fluid.optimizer.SGD(learning_rate=1e-3,
-                                          parameter_list=simple_net.parameters())
-
-                loader = DataLoader(dataset,
-                                    places=places[0],
-                                    batch_size=BATCH_SIZE,
-                                    shuffle=True,
-                                    drop_last=True,
-                                    num_workers=2)
-
-                for e in range(EPOCH_NUM):
-                    for i, (image, label) in enumerate(loader()):
-                        out = simple_net(image)
-                        loss = fluid.layers.cross_entropy(out, label)
-                        avg_loss = fluid.layers.reduce_mean(loss)
-                        avg_loss.backward()
-                        opt.minimize(avg_loss)
-                        simple_net.clear_gradients()
-                        print("Epoch {} batch {}: loss = {}".format(e, i, np.mean(loss.numpy())))
-
-            # -------------------------------------------------------
 
     .. note::
         For reading iterable dataset with multiprocess Dataloader,
@@ -307,7 +442,7 @@ class DataLoader(object):
                  dataset,
                  feed_list=None,
                  places=None,
-                 return_list=False,
+                 return_list=True,
                  batch_sampler=None,
                  batch_size=1,
                  shuffle=False,
@@ -317,26 +452,27 @@ class DataLoader(object):
                  use_buffer_reader=True,
                  use_shared_memory=True,
                  timeout=0,
-                 worker_init_fn=None):
+                 worker_init_fn=None,
+                 persistent_workers=False):
         self.return_list = return_list
         self.collate_fn = collate_fn
         self.use_buffer_reader = use_buffer_reader
         self.worker_init_fn = worker_init_fn
 
-        assert isinstance(dataset, Dataset), \
-            "dataset should be subclass instance of paddle.io.Dataset"
         self.dataset = dataset
 
-        if not return_list and not in_dygraph_mode():
+        if not return_list and not _non_static_mode():
             assert feed_list is not None, \
                     "feed_list should be set when return_list=False"
         self.feed_list = feed_list
 
-        assert places is not None, "places cannot be None"
+        if places is None:
+            places = _current_expected_place()
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         self.places = _convert_places(places)
-        if in_dygraph_mode():
-            assert len(self.places) == 1, \
-                    "Number of places must be 1 in dygraph mode"
 
         assert num_workers >= 0, "num_workers should be a non-negative value"
         if num_workers > 0 and (sys.platform == 'darwin' or
@@ -367,17 +503,19 @@ class DataLoader(object):
             self.dataset_kind = _DatasetKind.MAP
 
         if batch_sampler is not None:
-            assert isinstance(batch_sampler, BatchSampler), \
-                "batch_sampler should be None or subclass instance " \
-                "of paddle.io.BatchSampler"
             assert batch_size == 1 and not shuffle and not drop_last, \
                 "batch_size/shuffle/drop_last should not be set when " \
                 "batch_sampler is given"
             self.batch_sampler = batch_sampler
+            self.batch_size = None
+        elif batch_size is None:
+            self.batch_sampler = None
+            self.batch_size = None
         else:
-            assert batch_size is not None and batch_size > 0, \
-                "batch_size should be a positive value when " \
+            assert batch_size > 0, \
+                "batch_size should be None or a positive value when " \
                 "batch_sampler is not given"
+            self.batch_size = batch_size
             if isinstance(dataset, IterableDataset):
                 self.batch_sampler = _InfiniteIterableSampler(dataset,
                                                               batch_size)
@@ -388,17 +526,36 @@ class DataLoader(object):
                     shuffle=shuffle,
                     drop_last=drop_last)
 
+        self.drop_last = drop_last
+        self.auto_collate_batch = self.batch_sampler is not None
+
         self.pin_memory = False
-        if in_dygraph_mode():
+        if _non_static_mode():
             self.pin_memory = True if use_pinned_memory(
             ) is None else use_pinned_memory()
 
+        self._persistent_workers = persistent_workers
+        self._iterator = None
+        self.num_workers = AuToTune(self).__call__()
+
     def __len__(self):
-        return len(self.batch_sampler)
+        if self.dataset_kind == _DatasetKind.ITER:
+            raise ValueError("length of IterableDataset not supported")
+        else:
+            if self.auto_collate_batch:
+                return len(self.batch_sampler)
+            else:
+                return len(self.dataset)
 
     def __iter__(self):
         if self.num_workers == 0:
             return _DataLoaderIterSingleProcess(self)
+        elif self._persistent_workers:
+            if self._iterator is None:
+                self._iterator = _DataLoaderIterMultiProcess(self)
+            else:
+                self._iterator._reset()
+            return self._iterator
         else:
             return _DataLoaderIterMultiProcess(self)
 
@@ -414,6 +571,10 @@ class DataLoader(object):
                        use_multiprocess=False,
                        drop_last=True):
         """
+        .. warning::
+          This API will be deprecated in the future, it is recommended to use
+          :code:`paddle.io.DataLoader` which supports multi-processes acceleration.
+
         .. note::
           **The framework ensures that the data loading order of DataLoader is exactly the same as the user-defined data source.**
 
@@ -431,14 +592,11 @@ class DataLoader(object):
 
         If iterable = False, the created DataLoader object provides 
         :code:`start()` and :code:`reset()` method to control the data reading
-        process. This mode is designed to be compatible with the 
-        :code:`fluid.layers.py_reader` interface. Users can migrate the codes   
-        from :code:`fluid.layers.py_reader` to :code:`fluid.io.DataLoader` 
-        easily when using iterable=False. 
+        process.
 
         Args:  
-            feed_list (list(Variable)|tuple(Variable)): feed variable list.
-                The variables should be created by :code:`fluid.data()`.
+            feed_list (list(Tensor)|tuple(Tensor)): feed Tensor list.
+                The Tensors should be created by :code:`fluid.data()`.
             capacity (int): capacity of the queue maintained in DataLoader.
                 The unit is batch number. Set larger capacity if your reader 
                 is fast. 
@@ -452,7 +610,7 @@ class DataLoader(object):
                 presented as a list. It is only valid when iterable=True. 
                 If return_list=False, the return value on each device would 
                 be a dict of str -> LoDTensor, where the key of the dict is 
-                the name of each fed variables. If return_list=True, the 
+                the name of each fed Tensors. If return_list=True, the 
                 return value on each device would be a list(LoDTensor). It is
                 recommended to use return_list=False in static graph mode and
                 use return_list=True in dygraph mode.  
@@ -476,8 +634,15 @@ class DataLoader(object):
             
             .. code-block:: python
 
-                import paddle.fluid as fluid
+                '''
+                Example in static graph mode
+                '''
                 import numpy as np
+
+                import paddle
+                import paddle.static as static
+                import paddle.nn.functional as F
+
 
                 BATCH_NUM = 10 
                 BATCH_SIZE = 16
@@ -490,11 +655,13 @@ class DataLoader(object):
 
                 DATA_FORMAT = 'batch_generator' # data format of data source user provides 
 
+                paddle.enable_static()
+
                 def simple_net(image, label):
-                    fc_tmp = fluid.layers.fc(image, size=CLASS_NUM)
-                    cross_entropy = fluid.layers.softmax_with_cross_entropy(image, label)
-                    loss = fluid.layers.reduce_mean(cross_entropy)
-                    sgd = fluid.optimizer.SGD(learning_rate=1e-3)
+                    fc_tmp = static.nn.fc(image, size=CLASS_NUM)
+                    cross_entropy = F.softmax_with_cross_entropy(image, label)
+                    loss = paddle.mean(cross_entropy)
+                    sgd = paddle.optimizer.SGD(learning_rate=1e-3)
                     sgd.minimize(loss)
                     return loss
 
@@ -550,7 +717,7 @@ class DataLoader(object):
                         try:
                             while True:
                                 exe.run(prog, fetch_list=[loss])
-                        except fluid.core.EOFException:
+                        except paddle.core.EOFException:
                             loader.reset() # call DataLoader.reset() after catching EOFException 
 
                 def set_data_source(loader, places):
@@ -563,11 +730,11 @@ class DataLoader(object):
                     else:
                         raise ValueError('Unsupported data format')
 
-                image = fluid.data(name='image', shape=[None, 784], dtype='float32')
-                label = fluid.data(name='label', shape=[None, 1], dtype='int64')
+                image = static.data(name='image', shape=[None, 784], dtype='float32')
+                label = static.data(name='label', shape=[None, 1], dtype='int64')
 
                 # Define DataLoader 
-                loader = fluid.io.DataLoader.from_generator(feed_list=[image, label], capacity=16, iterable=ITERABLE)
+                loader = paddle.io.DataLoader.from_generator(feed_list=[image, label], capacity=16, iterable=ITERABLE)
 
                 # Define network
                 loss = simple_net(image, label)
@@ -575,17 +742,17 @@ class DataLoader(object):
                 # Set data source of DataLoader
                 #
                 # If DataLoader is iterable, places must be given and the number of places must be the same with device number.  
-                #  - If you are using GPU, call `fluid.cuda_places()` to get all GPU places. 
-                #  - If you are using CPU, call `fluid.cpu_places()` to get all CPU places. 
+                #  - If you are using GPU, call `paddle.static.cuda_places()` to get all GPU places. 
+                #  - If you are using CPU, call `paddle.static.cpu_places()` to get all CPU places. 
                 # 
                 # If DataLoader is not iterable, places can be None.
-                places = fluid.cuda_places() if USE_GPU else fluid.cpu_places()
+                places = static.cuda_places() if USE_GPU else static.cpu_places()
                 set_data_source(loader, places)
 
-                exe = fluid.Executor(places[0])
-                exe.run(fluid.default_startup_program())
+                exe = static.Executor(places[0])
+                exe.run(static.default_startup_program())
 
-                prog = fluid.CompiledProgram(fluid.default_main_program()).with_data_parallel(loss_name=loss.name)
+                prog = static.CompiledProgram(static.default_main_program()).with_data_parallel(loss_name=loss.name)
 
                 if loader.iterable:
                     train_iterable(exe, prog, loss, loader)
@@ -593,28 +760,93 @@ class DataLoader(object):
                     train_non_iterable(exe, prog, loss, loader)
 
 
-                '''
-                Users can use return_list = True in dygraph mode. 
-                '''
-                with fluid.dygraph.guard(places[0]):
-                    loader = fluid.io.DataLoader.from_generator(capacity=2, return_list=True)
-                    set_data_source(loader, places[0]) 
-                    for image, label in loader():
-                        relu = fluid.layers.relu(image)
-                        assert image.shape == [BATCH_SIZE, 784] 
-                        assert label.shape == [BATCH_SIZE, 1]
-                        assert relu.shape == [BATCH_SIZE, 784]
-
         Examples 2:
 
             .. code-block:: python
 
-                import paddle.fluid as fluid
+                '''
+                Example in dynamic graph mode. 
+                '''
+                import numpy as np
+
+                import paddle
+                import paddle.nn as nn
+                import paddle.optimizer as opt
+                import paddle.distributed as dist
+
+                BATCH_SIZE = 16
+                BATCH_NUM = 4
+                EPOCH_NUM = 4
+
+                IMAGE_SIZE = 784
+                CLASS_NUM = 10
+
+                USE_GPU = False # whether to use GPU
+
+                def _get_random_images_and_labels(image_shape, label_shape):
+                        image = np.random.random(size=image_shape).astype('float32')
+                        label = np.random.random(size=label_shape).astype('int64')
+                        return image, label
+
+                def __reader__():
+                        for _ in range(BATCH_NUM):
+                            batch_image, batch_label = _get_random_images_and_labels(
+                                [BATCH_SIZE, IMAGE_SIZE], [BATCH_SIZE, CLASS_NUM])
+                            yield batch_image, batch_label
+
+                def random_batch_reader():
+                    return __reader__
+
+                class LinearNet(nn.Layer):
+                    def __init__(self):
+                        super(LinearNet, self).__init__()
+                        self._linear = nn.Linear(IMAGE_SIZE, CLASS_NUM)
+
+                    @paddle.jit.to_static
+                    def forward(self, x):
+                        return self._linear(x)
+
+                # set device
+                paddle.set_device('gpu' if USE_GPU else 'cpu')
+
+                # create network
+                layer = LinearNet()
+                dp_layer = paddle.DataParallel(layer)
+                loss_fn = nn.CrossEntropyLoss()
+                adam = opt.Adam(learning_rate=0.001, parameters=dp_layer.parameters())
+
+                # create data loader
+                loader = paddle.io.DataLoader.from_generator(capacity=5)
+                loader.set_batch_generator(random_batch_reader())
+
+                for epoch_id in range(EPOCH_NUM):
+                    for batch_id, (image, label) in enumerate(loader()):
+                        out = layer(image)
+                        loss = loss_fn(out, label)
+
+                        loss.backward()
+
+                        adam.step()
+                        adam.clear_grad()
+                        print("Epoch {} batch {}: loss = {}".format(
+                            epoch_id, batch_id, np.mean(loss.numpy())))
+
+        Examples 3:
+
+            .. code-block:: python
+
+                '''
+                Example of `drop_last` using in static graph multi-cards mode
+                '''
+                import paddle
+                import paddle.static as static
                 import numpy as np
                 import os
 
                 # We use 2 CPU cores to run inference network 
                 os.environ['CPU_NUM'] = '2'
+
+                paddle.enable_static()
 
                 # The data source has only 3 batches, which can not be
                 # divided evenly to each CPU core
@@ -622,16 +854,16 @@ class DataLoader(object):
                     for i in range(3):
                         yield np.array([i+1]).astype('float32'), 
 
-                x = fluid.data(name='x', shape=[None], dtype='float32')  
+                x = static.data(name='x', shape=[None], dtype='float32')  
                 y = x * x
 
                 def run_inference(drop_last): 
-                    loader = fluid.io.DataLoader.from_generator(feed_list=[x],
+                    loader = paddle.io.DataLoader.from_generator(feed_list=[x],
                             capacity=8, drop_last=drop_last)
-                    loader.set_batch_generator(batch_generator, fluid.cpu_places())
+                    loader.set_batch_generator(batch_generator, static.cpu_places())
 
-                    exe = fluid.Executor(fluid.CPUPlace())
-                    prog = fluid.CompiledProgram(fluid.default_main_program())
+                    exe = static.Executor(paddle.CPUPlace())
+                    prog = static.CompiledProgram(static.default_main_program())
                     prog = prog.with_data_parallel()
 
                     result = []
@@ -648,7 +880,7 @@ class DataLoader(object):
                 # number is less than CPU core number can be tested.
                 print(run_inference(drop_last=False)) # [1.0, 4.0, 9.0]
         """
-        if in_dygraph_mode():
+        if _non_static_mode():
             return DygraphGeneratorLoader(feed_list, capacity,
                                           use_double_buffer, iterable,
                                           return_list, use_multiprocess)
@@ -659,13 +891,18 @@ class DataLoader(object):
     @staticmethod
     def from_dataset(dataset, places, drop_last=True):
         """
+        .. warning::
+          This API will be deprecated in the future, it is recommended to use
+          :code:`paddle.io.DataLoader` which supports multi-processes acceleration.
+
         Create an iterable DataLoader object for loading data from Dataset.    
         Dataset is only supported in Linux system currently.
 
         Args:
             dataset (InMemoryDataset|QueueDataset): the dataset object.
-            places (list(CUDAPlace)|list(CPUPlace)): places where the result 
-                data should be converted.   
+            places (list(CUDAPlace)|list(CPUPlace)|list(str)): places where the result 
+                data should be converted. If places is list of string, the string in the list 
+                can be ``cpu``, ``gpu:x`` and ``gpu_pinned``, where x is the index of the GPUs.   
             drop_last (bool): whether to drop the last batch whose sample 
                 number is less than batch size. If drop_last = True, they
                 would be dropped. If drop_last = False, they would be kept. 
@@ -678,18 +915,22 @@ class DataLoader(object):
 
             .. code-block:: python
 
-                import paddle.fluid as fluid
+                import paddle
+                import paddle.static as static
 
-                image = fluid.data(name='image', shape=[None, 784], dtype='float32')
-                label = fluid.data(name='label', shape=[None, 1], dtype='int64')
+                paddle.enable_static()
 
-                dataset = fluid.DatasetFactory().create_dataset("QueueDataset")
-                dataset.set_batch_size(32)
+                image = static.data(name='image', shape=[None, 784], dtype='float32')
+                label = static.data(name='label', shape=[None, 1], dtype='int64')
+
+                dataset = paddle.distributed.QueueDataset()
+                dataset.init(
+                    batch_size=32,
+                    pipe_command='cat',
+                    use_var=[image, label])
                 dataset.set_filelist(['a.txt', 'b.txt', 'c.txt'])
-                dataset.set_use_var([image, label])
-                dataset.set_pipe_command('cat') 
 
-                loader = fluid.io.DataLoader.from_dataset(dataset, fluid.cpu_places())
+                loader = paddle.io.DataLoader.from_dataset(dataset, static.cpu_places())
         """
         return DatasetLoader(dataset, places, drop_last)
 
@@ -811,7 +1052,8 @@ class DygraphGeneratorLoader(DataLoaderBase):
             global multiprocess_queue_set
             multiprocess_queue_set.add(self._data_queue)
             self._process = multiprocessing.Process(
-                target=self._reader_process_loop)
+                target=_reader_process_loop,
+                args=(self._batch_reader, self._data_queue))
             self._process.daemon = True
             self._process.start()
 
@@ -827,12 +1069,14 @@ class DygraphGeneratorLoader(DataLoaderBase):
             # Set reader_thread
             self._thread_done_event = threading.Event()
             self._thread = threading.Thread(
-                target=self._reader_thread_loop_for_multiprocess)
+                target=self._reader_thread_loop_for_multiprocess,
+                args=(_current_expected_place(), ))
             self._thread.daemon = True
             self._thread.start()
         else:
             self._thread = threading.Thread(
-                target=self._reader_thread_loop_for_singleprocess)
+                target=self._reader_thread_loop_for_singleprocess,
+                args=(_current_expected_place(), ))
             self._thread.daemon = True
             self._thread.start()
 
@@ -853,7 +1097,11 @@ class DygraphGeneratorLoader(DataLoaderBase):
 
     def __next__(self):
         try:
-            return self._reader.read_next_var_list()
+            if _in_eager_without_dygraph_check():
+                return core.eager.read_next_tensor_list(
+                    self._reader.read_next_list()[0])
+            else:
+                return self._reader.read_next_var_list()
         except StopIteration:
             self._reset()
             six.reraise(*sys.exc_info())
@@ -867,29 +1115,10 @@ class DygraphGeneratorLoader(DataLoaderBase):
         self._blocking_queue.kill()
         logging.error("DataLoader reader thread raised an exception!")
 
-    def _reader_process_loop(self):
-        try:
-            # set signal handler
-            core._set_process_signal_handler()
+    def _reader_thread_loop_for_multiprocess(self, legacy_expected_place):
+        # See _DataLoaderIterSingleProcess._thread_loop() for why set expected place here.
+        _set_expected_place(legacy_expected_place)
 
-            # NOTE: [ mmap files clear ] When the child process exits unexpectedly,
-            # some shared memory objects may have been applied for but have not yet
-            # been put into the inter-process Queue. This part of the object needs
-            # to be cleaned up when the process ends.
-            CleanupFuncRegistrar.register(_cleanup_mmap)
-
-            for batch in self._batch_reader():
-                tensor_list = core._convert_to_tensor_list(batch)
-                self._data_queue.put(tensor_list)
-                core._remove_tensor_list_mmap_fds(tensor_list)
-            self._data_queue.put(None)
-        except KeyboardInterrupt:
-            # NOTE: Main process will raise KeyboardInterrupt anyways, ignore it in child process
-            pass
-        except:
-            six.reraise(*sys.exc_info())
-
-    def _reader_thread_loop_for_multiprocess(self):
         while not self._thread_done_event.is_set():
             try:
                 # NOTE: [ avoid hanging ] Even with carefully designed data dependencies 
@@ -928,8 +1157,11 @@ class DygraphGeneratorLoader(DataLoaderBase):
                 else:
                     self._exit_thread_expectedly()
 
-    def _reader_thread_loop_for_singleprocess(self):
+    def _reader_thread_loop_for_singleprocess(self, legacy_expected_place):
         try:
+            # See _DataLoaderIterSingleProcess._thread_loop() for why set expected place here.
+            _set_expected_place(legacy_expected_place)
+
             for sample in self._batch_reader():
                 array = core.LoDTensorArray()
                 for item in sample:
@@ -959,6 +1191,10 @@ class DygraphGeneratorLoader(DataLoaderBase):
                              drop_last=True,
                              places=None):
         assert batch_size > 0, "batch_size must be larger than 0"
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         self.set_sample_list_generator(
             paddle.batch(
                 reader, batch_size=batch_size, drop_last=drop_last),
@@ -966,6 +1202,11 @@ class DygraphGeneratorLoader(DataLoaderBase):
         return self
 
     def set_sample_list_generator(self, reader, places=None):
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
+
         def __batch_reader_impl__():
             for batch in reader():
                 slots = []
@@ -981,6 +1222,10 @@ class DygraphGeneratorLoader(DataLoaderBase):
         return self
 
     def set_batch_generator(self, reader, places=None):
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         self._batch_reader = reader
         if places is None:
             places = _current_expected_place()
@@ -1139,7 +1384,10 @@ class GeneratorLoader(DataLoaderBase):
     def __next__(self):
         try:
             if self._return_list:
-                return self._reader.read_next_list()
+                data = self._reader.read_next_list()
+                for i in range(len(data)):
+                    data[i] = data[i]._move_to_list()
+                return data
             else:
                 return self._reader.read_next()
         except StopIteration:
@@ -1156,8 +1404,11 @@ class GeneratorLoader(DataLoaderBase):
         self._reset()
 
     def _start(self):
-        def __thread_main__():
+        def __thread_main__(legacy_expected_place):
             try:
+                # See _DataLoaderIterSingleProcess._thread_loop() for why set expected place here.
+                _set_expected_place(legacy_expected_place)
+
                 while not self._queue.wait_for_inited(1):
                     if self._exited:
                         return
@@ -1181,10 +1432,11 @@ class GeneratorLoader(DataLoaderBase):
             except Exception as ex:
                 self._queue.kill()
                 self._thread = None
-                logging.warn('Your reader has raised an exception!')
+                logging.warning('Your reader has raised an exception!')
                 six.reraise(*sys.exc_info())
 
-        self._thread = threading.Thread(target=__thread_main__)
+        self._thread = threading.Thread(
+            target=__thread_main__, args=(_current_expected_place(), ))
         self._thread.daemon = True
         self._thread.start()
 
@@ -1204,6 +1456,10 @@ class GeneratorLoader(DataLoaderBase):
                              drop_last=True,
                              places=None):
         assert batch_size > 0, "batch_size must be larger than 0"
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         has_lod = False
         for f in self._feed_list:
             if f.lod_level != 0:
@@ -1226,6 +1482,10 @@ class GeneratorLoader(DataLoaderBase):
         return self
 
     def set_sample_list_generator(self, reader, places=None):
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         with program_guard(Program(), Program()):
             feeder = DataFeeder(
                 feed_list=self._feed_list, place=core.CPUPlace())
@@ -1239,6 +1499,10 @@ class GeneratorLoader(DataLoaderBase):
         return self
 
     def set_batch_generator(self, reader, places=None):
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
         self._tensor_reader = reader
         if self._iterable:
             assert places is not None, "Places cannot be None when DataLoader is iterable"
@@ -1251,7 +1515,7 @@ class GeneratorLoader(DataLoaderBase):
 
 
 class PyReader(DataLoaderBase):
-    """
+    r"""
     Create a reader object for data feeding in Python. 
     Data would be prefetched using Python thread and be pushed
     into a queue asynchronously. Data in the queue would be extracted 
@@ -1711,8 +1975,12 @@ class DatasetLoader(DataLoaderBase):
     def __init__(self, dataset, places, drop_last):
         assert isinstance(dataset, paddle.distributed.fleet.dataset.
                           DatasetBase), "dataset must be type of DatasetBase"
-        assert not in_dygraph_mode(
+        assert not _non_static_mode(
         ), "DatasetLoader is not supported in dygraph mode yet"
+        if isinstance(places, (list, tuple)):
+            places = _get_paddle_place_list(places)
+        else:
+            places = _get_paddle_place(places)
 
         thread_num = len(places)
 
@@ -1723,13 +1991,13 @@ class DatasetLoader(DataLoaderBase):
             logging.warn('thread_num {} which is set in Dataset is ignored'.
                          format(dataset.thread_num))
 
-        dataset.set_thread(thread_num)
+        dataset._set_thread(thread_num)
 
         if isinstance(dataset, paddle.distributed.fleet.dataset.
                       InMemoryDataset) and dataset.queue_num > thread_num:
             logging.warn("queue_num {} which is set in Dataset is ignored".
                          format(dataset.queue_num))
-            dataset.set_queue_num(thread_num)
+            dataset._set_queue_num(thread_num)
 
         self._dataset = dataset
         use_slots = [

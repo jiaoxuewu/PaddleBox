@@ -17,8 +17,10 @@ from __future__ import print_function
 import numpy as np
 import unittest
 
+import paddle
 from paddle.fluid.dygraph.jit import declarative
 from paddle.fluid.dygraph.dygraph_to_static.program_translator import ProgramTranslator
+import paddle.fluid.core as core
 
 from ifelse_simple_func import *
 
@@ -67,6 +69,12 @@ class TestDygraphIfElse3(TestDygraphIfElse):
     def setUp(self):
         self.x = np.random.random([10, 16]).astype('float32')
         self.dyfunc = dyfunc_with_if_else3
+
+
+class TestDygraphIfElseWithListGenerator(TestDygraphIfElse):
+    def setUp(self):
+        self.x = np.random.random([10, 16]).astype('float32')
+        self.dyfunc = dyfunc_with_if_else_with_list_geneator
 
 
 class TestDygraphNestedIfElse(TestDygraphIfElse):
@@ -265,5 +273,157 @@ class TestNetWithExternalFunc(TestDygraphIfElseNet):
         self.Net = NetWithExternalFunc
 
 
+class DiffModeNet1(paddle.nn.Layer):
+    def __init__(self, mode):
+        super(DiffModeNet1, self).__init__()
+        self.mode = mode
+
+    @paddle.jit.to_static
+    def forward(self, x, y):
+        if self.mode == 'train':
+            out = x + y
+        elif self.mode == 'infer':
+            out = x - y
+        else:
+            raise ValueError('Illegal mode')
+        return out
+
+
+class DiffModeNet2(paddle.nn.Layer):
+    def __init__(self, mode):
+        super(DiffModeNet2, self).__init__()
+        self.mode = mode
+
+    @paddle.jit.to_static
+    def forward(self, x, y):
+        if self.mode == 'train':
+            out = x + y
+            return out
+        elif self.mode == 'infer':
+            out = x - y
+            return out
+        else:
+            raise ValueError('Illegal mode')
+
+
+class TestDiffModeNet(unittest.TestCase):
+    """
+    TestCase for the net with different modes
+    """
+
+    def setUp(self):
+        self.x = paddle.randn([10, 16], 'float32')
+        self.y = paddle.randn([10, 16], 'float32')
+        self.init_net()
+
+    def init_net(self):
+        self.Net = DiffModeNet1
+
+    def _run(self, mode, to_static):
+        prog_trans = ProgramTranslator()
+        prog_trans.enable(to_static)
+
+        net = self.Net(mode)
+        ret = net(self.x, self.y)
+        return ret.numpy()
+
+    def test_train_mode(self):
+        self.assertTrue((self._run(
+            mode='train', to_static=True) == self._run(
+                mode='train', to_static=False)).all())
+
+    def test_infer_mode(self):
+        self.assertTrue((self._run(
+            mode='infer', to_static=True) == self._run(
+                mode='infer', to_static=False)).all())
+
+
+class TestDiffModeNet2(TestDiffModeNet):
+    def init_net(self):
+        self.Net = DiffModeNet2
+
+
+class TestNewVarCreateInOneBranch(unittest.TestCase):
+    def test_var_used_in_another_for(self):
+        def case_func(training):
+            # targets and targets_list is dynamically defined by training
+            if training:
+                targets = [1, 2, 3]
+                targets_list = [targets]
+
+            num_step = 3
+            for i in range(num_step):
+                if i > 0:
+                    rois, rosi_num = 1, 2
+                    # targets is in loop_vars.
+                    if training:
+                        ros, rosi_num, targets = -1, -2, [-1, -2, -3]
+                        targets_list.append(targets)
+
+            return rosi_num
+
+        self.assertEqual(paddle.jit.to_static(case_func)(False), 2)
+        self.assertEqual(paddle.jit.to_static(case_func)(True), -2)
+
+
+class TestDy2StIfElseRetInt1(unittest.TestCase):
+    def setUp(self):
+        self.x = np.random.random([5]).astype('float32')
+        self.dyfunc = dyfunc_ifelse_ret_int1
+        self.out = self.get_dy2stat_out()
+
+    def get_dy2stat_out(self):
+        ProgramTranslator().enable(True)
+        static_func = paddle.jit.to_static(self.dyfunc)
+        out = static_func(self.x)
+        ProgramTranslator().enable(False)
+        return out
+
+    def test_ast_to_func(self):
+        self.assertIsInstance(self.out[0], (paddle.Tensor, core.eager.Tensor))
+        self.assertIsInstance(self.out[1], int)
+
+
+class TestDy2StIfElseRetInt2(TestDy2StIfElseRetInt1):
+    def setUp(self):
+        self.x = np.random.random([5]).astype('float32')
+        self.dyfunc = dyfunc_ifelse_ret_int2
+        self.out = self.get_dy2stat_out()
+
+    def test_ast_to_func(self):
+        self.assertIsInstance(self.out[0], (paddle.Tensor, core.eager.Tensor))
+        self.assertIsInstance(self.out[1], (paddle.Tensor, core.eager.Tensor))
+
+
+class TestDy2StIfElseRetInt3(TestDy2StIfElseRetInt1):
+    def setUp(self):
+        self.x = np.random.random([5]).astype('float32')
+        self.dyfunc = dyfunc_ifelse_ret_int3
+        self.out = self.get_dy2stat_out()
+
+    def test_ast_to_func(self):
+        self.assertIsInstance(self.out, (paddle.Tensor, core.eager.Tensor))
+
+
+class TestDy2StIfElseRetInt4(TestDy2StIfElseRetInt1):
+    def setUp(self):
+        self.x = np.random.random([5]).astype('float32')
+        self.dyfunc = dyfunc_ifelse_ret_int4
+
+    def test_ast_to_func(self):
+        ProgramTranslator().enable(True)
+        with self.assertRaises(TypeError):
+            static_func = paddle.jit.to_static(self.dyfunc)
+            out = static_func(self.x)
+        # Why need set `_in_declarative_mode_` here? 
+        # In Dy2St we use `with _switch_declarative_mode_guard_()` to indicate 
+        # that the code block is under @to_static, but in this UT 
+        # an exception is thrown during Dy2St, making the `_in_declarative_mode_` 
+        # a wrong value. So We need set `_in_declarative_mode_` to False manually.
+        paddle.fluid.dygraph.base._in_declarative_mode_ = False
+        ProgramTranslator().enable(False)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    with paddle.fluid.framework._test_eager_guard():
+        unittest.main()

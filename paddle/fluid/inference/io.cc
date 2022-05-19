@@ -17,15 +17,19 @@ limitations under the License. */
 #include <algorithm>
 #include <fstream>
 #include <vector>
+
 #include "paddle/fluid/framework/block_desc.h"
 #include "paddle/fluid/framework/feed_fetch_type.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/version.h"
 #include "paddle/fluid/platform/cpu_helper.h"
+#include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/pybind/pybind.h"
 
+// phi
+#include "paddle/phi/kernels/declarations.h"
+
 DEFINE_string(devices, "", "The devices to be used which is joined by comma.");
-DEFINE_bool(init_p2p, false, "Whether to init p2p.");
 DEFINE_int32(math_num_threads, 1,
              "Number of threads used to run math functions.");
 
@@ -42,12 +46,14 @@ void Init(const std::vector<std::string> argv) {
   while (std::getline(tokenStream, token, ',')) {
     devices.push_back(std::stoi(token));
   }
-  framework::InitDevices(FLAGS_init_p2p, devices);
+  framework::InitDevices(devices);
 }
 
 void ReadBinaryFile(const std::string& filename, std::string* contents) {
   std::ifstream fin(filename, std::ios::in | std::ios::binary);
-  PADDLE_ENFORCE(static_cast<bool>(fin), "Cannot open file %s", filename);
+  PADDLE_ENFORCE_EQ(
+      fin.is_open(), true,
+      platform::errors::Unavailable("Failed to open file %s.", filename));
   fin.seekg(0, std::ios::end);
   contents->clear();
   contents->resize(fin.tellg());
@@ -84,10 +90,12 @@ void LoadPersistables(framework::Executor* executor, framework::Scope* scope,
       framework::VarDesc* new_var = load_block->Var(var->Name());
       new_var->SetShape(var->GetShape());
       new_var->SetDataType(var->GetDataType());
-      new_var->SetType(var->GetType());
+      auto var_type = var->GetType();
+      new_var->SetType(var_type);
 
-      if (var->GetType() !=
-          framework::proto::VarType::Type::VarType_Type_SELECTED_ROWS) {
+      if ((var_type !=
+           framework::proto::VarType::Type::VarType_Type_SELECTED_ROWS) &&
+          (var_type != framework::proto::VarType::VOCAB)) {
         new_var->SetLoDLevel(var->GetLoDLevel());
       }
 
@@ -133,9 +141,10 @@ std::unique_ptr<framework::ProgramDesc> Load(framework::Executor* executor,
 
   std::unique_ptr<framework::ProgramDesc> main_program(
       new framework::ProgramDesc(program_desc_str));
-  PADDLE_ENFORCE(framework::IsProgramVersionSupported(main_program->Version()),
-                 "model version %ld is not supported.",
-                 main_program->Version());
+  PADDLE_ENFORCE_EQ(
+      framework::IsProgramVersionSupported(main_program->Version()), true,
+      platform::errors::Unavailable("Model version %ld is not supported.",
+                                    main_program->Version()));
 
   // model_from_memory is false in separate parameters.
   LoadPersistables(executor, scope, *main_program, dirname, "",
@@ -151,9 +160,10 @@ std::unique_ptr<framework::ProgramDesc> Load(
 
   std::unique_ptr<framework::ProgramDesc> main_program(
       new framework::ProgramDesc(program_desc_str));
-  PADDLE_ENFORCE(framework::IsProgramVersionSupported(main_program->Version()),
-                 "model version %ld is not supported.",
-                 main_program->Version());
+  PADDLE_ENFORCE_EQ(
+      framework::IsProgramVersionSupported(main_program->Version()), true,
+      platform::errors::Unavailable("Model version %ld is not supported.",
+                                    main_program->Version()));
 
   LoadPersistables(executor, scope, *main_program, "", param_filename,
                    false /* model_from_memory */);
@@ -165,9 +175,10 @@ std::unique_ptr<framework::ProgramDesc> LoadFromMemory(
     const std::string& prog_buffer, const std::string& param_buffer) {
   std::unique_ptr<framework::ProgramDesc> main_program(
       new framework::ProgramDesc(prog_buffer));
-  PADDLE_ENFORCE(framework::IsProgramVersionSupported(main_program->Version()),
-                 "model version %ld is not supported.",
-                 main_program->Version());
+  PADDLE_ENFORCE_EQ(
+      framework::IsProgramVersionSupported(main_program->Version()), true,
+      platform::errors::Unavailable("Model version %ld is not supported.",
+                                    main_program->Version()));
 
   LoadPersistables(executor, scope, *main_program, "", param_buffer,
                    true /* model_filename */);

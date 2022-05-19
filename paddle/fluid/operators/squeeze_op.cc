@@ -19,7 +19,9 @@ limitations under the License. */
 #include <unordered_map>
 #include <vector>
 
+#include "paddle/fluid/framework/infershape_utils.h"
 #include "paddle/fluid/framework/op_registry.h"
+#include "paddle/phi/infermeta/unary.h"
 
 namespace paddle {
 namespace operators {
@@ -77,7 +79,7 @@ framework::DDim GetOutputShape(const std::vector<int> squeeze_dims,
       output_shape.push_back(in_dims[i]);
     }
   }
-  return framework::make_ddim(output_shape);
+  return phi::make_ddim(output_shape);
 }
 
 class SqueezeOp : public framework::OperatorWithKernel {
@@ -110,9 +112,17 @@ class SqueezeOp : public framework::OperatorWithKernel {
  protected:
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext &ctx) const override {
-    return framework::OpKernelType(
-        OperatorWithKernel::IndicateVarDataType(ctx, "X"),
-        ctx.device_context());
+    auto input_data_type =
+        framework::OperatorWithKernel::IndicateVarDataType(ctx, "X");
+
+    // #ifdef PADDLE_WITH_MKLDNN
+    //    if (this->CanMKLDNNBeUsed(ctx, input_data_type)) {
+    //      return framework::OpKernelType(input_data_type, ctx.GetPlace(),
+    //                                     framework::DataLayout::kMKLDNN,
+    //                                     framework::LibraryType::kMKLDNN);
+    //    }
+    // #endif
+    return framework::OpKernelType(input_data_type, ctx.GetPlace());
   }
 };
 
@@ -129,9 +139,17 @@ class SqueezeGradOp : public framework::OperatorWithKernel {
  protected:
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext &ctx) const override {
-    return framework::OpKernelType(OperatorWithKernel::IndicateVarDataType(
-                                       ctx, framework::GradVarName("Out")),
-                                   ctx.device_context());
+    auto input_data_type = framework::OperatorWithKernel::IndicateVarDataType(
+        ctx, framework::GradVarName("Out"));
+
+    // #ifdef PADDLE_WITH_MKLDNN
+    //    if (this->CanMKLDNNBeUsed(ctx, input_data_type)) {
+    //      return framework::OpKernelType(input_data_type, ctx.GetPlace(),
+    //                                     framework::DataLayout::kMKLDNN,
+    //                                     framework::LibraryType::kMKLDNN);
+    //    }
+    // #endif
+    return framework::OpKernelType(input_data_type, ctx.GetPlace());
   }
 };
 
@@ -144,6 +162,16 @@ class SqueezeOpMaker : public framework::OpProtoAndCheckerMaker {
                               "(std::vector<int>). List of integers,"
                               " indicating the dimensions to squeeze.")
         .SetDefault({});
+    AddAttr<bool>("use_mkldnn",
+                  "(bool, default false) Only used in mkldnn kernel")
+        .SetDefault(false)
+        .AsExtra();
+    AddAttr<std::string>(
+        "mkldnn_data_type",
+        "(string, default \"float32\"). Data type of mkldnn kernel")
+        .SetDefault("float32")
+        .InEnum({"float32", "bfloat16"})
+        .AsExtra();
     AddComment(R"DOC(
         Squeeze Operator.
 
@@ -175,39 +203,19 @@ class SqueezeOpMaker : public framework::OpProtoAndCheckerMaker {
 class Squeeze2Op : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
+  framework::OpKernelType GetExpectedKernelType(
+      const framework::ExecutionContext &ctx) const override {
+    auto input_data_type =
+        framework::OperatorWithKernel::IndicateVarDataType(ctx, "X");
 
-  void InferShape(framework::InferShapeContext *ctx) const override {
-    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "Squeeze2");
-    OP_INOUT_CHECK(ctx->HasOutput("Out"), "Output", "Out", "Squeeze2");
-
-    const auto &x_dims = ctx->GetInputDim("X");
-    // Check input tensor dims (<6) Eigen limit.
-    PADDLE_ENFORCE_LE(x_dims.size(), 6,
-                      platform::errors::InvalidArgument(
-                          "The dimensions of Input(X) "
-                          "should be in the range of [1, 6] (Eigen limit)."
-                          "But received X's dimensions = %d, X's shape = [%s].",
-                          x_dims.size(), x_dims));
-
-    const auto &axes = ctx->Attrs().Get<std::vector<int>>("axes");
-
-    auto out_dims = GetOutputShape(axes, x_dims, false);
-    ctx->SetOutputDim("Out", out_dims);
-    if (x_dims[0] == out_dims[0]) {
-      // Only pass LoD when the first dimension of output and Input(X)
-      // are the same.
-      ctx->ShareLoD("X", "Out");
-    }
-
-    OP_INOUT_CHECK(ctx->HasOutput("XShape"), "Output", "XShape", "Squeeze2");
-
-    std::vector<int64_t> xshape_dims(x_dims.size() + 1);
-    xshape_dims[0] = 0;
-    for (int i = 0; i < x_dims.size(); ++i) {
-      xshape_dims[i + 1] = x_dims[i];
-    }
-    ctx->SetOutputDim("XShape", framework::make_ddim(xshape_dims));
-    ctx->ShareLoD("X", /*->*/ "XShape");
+    // #ifdef PADDLE_WITH_MKLDNN
+    //    if (this->CanMKLDNNBeUsed(ctx, input_data_type)) {
+    //      return framework::OpKernelType(input_data_type, ctx.GetPlace(),
+    //                                     framework::DataLayout::kMKLDNN,
+    //                                     framework::LibraryType::kMKLDNN);
+    //    }
+    // #endif
+    return framework::OpKernelType(input_data_type, ctx.GetPlace());
   }
 };
 
@@ -235,7 +243,7 @@ class Squeeze2GradOp : public framework::OperatorWithKernel {
     OP_INOUT_CHECK(context->HasInput(framework::GradVarName("Out")), "Input",
                    framework::GradVarName("Out"), "Squeeze2Grad");
     auto xshape_dims = context->GetInputDim("XShape");
-    auto x_dims = framework::slice_ddim(xshape_dims, 1, xshape_dims.size());
+    auto x_dims = phi::slice_ddim(xshape_dims, 1, xshape_dims.size());
     context->SetOutputDim(framework::GradVarName("X"), x_dims);
     context->ShareLoD("XShape", framework::GradVarName("X"));
   }
@@ -243,9 +251,30 @@ class Squeeze2GradOp : public framework::OperatorWithKernel {
  protected:
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext &ctx) const override {
-    return framework::OpKernelType(OperatorWithKernel::IndicateVarDataType(
-                                       ctx, framework::GradVarName("Out")),
-                                   ctx.device_context());
+    auto input_data_type = framework::OperatorWithKernel::IndicateVarDataType(
+        ctx, framework::GradVarName("Out"));
+
+    // #ifdef PADDLE_WITH_MKLDNN
+    //    if (this->CanMKLDNNBeUsed(ctx, input_data_type)) {
+    //      return framework::OpKernelType(input_data_type, ctx.GetPlace(),
+    //                                     framework::DataLayout::kMKLDNN,
+    //                                     framework::LibraryType::kMKLDNN);
+    //    }
+    // #endif
+    return framework::OpKernelType(input_data_type, ctx.GetPlace());
+  }
+};
+
+template <typename T>
+class SqueezeDoubleGradOpMaker : public framework::SingleGradOpMaker<T> {
+ public:
+  using framework::SingleGradOpMaker<T>::SingleGradOpMaker;
+
+  void Apply(GradOpPtr<T> grad_op) const override {
+    grad_op->SetType("squeeze");
+    grad_op->SetInput("X", this->OutputGrad(framework::GradVarName("X")));
+    grad_op->SetOutput("Out", this->InputGrad(framework::GradVarName("Out")));
+    grad_op->SetAttrMap(this->Attrs());
   }
 };
 
@@ -261,7 +290,8 @@ class Squeeze2OpMaker : public SqueezeOpMaker {
     AddOutput("XShape",
               "XShape is just used to store the shape and lod of X, which will "
               "be used in SqueezeGradOp.")
-        .AsIntermediate();
+        .AsIntermediate()
+        .AsExtra();
   }
 };
 
@@ -279,8 +309,22 @@ class Squeeze2GradOpMaker : public framework::SingleGradOpMaker<T> {
   }
 };
 
-DECLARE_INPLACE_OP_INFERER(SequeezeInplaceInferer, {"X", "Out"});
-DECLARE_INPLACE_OP_INFERER(SequeezeGradInplaceInferer,
+template <typename T>
+class Squeeze2DoubleGradOpMaker : public framework::SingleGradOpMaker<T> {
+ public:
+  using framework::SingleGradOpMaker<T>::SingleGradOpMaker;
+
+  void Apply(GradOpPtr<T> grad_op) const override {
+    grad_op->SetType("squeeze2");
+    grad_op->SetInput("X", this->OutputGrad(framework::GradVarName("X")));
+    grad_op->SetOutput("Out", this->InputGrad(framework::GradVarName("Out")));
+    grad_op->SetOutput("XShape", this->Input("XShape"));
+    grad_op->SetAttrMap(this->Attrs());
+  }
+};
+
+DECLARE_INPLACE_OP_INFERER(SqueezeInplaceInferer, {"X", "Out"});
+DECLARE_INPLACE_OP_INFERER(SqueezeGradInplaceInferer,
                            {framework::GradVarName("Out"),
                             framework::GradVarName("X")});
 DECLARE_NO_NEED_BUFFER_VARS_INFERER(SqueezeGradNoNeedBufferVarsInferer, "X");
@@ -288,46 +332,53 @@ DECLARE_NO_NEED_BUFFER_VARS_INFERER(SqueezeGradNoNeedBufferVarsInferer, "X");
 }  // namespace paddle
 
 namespace ops = paddle::operators;
+
+DECLARE_INFER_SHAPE_FUNCTOR(squeeze2, SqueezeInferShapeFunctor,
+                            PD_INFER_META(phi::SqueezeInferMeta));
+
 REGISTER_OPERATOR(squeeze, ops::SqueezeOp, ops::SqueezeOpMaker,
                   ops::SqueezeGradOpMaker<paddle::framework::OpDesc>,
                   ops::SqueezeGradOpMaker<paddle::imperative::OpBase>);
 REGISTER_OPERATOR(squeeze_grad, ops::SqueezeGradOp,
+                  ops::SqueezeDoubleGradOpMaker<paddle::framework::OpDesc>,
+                  ops::SqueezeDoubleGradOpMaker<paddle::imperative::OpBase>,
                   ops::SqueezeGradNoNeedBufferVarsInferer);
 
 REGISTER_OPERATOR(squeeze2, ops::Squeeze2Op, ops::Squeeze2OpMaker,
                   ops::Squeeze2GradOpMaker<paddle::framework::OpDesc>,
                   ops::Squeeze2GradOpMaker<paddle::imperative::OpBase>,
-                  ops::SequeezeInplaceInferer);
+                  ops::SqueezeInplaceInferer, SqueezeInferShapeFunctor);
 REGISTER_OPERATOR(squeeze2_grad, ops::Squeeze2GradOp,
-                  ops::SequeezeGradInplaceInferer);
+                  ops::Squeeze2DoubleGradOpMaker<paddle::framework::OpDesc>,
+                  ops::Squeeze2DoubleGradOpMaker<paddle::imperative::OpBase>,
+                  ops::SqueezeGradInplaceInferer);
 
 REGISTER_OP_CPU_KERNEL(
     squeeze, ops::SqueezeKernel<paddle::platform::CPUDeviceContext, float>,
     ops::SqueezeKernel<paddle::platform::CPUDeviceContext, double>,
     ops::SqueezeKernel<paddle::platform::CPUDeviceContext, bool>,
     ops::SqueezeKernel<paddle::platform::CPUDeviceContext, int>,
+    ops::SqueezeKernel<paddle::platform::CPUDeviceContext, uint8_t>,
     ops::SqueezeKernel<paddle::platform::CPUDeviceContext, int8_t>,
-    ops::SqueezeKernel<paddle::platform::CPUDeviceContext, int64_t>);
+    ops::SqueezeKernel<paddle::platform::CPUDeviceContext, int64_t>,
+    ops::SqueezeKernel<paddle::platform::CPUDeviceContext,
+                       paddle::platform::complex<float>>,
+    ops::SqueezeKernel<paddle::platform::CPUDeviceContext,
+                       paddle::platform::complex<double>>,
+    ops::SqueezeKernel<paddle::platform::CPUDeviceContext,
+                       paddle::platform::bfloat16>);
 REGISTER_OP_CPU_KERNEL(
     squeeze_grad,
     ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, float>,
     ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, double>,
     ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, bool>,
     ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, int>,
+    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, uint8_t>,
     ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, int8_t>,
-    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, int64_t>);
-REGISTER_OP_CPU_KERNEL(
-    squeeze2, ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, float>,
-    ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, double>,
-    ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, bool>,
-    ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, int>,
-    ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, int8_t>,
-    ops::Squeeze2Kernel<paddle::platform::CPUDeviceContext, int64_t>);
-REGISTER_OP_CPU_KERNEL(
-    squeeze2_grad,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, float>,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, double>,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, bool>,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, int>,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, int8_t>,
-    ops::Squeeze2GradKernel<paddle::platform::CPUDeviceContext, int64_t>);
+    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext, int64_t>,
+    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext,
+                           paddle::platform::complex<float>>,
+    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext,
+                           paddle::platform::complex<double>>,
+    ops::SqueezeGradKernel<paddle::platform::CPUDeviceContext,
+                           paddle::platform::bfloat16>);

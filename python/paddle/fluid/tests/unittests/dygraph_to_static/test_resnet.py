@@ -14,8 +14,10 @@
 
 from __future__ import print_function
 
+import os
 import math
 import time
+import tempfile
 import unittest
 
 import numpy as np
@@ -24,7 +26,7 @@ import paddle
 import paddle.fluid as fluid
 from paddle.fluid.dygraph import declarative, ProgramTranslator
 from paddle.fluid.dygraph.nn import BatchNorm, Conv2D, Linear, Pool2D
-from paddle.fluid.dygraph.io import VARIABLE_FILENAME
+from paddle.fluid.dygraph.io import INFER_MODEL_SUFFIX, INFER_PARAMS_SUFFIX
 
 from predictor_utils import PredictorTools
 
@@ -38,8 +40,7 @@ batch_size = 2
 epoch_num = 1
 place = fluid.CUDAPlace(0) if fluid.is_compiled_with_cuda() \
     else fluid.CPUPlace()
-MODEL_SAVE_PATH = "./resnet.inference.model"
-DY_STATE_DICT_SAVE_PATH = "./resnet.dygraph"
+
 program_translator = ProgramTranslator()
 
 if fluid.is_compiled_with_cuda():
@@ -186,7 +187,6 @@ class ResNet(fluid.dygraph.Layer):
             param_attr=fluid.param_attr.ParamAttr(
                 initializer=fluid.initializer.Uniform(-stdv, stdv)))
 
-    @declarative
     def forward(self, inputs):
         y = self.conv(inputs)
         y = self.pool2d_max(y)
@@ -209,123 +209,148 @@ def reader_decorator(reader):
     return __reader__
 
 
-def train(to_static):
-    """
-    Tests model decorated by `dygraph_to_static_output` in static mode. For users, the model is defined in dygraph mode and trained in static mode.
-    """
-    with fluid.dygraph.guard(place):
-        np.random.seed(SEED)
-        paddle.manual_seed(SEED)
-        paddle.framework.random._manual_program_seed(SEED)
+class ResNetHelper:
+    def __init__(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.model_save_dir = os.path.join(self.temp_dir.name, 'inference')
+        self.model_save_prefix = os.path.join(self.model_save_dir, 'resnet')
+        self.model_filename = 'resnet' + INFER_MODEL_SUFFIX
+        self.params_filename = 'resnet' + INFER_PARAMS_SUFFIX
+        self.dy_state_dict_save_path = os.path.join(self.temp_dir.name,
+                                                    'resnet.dygraph')
 
-        train_reader = paddle.batch(
-            reader_decorator(paddle.dataset.flowers.train(use_xmap=False)),
-            batch_size=batch_size,
-            drop_last=True)
-        data_loader = fluid.io.DataLoader.from_generator(
-            capacity=5, iterable=True)
-        data_loader.set_sample_list_generator(train_reader)
+    def __del__(self):
+        self.temp_dir.cleanup()
 
-        resnet = ResNet()
-        optimizer = optimizer_setting(parameter_list=resnet.parameters())
+    def train(self, to_static, build_strategy=None):
+        """
+        Tests model decorated by `dygraph_to_static_output` in static mode. For users, the model is defined in dygraph mode and trained in static mode.
+        """
+        with fluid.dygraph.guard(place):
+            np.random.seed(SEED)
+            paddle.seed(SEED)
+            paddle.framework.random._manual_program_seed(SEED)
 
-        for epoch in range(epoch_num):
-            total_loss = 0.0
-            total_acc1 = 0.0
-            total_acc5 = 0.0
-            total_sample = 0
+            train_reader = paddle.batch(
+                reader_decorator(paddle.dataset.flowers.train(use_xmap=False)),
+                batch_size=batch_size,
+                drop_last=True)
+            data_loader = fluid.io.DataLoader.from_generator(
+                capacity=5, iterable=True)
+            data_loader.set_sample_list_generator(train_reader)
 
-            for batch_id, data in enumerate(data_loader()):
-                start_time = time.time()
-                img, label = data
+            resnet = ResNet()
+            if to_static:
+                resnet = paddle.jit.to_static(
+                    resnet, build_strategy=build_strategy)
+            optimizer = optimizer_setting(parameter_list=resnet.parameters())
 
-                pred = resnet(img)
-                loss = fluid.layers.cross_entropy(input=pred, label=label)
-                avg_loss = fluid.layers.mean(x=loss)
-                acc_top1 = fluid.layers.accuracy(input=pred, label=label, k=1)
-                acc_top5 = fluid.layers.accuracy(input=pred, label=label, k=5)
+            for epoch in range(epoch_num):
+                total_loss = 0.0
+                total_acc1 = 0.0
+                total_acc5 = 0.0
+                total_sample = 0
 
-                avg_loss.backward()
-                optimizer.minimize(avg_loss)
-                resnet.clear_gradients()
+                for batch_id, data in enumerate(data_loader()):
+                    start_time = time.time()
+                    img, label = data
 
-                total_loss += avg_loss
-                total_acc1 += acc_top1
-                total_acc5 += acc_top5
-                total_sample += 1
+                    pred = resnet(img)
+                    loss = fluid.layers.cross_entropy(input=pred, label=label)
+                    avg_loss = fluid.layers.mean(x=loss)
+                    acc_top1 = fluid.layers.accuracy(
+                        input=pred, label=label, k=1)
+                    acc_top5 = fluid.layers.accuracy(
+                        input=pred, label=label, k=5)
 
-                end_time = time.time()
-                if batch_id % 2 == 0:
-                    print( "epoch %d | batch step %d, loss %0.3f, acc1 %0.3f, acc5 %0.3f, time %f" % \
-                        ( epoch, batch_id, total_loss.numpy() / total_sample, \
-                            total_acc1.numpy() / total_sample, total_acc5.numpy() / total_sample, end_time-start_time))
-                if batch_id == 10:
-                    if to_static:
-                        fluid.dygraph.jit.save(resnet, MODEL_SAVE_PATH)
-                    else:
-                        fluid.dygraph.save_dygraph(resnet.state_dict(),
-                                                   DY_STATE_DICT_SAVE_PATH)
-                    # avoid dataloader throw abort signaal
-                    data_loader._reset()
-                    break
+                    avg_loss.backward()
+                    optimizer.minimize(avg_loss)
+                    resnet.clear_gradients()
 
-    return total_loss.numpy()
+                    total_loss += avg_loss
+                    total_acc1 += acc_top1
+                    total_acc5 += acc_top5
+                    total_sample += 1
 
+                    end_time = time.time()
+                    if batch_id % 2 == 0:
+                        print( "epoch %d | batch step %d, loss %0.3f, acc1 %0.3f, acc5 %0.3f, time %f" % \
+                            ( epoch, batch_id, total_loss.numpy() / total_sample, \
+                                total_acc1.numpy() / total_sample, total_acc5.numpy() / total_sample, end_time-start_time))
+                    if batch_id == 10:
+                        if to_static:
+                            fluid.dygraph.jit.save(resnet,
+                                                   self.model_save_prefix)
+                        else:
+                            fluid.dygraph.save_dygraph(
+                                resnet.state_dict(),
+                                self.dy_state_dict_save_path)
+                        # avoid dataloader throw abort signaal
+                        data_loader._reset()
+                        break
 
-def predict_dygraph(data):
-    program_translator.enable(False)
-    with fluid.dygraph.guard(place):
-        resnet = ResNet()
+        return total_loss.numpy()
 
-        model_dict, _ = fluid.dygraph.load_dygraph(DY_STATE_DICT_SAVE_PATH)
-        resnet.set_dict(model_dict)
-        resnet.eval()
+    def predict_dygraph(self, data):
+        program_translator.enable(False)
+        with fluid.dygraph.guard(place):
+            resnet = ResNet()
 
-        pred_res = resnet(fluid.dygraph.to_variable(data))
+            model_dict, _ = fluid.dygraph.load_dygraph(
+                self.dy_state_dict_save_path)
+            resnet.set_dict(model_dict)
+            resnet.eval()
 
-        return pred_res.numpy()
+            pred_res = resnet(fluid.dygraph.to_variable(data))
 
+            return pred_res.numpy()
 
-def predict_static(data):
-    exe = fluid.Executor(place)
-    [inference_program, feed_target_names,
-     fetch_targets] = fluid.io.load_inference_model(
-         MODEL_SAVE_PATH, executor=exe, params_filename=VARIABLE_FILENAME)
+    def predict_static(self, data):
+        paddle.enable_static()
+        exe = fluid.Executor(place)
+        [inference_program, feed_target_names,
+         fetch_targets] = fluid.io.load_inference_model(
+             self.model_save_dir,
+             executor=exe,
+             model_filename=self.model_filename,
+             params_filename=self.params_filename)
 
-    pred_res = exe.run(inference_program,
-                       feed={feed_target_names[0]: data},
-                       fetch_list=fetch_targets)
+        pred_res = exe.run(inference_program,
+                           feed={feed_target_names[0]: data},
+                           fetch_list=fetch_targets)
 
-    return pred_res[0]
+        return pred_res[0]
 
+    def predict_dygraph_jit(self, data):
+        with fluid.dygraph.guard(place):
+            resnet = fluid.dygraph.jit.load(self.model_save_prefix)
+            resnet.eval()
 
-def predict_dygraph_jit(data):
-    with fluid.dygraph.guard(place):
-        resnet = fluid.dygraph.jit.load(MODEL_SAVE_PATH)
-        resnet.eval()
+            pred_res = resnet(data)
 
-        pred_res = resnet(data)
+            return pred_res.numpy()
 
-        return pred_res.numpy()
-
-
-def predict_analysis_inference(data):
-    output = PredictorTools(MODEL_SAVE_PATH, VARIABLE_FILENAME, [data])
-    out = output()
-    return out
+    def predict_analysis_inference(self, data):
+        output = PredictorTools(self.model_save_dir, self.model_filename,
+                                self.params_filename, [data])
+        out = output()
+        return out
 
 
 class TestResnet(unittest.TestCase):
+    def setUp(self):
+        self.resnet_helper = ResNetHelper()
+
     def train(self, to_static):
         program_translator.enable(to_static)
-        return train(to_static)
+        return self.resnet_helper.train(to_static)
 
     def verify_predict(self):
         image = np.random.random([1, 3, 224, 224]).astype('float32')
-        dy_pre = predict_dygraph(image)
-        st_pre = predict_static(image)
-        dy_jit_pre = predict_dygraph_jit(image)
-        predictor_pre = predict_analysis_inference(image)
+        dy_pre = self.resnet_helper.predict_dygraph(image)
+        st_pre = self.resnet_helper.predict_static(image)
+        dy_jit_pre = self.resnet_helper.predict_dygraph_jit(image)
+        predictor_pre = self.resnet_helper.predict_analysis_inference(image)
         self.assertTrue(
             np.allclose(dy_pre, st_pre),
             msg="dy_pre:\n {}\n, st_pre: \n{}.".format(dy_pre, st_pre))
@@ -349,10 +374,13 @@ class TestResnet(unittest.TestCase):
     def test_in_static_mode_mkldnn(self):
         fluid.set_flags({'FLAGS_use_mkldnn': True})
         try:
-            train(to_static=True)
+            if paddle.fluid.core.is_compiled_with_mkldnn():
+                self.resnet_helper.train(to_static=True)
         finally:
             fluid.set_flags({'FLAGS_use_mkldnn': False})
 
 
 if __name__ == '__main__':
-    unittest.main()
+    # switch into new eager mode
+    with fluid.framework._test_eager_guard():
+        unittest.main()

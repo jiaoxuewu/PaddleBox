@@ -12,36 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = [
-    'Adadelta', 'AdadeltaOptimizer', 'Adagrad', 'AdagradOptimizer', 'Adam',
-    'Adamax', 'AdamW', 'DecayedAdagrad', 'DecayedAdagradOptimizer',
-    'DGCMomentumOptimizer', 'Dpsgd', 'DpsgdOptimizer',
-    'ExponentialMovingAverage', 'Ftrl', 'FtrlOptimizer', 'LambOptimizer',
-    'LarsMomentum', 'LarsMomentumOptimizer', 'LookaheadOptimizer',
-    'ModelAverage', 'Momentum', 'MomentumOptimizer', 'PipelineOptimizer',
-    'RecomputeOptimizer', 'RMSProp', 'SGD', 'SGDOptimizer', 'Optimizer',
-    '_LRScheduler', 'NoamLR', 'PiecewiseLR', 'NaturalExpLR', 'InverseTimeLR',
-    'PolynomialLR', 'LinearLrWarmup', 'ExponentialLR', 'MultiStepLR', 'StepLR',
-    'LambdaLR', 'ReduceLROnPlateau', 'CosineAnnealingLR'
+from .optimizer import Optimizer  # noqa: F401
+from .adagrad import Adagrad  # noqa: F401
+from .adam import Adam  # noqa: F401
+from .adamw import AdamW  # noqa: F401
+from .adamax import Adamax  # noqa: F401
+from .rmsprop import RMSProp  # noqa: F401
+from .adadelta import Adadelta  # noqa: F401
+from .sgd import SGD  # noqa: F401
+from .momentum import Momentum  # noqa: F401
+from .lamb import Lamb  # noqa: F401
+from . import lr  # noqa: F401
+
+__all__ = [     #noqa
+           'Optimizer',
+           'Adagrad',
+           'Adam',
+           'AdamW',
+           'Adamax',
+           'RMSProp',
+           'Adadelta',
+           'SGD',
+           'Momentum',
+           'Lamb'
 ]
-
-
-from ..fluid.optimizer import Momentum, Adagrad, Dpsgd, DecayedAdagrad, Ftrl,\
-            AdagradOptimizer,DpsgdOptimizer,\
-            DecayedAdagradOptimizer,FtrlOptimizer,AdadeltaOptimizer, \
-            ModelAverage, LarsMomentum, DGCMomentumOptimizer, LambOptimizer,\
-            ExponentialMovingAverage, PipelineOptimizer, LookaheadOptimizer, \
-            RecomputeOptimizer, LarsMomentumOptimizer
-
-from .optimizer import Optimizer
-from .adam import Adam
-from .adamw import AdamW
-from .adamax import Adamax
-from .rmsprop import RMSProp
-from .adadelta import Adadelta
-from .sgd import SGD
-from .momentum import Momentum
-
-from . import lr_scheduler
-from .lr_scheduler import _LRScheduler, NoamLR, PiecewiseLR, NaturalExpLR, InverseTimeLR, PolynomialLR, \
-            LinearLrWarmup, ExponentialLR, MultiStepLR, StepLR, LambdaLR, ReduceLROnPlateau, CosineAnnealingLR

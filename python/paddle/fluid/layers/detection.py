@@ -20,7 +20,7 @@ from __future__ import print_function
 from .layer_function_generator import generate_layer_fn
 from .layer_function_generator import autodoc, templatedoc
 from ..layer_helper import LayerHelper
-from ..framework import Variable, in_dygraph_mode
+from ..framework import Variable, _non_static_mode, static_only
 from .. import core
 from .loss import softmax_with_cross_entropy
 from . import tensor
@@ -33,6 +33,8 @@ import six
 import numpy as np
 from functools import reduce
 from ..data_feeder import convert_dtype, check_variable_and_dtype, check_type, check_dtype
+from paddle.utils import deprecated
+from paddle import _C_ops
 
 __all__ = [
     'prior_box',
@@ -77,7 +79,7 @@ def retinanet_target_assign(bbox_pred,
                             num_classes=1,
                             positive_overlap=0.5,
                             negative_overlap=0.4):
-    """
+    r"""
     **Target Assign Layer for the detector RetinaNet.**
 
     This OP finds out positive and negative samples from all anchors
@@ -471,7 +473,7 @@ def rpn_target_assign(bbox_pred,
 
 
 def sigmoid_focal_loss(x, label, fg_num, gamma=2.0, alpha=0.25):
-    """
+    r"""
 	:alias_main: paddle.nn.functional.sigmoid_focal_loss
 	:alias: paddle.nn.functional.sigmoid_focal_loss,paddle.nn.functional.loss.sigmoid_focal_loss
 	:old_api: paddle.fluid.layers.sigmoid_focal_loss
@@ -629,9 +631,6 @@ def detection_output(loc,
                      nms_eta=1.0,
                      return_index=False):
     """
-	:alias_main: paddle.nn.functional.detection_output
-	:alias: paddle.nn.functional.detection_output,paddle.nn.functional.vision.detection_output
-	:old_api: paddle.fluid.layers.detection_output
 
     Given the regression locations, classification confidences and prior boxes,
     calculate the detection outputs by performing following steps:
@@ -700,6 +699,9 @@ def detection_output(loc,
         .. code-block:: python
 
             import paddle.fluid as fluid
+            import paddle
+
+            paddle.enable_static()
 
             pb = fluid.data(name='prior_box', shape=[10, 4], dtype='float32')
             pbv = fluid.data(name='prior_box_var', shape=[10, 4], dtype='float32')
@@ -821,10 +823,7 @@ def box_coder(prior_box,
               box_normalized=True,
               name=None,
               axis=0):
-    """
-	:alias_main: paddle.nn.functional.box_coder
-	:alias: paddle.nn.functional.box_coder,paddle.nn.functional.vision.box_coder
-	:old_api: paddle.fluid.layers.box_coder
+    r"""
 
     **Box Coder Layer**
 
@@ -911,6 +910,8 @@ def box_coder(prior_box,
         .. code-block:: python
  
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             # For encode
             prior_box_encode = fluid.data(name='prior_box_encode',
                                   shape=[512, 4],
@@ -999,6 +1000,7 @@ def polygon_box_transform(input, name=None):
     return output
 
 
+@deprecated(since="2.0.0", update_to="paddle.vision.ops.yolo_loss")
 @templatedoc(op_type="yolov3_loss")
 def yolov3_loss(x,
                 gt_box,
@@ -1013,9 +1015,6 @@ def yolov3_loss(x,
                 name=None,
                 scale_x_y=1.):
     """
-	:alias_main: paddle.nn.functional.yolov3_loss
-	:alias: paddle.nn.functional.yolov3_loss,paddle.nn.functional.vision.yolov3_loss
-	:old_api: paddle.fluid.layers.yolov3_loss
 
     ${comment}
 
@@ -1060,6 +1059,8 @@ def yolov3_loss(x,
       .. code-block:: python
 
           import paddle.fluid as fluid
+          import paddle
+          paddle.enable_static()
           x = fluid.data(name='x', shape=[None, 255, 13, 13], dtype='float32')
           gt_box = fluid.data(name='gt_box', shape=[None, 6, 4], dtype='float32')
           gt_label = fluid.data(name='gt_label', shape=[None, 6], dtype='int32')
@@ -1071,7 +1072,6 @@ def yolov3_loss(x,
                                           anchor_mask=anchor_mask, class_num=80,
                                           ignore_thresh=0.7, downsample_ratio=32)
     """
-    helper = LayerHelper('yolov3_loss', **locals())
 
     if not isinstance(x, Variable):
         raise TypeError("Input x of yolov3_loss must be Variable")
@@ -1094,8 +1094,16 @@ def yolov3_loss(x,
         raise TypeError(
             "Attr use_label_smooth of yolov3_loss must be a bool value")
 
-    loss = helper.create_variable_for_type_inference(dtype=x.dtype)
+    if _non_static_mode():
+        attrs = ("anchors", anchors, "anchor_mask", anchor_mask, "class_num",
+                 class_num, "ignore_thresh", ignore_thresh, "downsample_ratio",
+                 downsample_ratio, "use_label_smooth", use_label_smooth,
+                 "scale_x_y", scale_x_y)
+        loss, _, _ = _C_ops.yolov3_loss(x, gt_box, gt_label, gt_score, *attrs)
+        return loss
 
+    helper = LayerHelper('yolov3_loss', **locals())
+    loss = helper.create_variable_for_type_inference(dtype=x.dtype)
     objectness_mask = helper.create_variable_for_type_inference(dtype='int32')
     gt_match_mask = helper.create_variable_for_type_inference(dtype='int32')
 
@@ -1129,6 +1137,7 @@ def yolov3_loss(x,
     return loss
 
 
+@deprecated(since="2.0.0", update_to="paddle.vision.ops.yolo_box")
 @templatedoc(op_type="yolo_box")
 def yolo_box(x,
              img_size,
@@ -1138,11 +1147,10 @@ def yolo_box(x,
              downsample_ratio,
              clip_bbox=True,
              name=None,
-             scale_x_y=1.):
+             scale_x_y=1.,
+             iou_aware=False,
+             iou_aware_factor=0.5):
     """
-	:alias_main: paddle.nn.functional.yolo_box
-	:alias: paddle.nn.functional.yolo_box,paddle.nn.functional.vision.yolo_box
-	:old_api: paddle.fluid.layers.yolo_box
 
     ${comment}
 
@@ -1158,6 +1166,8 @@ def yolo_box(x,
         name (string): The default value is None.  Normally there is no need 
                        for user to set this property.  For more information, 
                        please refer to :ref:`api_guide_Name`
+        iou_aware (bool): ${iou_aware_comment}
+        iou_aware_factor (float): ${iou_aware_factor_comment}
 
     Returns:
         Variable: A 3-D tensor with shape [N, M, 4], the coordinates of boxes,
@@ -1175,6 +1185,8 @@ def yolo_box(x,
     .. code-block:: python
 
         import paddle.fluid as fluid
+        import paddle
+        paddle.enable_static()
         x = fluid.data(name='x', shape=[None, 255, 13, 13], dtype='float32')
         img_size = fluid.data(name='img_size',shape=[None, 2],dtype='int64')
         anchors = [10, 13, 16, 30, 33, 23]
@@ -1204,6 +1216,8 @@ def yolo_box(x,
         "downsample_ratio": downsample_ratio,
         "clip_bbox": clip_bbox,
         "scale_x_y": scale_x_y,
+        "iou_aware": iou_aware,
+        "iou_aware_factor": iou_aware_factor
     }
 
     helper.append_op(
@@ -1319,9 +1333,6 @@ def bipartite_match(dist_matrix,
                     dist_threshold=None,
                     name=None):
     """
-	:alias_main: paddle.nn.functional.bipartite_match
-	:alias: paddle.nn.functional.bipartite_match,paddle.nn.functional.vision.bipartite_match
-	:old_api: paddle.fluid.layers.bipartite_match
 
     This operator implements a greedy bipartite matching algorithm, which is
     used to obtain the matching with the maximum distance based on the input
@@ -1413,9 +1424,6 @@ def target_assign(input,
                   mismatch_value=None,
                   name=None):
     """
-	:alias_main: paddle.nn.functional.target_assign
-	:alias: paddle.nn.functional.target_assign,paddle.nn.functional.extension.target_assign
-	:old_api: paddle.fluid.layers.target_assign
 
     This operator can be, for given the target bounding boxes or labels,
     to assign classification and regression targets to each prediction as well as
@@ -1484,6 +1492,8 @@ def target_assign(input,
         .. code-block:: python
 
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             x = fluid.data(
                 name='x',
                 shape=[4, 20, 4],
@@ -1530,7 +1540,7 @@ def ssd_loss(location,
              mining_type='max_negative',
              normalize=True,
              sample_size=None):
-    """
+    r"""
 	:alias_main: paddle.nn.functional.ssd_loss
 	:alias: paddle.nn.functional.ssd_loss,paddle.nn.functional.loss.ssd_loss
 	:old_api: paddle.fluid.layers.ssd_loss
@@ -1778,9 +1788,6 @@ def prior_box(input,
               name=None,
               min_max_aspect_ratios_order=False):
     """
-	:alias_main: paddle.nn.functional.prior_box
-	:alias: paddle.nn.functional.prior_box,paddle.nn.functional.vision.prior_box
-	:old_api: paddle.fluid.layers.prior_box
 
     This op generates prior boxes for SSD(Single Shot MultiBox Detector) algorithm.
     Each position of the input produce N prior boxes, N is determined by
@@ -1832,6 +1839,8 @@ def prior_box(input,
 	    #declarative mode
 	    import paddle.fluid as fluid
 	    import numpy as np
+        import paddle
+        paddle.enable_static()
 	    input = fluid.data(name="input", shape=[None,3,6,9])
 	    image = fluid.data(name="image", shape=[None,3,9,12])
 	    box, var = fluid.layers.prior_box(
@@ -1938,11 +1947,7 @@ def density_prior_box(input,
                       offset=0.5,
                       flatten_to_2d=False,
                       name=None):
-    """
-	:alias_main: paddle.nn.functional.density_prior_box
-	:alias: paddle.nn.functional.density_prior_box,paddle.nn.functional.vision.density_prior_box
-	:old_api: paddle.fluid.layers.density_prior_box
-
+    r"""
 
     This op generates density prior boxes for SSD(Single Shot MultiBox Detector) 
     algorithm. Each position of the input produce N prior boxes, N is 
@@ -2008,6 +2013,8 @@ def density_prior_box(input,
 
             import paddle.fluid as fluid
             import numpy as np
+            import paddle
+            paddle.enable_static()
 
             input = fluid.data(name="input", shape=[None,3,6,9])
             image = fluid.data(name="image", shape=[None,3,9,12])
@@ -2109,6 +2116,7 @@ def density_prior_box(input,
     return box, var
 
 
+@static_only
 def multi_box_head(inputs,
                    image,
                    base_size,
@@ -2220,17 +2228,18 @@ def multi_box_head(inputs,
     Examples 1: set min_ratio and max_ratio:
         .. code-block:: python
 
-          import paddle.fluid as fluid
+          import paddle
+          paddle.enable_static()
 
-          images = fluid.data(name='data', shape=[None, 3, 300, 300], dtype='float32')
-          conv1 = fluid.data(name='conv1', shape=[None, 512, 19, 19], dtype='float32')
-          conv2 = fluid.data(name='conv2', shape=[None, 1024, 10, 10], dtype='float32')
-          conv3 = fluid.data(name='conv3', shape=[None, 512, 5, 5], dtype='float32')
-          conv4 = fluid.data(name='conv4', shape=[None, 256, 3, 3], dtype='float32')
-          conv5 = fluid.data(name='conv5', shape=[None, 256, 2, 2], dtype='float32')
-          conv6 = fluid.data(name='conv6', shape=[None, 128, 1, 1], dtype='float32')
+          images = paddle.static.data(name='data', shape=[None, 3, 300, 300], dtype='float32')
+          conv1 = paddle.static.data(name='conv1', shape=[None, 512, 19, 19], dtype='float32')
+          conv2 = paddle.static.data(name='conv2', shape=[None, 1024, 10, 10], dtype='float32')
+          conv3 = paddle.static.data(name='conv3', shape=[None, 512, 5, 5], dtype='float32')
+          conv4 = paddle.static.data(name='conv4', shape=[None, 256, 3, 3], dtype='float32')
+          conv5 = paddle.static.data(name='conv5', shape=[None, 256, 2, 2], dtype='float32')
+          conv6 = paddle.static.data(name='conv6', shape=[None, 128, 1, 1], dtype='float32')
 
-          mbox_locs, mbox_confs, box, var = fluid.layers.multi_box_head(
+          mbox_locs, mbox_confs, box, var = paddle.static.nn.multi_box_head(
             inputs=[conv1, conv2, conv3, conv4, conv5, conv6],
             image=images,
             num_classes=21,
@@ -2245,17 +2254,18 @@ def multi_box_head(inputs,
     Examples 2: set min_sizes and max_sizes:
         .. code-block:: python
 
-          import paddle.fluid as fluid
+          import paddle
+          paddle.enable_static()
 
-          images = fluid.data(name='data', shape=[None, 3, 300, 300], dtype='float32')
-          conv1 = fluid.data(name='conv1', shape=[None, 512, 19, 19], dtype='float32')
-          conv2 = fluid.data(name='conv2', shape=[None, 1024, 10, 10], dtype='float32')
-          conv3 = fluid.data(name='conv3', shape=[None, 512, 5, 5], dtype='float32')
-          conv4 = fluid.data(name='conv4', shape=[None, 256, 3, 3], dtype='float32')
-          conv5 = fluid.data(name='conv5', shape=[None, 256, 2, 2], dtype='float32')
-          conv6 = fluid.data(name='conv6', shape=[None, 128, 1, 1], dtype='float32')
+          images = paddle.static.data(name='data', shape=[None, 3, 300, 300], dtype='float32')
+          conv1 = paddle.static.data(name='conv1', shape=[None, 512, 19, 19], dtype='float32')
+          conv2 = paddle.static.data(name='conv2', shape=[None, 1024, 10, 10], dtype='float32')
+          conv3 = paddle.static.data(name='conv3', shape=[None, 512, 5, 5], dtype='float32')
+          conv4 = paddle.static.data(name='conv4', shape=[None, 256, 3, 3], dtype='float32')
+          conv5 = paddle.static.data(name='conv5', shape=[None, 256, 2, 2], dtype='float32')
+          conv6 = paddle.static.data(name='conv6', shape=[None, 128, 1, 1], dtype='float32')
 
-          mbox_locs, mbox_confs, box, var = fluid.layers.multi_box_head(
+          mbox_locs, mbox_confs, box, var = paddle.static.nn.multi_box_head(
             inputs=[conv1, conv2, conv3, conv4, conv5, conv6],
             image=images,
             num_classes=21,
@@ -2408,9 +2418,6 @@ def anchor_generator(input,
                      offset=0.5,
                      name=None):
     """
-	:alias_main: paddle.nn.functional.anchor_generator
-	:alias: paddle.nn.functional.anchor_generator,paddle.nn.functional.vision.anchor_generator
-	:old_api: paddle.fluid.layers.anchor_generator
 
     **Anchor generator operator**
 
@@ -2457,6 +2464,9 @@ def anchor_generator(input,
         .. code-block:: python
 
             import paddle.fluid as fluid
+            import paddle
+
+            paddle.enable_static()
             conv1 = fluid.data(name='conv1', shape=[None, 48, 16, 16], dtype='float32')
             anchor, var = fluid.layers.anchor_generator(
                 input=conv1,
@@ -2611,11 +2621,10 @@ def generate_proposal_labels(rpn_rois,
                              class_nums=None,
                              use_random=True,
                              is_cls_agnostic=False,
-                             is_cascade_rcnn=False):
+                             is_cascade_rcnn=False,
+                             max_overlap=None,
+                             return_max_overlap=False):
     """
-	:alias_main: paddle.nn.functional.generate_proposal_labels
-	:alias: paddle.nn.functional.generate_proposal_labels,paddle.nn.functional.vision.generate_proposal_labels
-	:old_api: paddle.fluid.layers.generate_proposal_labels
 
     **Generate Proposal Labels of Faster-RCNN**
 
@@ -2651,25 +2660,29 @@ def generate_proposal_labels(rpn_rois,
         use_random(bool): Use random sampling to choose foreground and background boxes.
         is_cls_agnostic(bool): bbox regression use class agnostic simply which only represent fg and bg boxes.
         is_cascade_rcnn(bool): it will filter some bbox crossing the image's boundary when setting True.
+        max_overlap(Variable): Maximum overlap between each proposal box and ground-truth.
+        return_max_overlap(bool): Whether return the maximum overlap between each sampled RoI and ground-truth.
 
     Returns:
         tuple:
-        A tuple with format``(rois, labels_int32, bbox_targets, bbox_inside_weights, bbox_outside_weights)``.
+        A tuple with format``(rois, labels_int32, bbox_targets, bbox_inside_weights, bbox_outside_weights, max_overlap)``.
 
         - **rois**: 2-D LoDTensor with shape ``[batch_size_per_im * batch_size, 4]``. The data type is the same as ``rpn_rois``.
         - **labels_int32**: 2-D LoDTensor with shape ``[batch_size_per_im * batch_size, 1]``. The data type must be int32.
         - **bbox_targets**: 2-D LoDTensor with shape ``[batch_size_per_im * batch_size, 4 * class_num]``. The regression targets of all RoIs. The data type is the same as ``rpn_rois``.
         - **bbox_inside_weights**: 2-D LoDTensor with shape ``[batch_size_per_im * batch_size, 4 * class_num]``. The weights of foreground boxes' regression loss. The data type is the same as ``rpn_rois``.
         - **bbox_outside_weights**: 2-D LoDTensor with shape ``[batch_size_per_im * batch_size, 4 * class_num]``. The weights of regression loss. The data type is the same as ``rpn_rois``.
-
+        - **max_overlap**: 1-D LoDTensor with shape ``[P]``. P is the number of output ``rois``. The maximum overlap between each sampled RoI and ground-truth.
 
     Examples:
         .. code-block:: python
 
+            import paddle
             import paddle.fluid as fluid
+            paddle.enable_static()
             rpn_rois = fluid.data(name='rpn_rois', shape=[None, 4], dtype='float32')
-            gt_classes = fluid.data(name='gt_classes', shape=[None, 1], dtype='float32')
-            is_crowd = fluid.data(name='is_crowd', shape=[None, 1], dtype='float32')
+            gt_classes = fluid.data(name='gt_classes', shape=[None, 1], dtype='int32')
+            is_crowd = fluid.data(name='is_crowd', shape=[None, 1], dtype='int32')
             gt_boxes = fluid.data(name='gt_boxes', shape=[None, 4], dtype='float32')
             im_info = fluid.data(name='im_info', shape=[None, 3], dtype='float32')
             rois, labels, bbox, inside_weights, outside_weights = fluid.layers.generate_proposal_labels(
@@ -2686,6 +2699,8 @@ def generate_proposal_labels(rpn_rois,
                              'generate_proposal_labels')
     check_variable_and_dtype(is_crowd, 'is_crowd', ['int32'],
                              'generate_proposal_labels')
+    if is_cascade_rcnn:
+        assert max_overlap is not None, "Input max_overlap of generate_proposal_labels should not be None if is_cascade_rcnn is True"
 
     rois = helper.create_variable_for_type_inference(dtype=rpn_rois.dtype)
     labels_int32 = helper.create_variable_for_type_inference(
@@ -2696,22 +2711,28 @@ def generate_proposal_labels(rpn_rois,
         dtype=rpn_rois.dtype)
     bbox_outside_weights = helper.create_variable_for_type_inference(
         dtype=rpn_rois.dtype)
+    max_overlap_with_gt = helper.create_variable_for_type_inference(
+        dtype=rpn_rois.dtype)
 
+    inputs = {
+        'RpnRois': rpn_rois,
+        'GtClasses': gt_classes,
+        'IsCrowd': is_crowd,
+        'GtBoxes': gt_boxes,
+        'ImInfo': im_info,
+    }
+    if max_overlap is not None:
+        inputs['MaxOverlap'] = max_overlap
     helper.append_op(
         type="generate_proposal_labels",
-        inputs={
-            'RpnRois': rpn_rois,
-            'GtClasses': gt_classes,
-            'IsCrowd': is_crowd,
-            'GtBoxes': gt_boxes,
-            'ImInfo': im_info
-        },
+        inputs=inputs,
         outputs={
             'Rois': rois,
             'LabelsInt32': labels_int32,
             'BboxTargets': bbox_targets,
             'BboxInsideWeights': bbox_inside_weights,
-            'BboxOutsideWeights': bbox_outside_weights
+            'BboxOutsideWeights': bbox_outside_weights,
+            'MaxOverlapWithGT': max_overlap_with_gt
         },
         attrs={
             'batch_size_per_im': batch_size_per_im,
@@ -2731,16 +2752,16 @@ def generate_proposal_labels(rpn_rois,
     bbox_targets.stop_gradient = True
     bbox_inside_weights.stop_gradient = True
     bbox_outside_weights.stop_gradient = True
+    max_overlap_with_gt.stop_gradient = True
 
+    if return_max_overlap:
+        return rois, labels_int32, bbox_targets, bbox_inside_weights, bbox_outside_weights, max_overlap_with_gt
     return rois, labels_int32, bbox_targets, bbox_inside_weights, bbox_outside_weights
 
 
 def generate_mask_labels(im_info, gt_classes, is_crowd, gt_segms, rois,
                          labels_int32, num_classes, resolution):
-    """
-	:alias_main: paddle.nn.functional.generate_mask_labels
-	:alias: paddle.nn.functional.generate_mask_labels,paddle.nn.functional.vision.generate_mask_labels
-	:old_api: paddle.fluid.layers.generate_mask_labels
+    r"""
 
     **Generate Mask Labels for Mask-RCNN**
 
@@ -2897,9 +2918,6 @@ def generate_proposals(scores,
                        return_rois_num=False,
                        name=None):
     """
-	:alias_main: paddle.nn.functional.generate_proposals
-	:alias: paddle.nn.functional.generate_proposals,paddle.nn.functional.vision.generate_proposals
-	:old_api: paddle.fluid.layers.generate_proposals
 
     **Generate proposal Faster-RCNN**
 
@@ -2965,6 +2983,8 @@ def generate_proposals(scores,
         .. code-block:: python
         
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             scores = fluid.data(name='scores', shape=[None, 4, 5, 5], dtype='float32')
             bbox_deltas = fluid.data(name='bbox_deltas', shape=[None, 16, 5, 5], dtype='float32')
             im_info = fluid.data(name='im_info', shape=[None, 3], dtype='float32')
@@ -2974,11 +2994,11 @@ def generate_proposals(scores,
                          im_info, anchors, variances)
 
     """
-    if in_dygraph_mode():
+    if _non_static_mode():
         assert return_rois_num, "return_rois_num should be True in dygraph mode."
         attrs = ('pre_nms_topN', pre_nms_top_n, 'post_nms_topN', post_nms_top_n,
                  'nms_thresh', nms_thresh, 'min_size', min_size, 'eta', eta)
-        rpn_rois, rpn_roi_probs, rpn_rois_num = core.ops.generate_proposals(
+        rpn_rois, rpn_roi_probs, rpn_rois_num = _C_ops.generate_proposals(
             scores, bbox_deltas, im_info, anchors, variances, *attrs)
         return rpn_rois, rpn_roi_probs, rpn_rois_num
 
@@ -3036,9 +3056,6 @@ def generate_proposals(scores,
 
 def box_clip(input, im_info, name=None):
     """
-	:alias_main: paddle.nn.functional.box_clip
-	:alias: paddle.nn.functional.box_clip,paddle.nn.functional.vision.box_clip
-	:old_api: paddle.fluid.layers.box_clip
 	
     Clip the box into the size given by im_info
     For each input box, The formula is given as follows:
@@ -3079,6 +3096,8 @@ def box_clip(input, im_info, name=None):
         .. code-block:: python
         
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             boxes = fluid.data(
                 name='boxes', shape=[None, 8, 4], dtype='float32', lod_level=1)
             im_info = fluid.data(name='im_info', shape=[-1 ,3])
@@ -3265,9 +3284,6 @@ def multiclass_nms(bboxes,
                    background_label=0,
                    name=None):
     """
-	:alias_main: paddle.nn.functional.multiclass_nms
-	:alias: paddle.nn.functional.multiclass_nms,paddle.nn.functional.extension.multiclass_nms
-	:old_api: paddle.fluid.layers.multiclass_nms
 
     **Multiclass NMS**
     
@@ -3363,6 +3379,8 @@ def multiclass_nms(bboxes,
 
 
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             boxes = fluid.data(name='bboxes', shape=[None,81, 4],
                                       dtype='float32', lod_level=1)
             scores = fluid.data(name='scores', shape=[None,81],
@@ -3673,10 +3691,7 @@ def distribute_fpn_proposals(fpn_rois,
                              refer_scale,
                              rois_num=None,
                              name=None):
-    """
-	:alias_main: paddle.nn.functional.distribute_fpn_proposals
-	:alias: paddle.nn.functional.distribute_fpn_proposals,paddle.nn.functional.vision.distribute_fpn_proposals
-	:old_api: paddle.fluid.layers.distribute_fpn_proposals
+    r"""
 	
     **This op only takes LoDTensor as input.** In Feature Pyramid Networks 
     (FPN) models, it is needed to distribute all proposals into different FPN 
@@ -3732,6 +3747,8 @@ def distribute_fpn_proposals(fpn_rois,
         .. code-block:: python
 
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             fpn_rois = fluid.data(
                 name='data', shape=[None, 4], dtype='float32', lod_level=1)
             multi_rois, restore_ind = fluid.layers.distribute_fpn_proposals(
@@ -3743,11 +3760,11 @@ def distribute_fpn_proposals(fpn_rois,
     """
     num_lvl = max_level - min_level + 1
 
-    if in_dygraph_mode():
+    if _non_static_mode():
         assert rois_num is not None, "rois_num should not be None in dygraph mode."
         attrs = ('min_level', min_level, 'max_level', max_level, 'refer_level',
                  refer_level, 'refer_scale', refer_scale)
-        multi_rois, restore_ind, rois_num_per_level = core.ops.distribute_fpn_proposals(
+        multi_rois, restore_ind, rois_num_per_level = _C_ops.distribute_fpn_proposals(
             fpn_rois, rois_num, num_lvl, num_lvl, *attrs)
         return multi_rois, restore_ind, rois_num_per_level
 
@@ -3798,9 +3815,6 @@ def box_decoder_and_assign(prior_box,
                            box_clip,
                            name=None):
     """
-	:alias_main: paddle.nn.functional.box_decoder_and_assign
-	:alias: paddle.nn.functional.box_decoder_and_assign,paddle.nn.functional.vision.box_decoder_and_assign
-	:old_api: paddle.fluid.layers.box_decoder_and_assign
 	
     ${comment}
     Args:
@@ -3825,6 +3839,8 @@ def box_decoder_and_assign(prior_box,
         .. code-block:: python
 
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             pb = fluid.data(
                 name='prior_box', shape=[None, 4], dtype='float32')
             pbv = fluid.data(
@@ -3874,9 +3890,6 @@ def collect_fpn_proposals(multi_rois,
                           rois_num_per_level=None,
                           name=None):
     """
-	:alias_main: paddle.nn.functional.collect_fpn_proposals
-	:alias: paddle.nn.functional.collect_fpn_proposals,paddle.nn.functional.vision.collect_fpn_proposals
-	:old_api: paddle.fluid.layers.collect_fpn_proposals
 	
     **This OP only supports LoDTensor as input**. Concat multi-level RoIs 
     (Region of Interest) and select N RoIs with respect to multi_scores. 
@@ -3922,6 +3935,8 @@ def collect_fpn_proposals(multi_rois,
         .. code-block:: python
            
             import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
             multi_rois = []
             multi_scores = []
             for i in range(4):
@@ -3938,18 +3953,18 @@ def collect_fpn_proposals(multi_rois,
                 max_level=5, 
                 post_nms_top_n=2000)
     """
-    check_type(multi_rois, 'multi_rois', list, 'collect_fpn_proposals')
-    check_type(multi_scores, 'multi_scores', list, 'collect_fpn_proposals')
     num_lvl = max_level - min_level + 1
     input_rois = multi_rois[:num_lvl]
     input_scores = multi_scores[:num_lvl]
 
-    if in_dygraph_mode():
+    if _non_static_mode():
         assert rois_num_per_level is not None, "rois_num_per_level should not be None in dygraph mode."
         attrs = ('post_nms_topN', post_nms_top_n)
-        output_rois, rois_num = core.ops.collect_fpn_proposals(
+        output_rois, rois_num = _C_ops.collect_fpn_proposals(
             input_rois, input_scores, rois_num_per_level, *attrs)
 
+    check_type(multi_rois, 'multi_rois', list, 'collect_fpn_proposals')
+    check_type(multi_scores, 'multi_scores', list, 'collect_fpn_proposals')
     helper = LayerHelper('collect_fpn_proposals', **locals())
     dtype = helper.input_dtype('multi_rois')
     check_dtype(dtype, 'multi_rois', ['float32', 'float64'],

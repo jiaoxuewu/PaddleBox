@@ -59,6 +59,7 @@ def compute_accuracy(pred, gt):
                  'CPU testing is not supported')
 class TestDistTraning(unittest.TestCase):
     def test_static_multiple_gpus(self):
+        paddle.enable_static()
         device = set_device('gpu')
 
         im_shape = (-1, 1, 28, 28)
@@ -67,7 +68,7 @@ class TestDistTraning(unittest.TestCase):
         inputs = [Input(im_shape, 'float32', 'image')]
         labels = [Input([None, 1], 'int64', 'label')]
 
-        model = Model(LeNet(classifier_activation=None), inputs, labels)
+        model = Model(LeNet(), inputs, labels)
         optim = fluid.optimizer.Momentum(
             learning_rate=0.001, momentum=.9, parameter_list=model.parameters())
         model.prepare(optim, CrossEntropyLoss(), Accuracy())

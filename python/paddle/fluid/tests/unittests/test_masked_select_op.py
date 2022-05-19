@@ -33,6 +33,7 @@ class TestMaskedSelectOp(OpTest):
     def setUp(self):
         self.init()
         self.op_type = "masked_select"
+        self.python_api = paddle.masked_select
         x = np.random.random(self.shape).astype("float64")
         mask = np.array(np.random.randint(2, size=self.shape, dtype=bool))
         out = np_masked_select(x, mask)
@@ -40,10 +41,10 @@ class TestMaskedSelectOp(OpTest):
         self.outputs = {'Y': out}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Y')
+        self.check_grad(['X'], 'Y', check_eager=True)
 
     def init(self):
         self.shape = (50, 3)
@@ -74,8 +75,8 @@ class TestMaskedSelectAPI(unittest.TestCase):
 
     def test_static_mode(self):
         shape = [8, 9, 6]
-        x = paddle.data(shape=shape, dtype='float32', name='x')
-        mask = paddle.data(shape=shape, dtype='bool', name='mask')
+        x = paddle.fluid.data(shape=shape, dtype='float32', name='x')
+        mask = paddle.fluid.data(shape=shape, dtype='bool', name='mask')
         np_x = np.random.random(shape).astype('float32')
         np_mask = np.array(np.random.randint(2, size=shape, dtype=bool))
 
@@ -97,9 +98,9 @@ class TestMaskedSelectError(unittest.TestCase):
                                          paddle.static.Program()):
 
             shape = [8, 9, 6]
-            x = paddle.data(shape=shape, dtype='float32', name='x')
-            mask = paddle.data(shape=shape, dtype='bool', name='mask')
-            mask_float = paddle.data(
+            x = paddle.fluid.data(shape=shape, dtype='float32', name='x')
+            mask = paddle.fluid.data(shape=shape, dtype='bool', name='mask')
+            mask_float = paddle.fluid.data(
                 shape=shape, dtype='float32', name='mask_float')
             np_x = np.random.random(shape).astype('float32')
             np_mask = np.array(np.random.randint(2, size=shape, dtype=bool))
@@ -121,4 +122,5 @@ class TestMaskedSelectError(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

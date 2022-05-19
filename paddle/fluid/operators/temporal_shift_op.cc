@@ -15,6 +15,10 @@
 #include <vector>
 #include "paddle/fluid/framework/op_registry.h"
 
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/phi/core/infermeta_utils.h"
+#include "paddle/phi/infermeta/unary.h"
+
 namespace paddle {
 namespace operators {
 
@@ -23,49 +27,6 @@ using framework::Tensor;
 class TemporalShiftOp : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
-
- protected:
-  void InferShape(framework::InferShapeContext* ctx) const override {
-    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "SpectralNorm");
-    OP_INOUT_CHECK(ctx->HasOutput("Out"), "Output", "Out", "SpectralNorm");
-
-    auto dim_x = ctx->GetInputDim("X");
-    PADDLE_ENFORCE_EQ(dim_x.size(), 4,
-                      platform::errors::InvalidArgument(
-                          "Input(X) rank should be 4 in shape of [N*T, C, H, "
-                          "W], but received X rank(%d)",
-                          dim_x.size()));
-
-    int seg_num = ctx->Attrs().Get<int>("seg_num");
-    float shift_ratio = ctx->Attrs().Get<float>("shift_ratio");
-    PADDLE_ENFORCE_GT(
-        seg_num, 0,
-        platform::errors::InvalidArgument(
-            "Attr(seg_num) should be greater than 0, but received %d",
-            seg_num));
-    PADDLE_ENFORCE_GT(
-        shift_ratio, 0.,
-        platform::errors::InvalidArgument(
-            "Attr(shift_ratio) should be greater than 0, but received %d",
-            shift_ratio));
-    PADDLE_ENFORCE_LT(
-        shift_ratio, 0.5,
-        platform::errors::InvalidArgument(
-            "Attr(shift_ratio) should be less than 0.5, but received %d",
-            shift_ratio));
-
-    if (ctx->IsRuntime()) {
-      PADDLE_ENFORCE_EQ(dim_x[0] % seg_num, 0,
-                        platform::errors::InvalidArgument(
-                            "Input(X) dimension[0] should be divided exactly "
-                            "by Attr(seg_num), but received X dimension[0](%d) "
-                            "mod seg_num(%d) != 0",
-                            dim_x[0], seg_num));
-    }
-
-    ctx->SetOutputDim("Out", dim_x);
-    ctx->ShareLoD("X", "Out");
-  }
 
  protected:
   framework::OpKernelType GetExpectedKernelType(
@@ -80,7 +41,8 @@ class TemporalShiftOpMaker : public framework::OpProtoAndCheckerMaker {
   void Make() override {
     AddInput("X",
              "The input tensor of temporal shift operator. "
-             "This is a 4-D tensor with shape of [N*T,  C, H, W]. "
+             "This is a 4-D tensor with shape of [N*T, C, H, W] "
+             "or [N*T, H, W, C]. "
              "While N is the batch size, T is the temporal segment "
              "number, C is the channel number, H is the height of "
              "features and W is the width of features. "
@@ -100,15 +62,23 @@ class TemporalShiftOpMaker : public framework::OpProtoAndCheckerMaker {
         "by 1 along the temporal dimension. :attr:`shift_ratio` should be in "
         "range [0, 0.5]. Default 0.25.")
         .SetDefault(0.25);
+    AddAttr<std::string>(
+        "data_format",
+        "(string, default NCHW) Only used in "
+        "an optional string from: \"NHWC\", \"NCHW\". "
+        "Specify that the data format of the input and output data is "
+        "channel_first or channel_last.")
+        .SetDefault("NCHW");
 
     AddComment(R"DOC(
           This operator calculates the temporal shifting features for Input(X).
 
-          Input(X) should be in shape of [N*T, C, H, W], while N is the batch
-          size, T is the temporal segment number specified by :attr:`seg_num`, 
-          C is the channel number, H and W is the height and width of features.
+          Input(X) should be in shape of [N*T, C, H, W] or [N*T, H, W, C], while 
+          N is the batch size, T is the temporal segment number specified by 
+          :attr:`seg_num`, C is the channel number, H and W is the height and 
+          width of features.
 
-          Temporal Shifting is calculated as follows:
+          Temporal Shifting is calculated as follows when data format is NCHW:
           
           Step 1: Reshape Input(X) to [N, T, C, H, W].
 
@@ -177,10 +147,13 @@ class TemporalShiftGradOpMaker : public framework::SingleGradOpMaker<T> {
 }  // namespace paddle
 
 namespace ops = paddle::operators;
+DECLARE_INFER_SHAPE_FUNCTOR(temporal_shift, TemporalShiftInferShapeFunctor,
+                            PD_INFER_META(phi::TemporalShiftInferMeta));
 REGISTER_OPERATOR(temporal_shift, ops::TemporalShiftOp,
                   ops::TemporalShiftOpMaker,
                   ops::TemporalShiftGradOpMaker<paddle::framework::OpDesc>,
-                  ops::TemporalShiftGradOpMaker<paddle::imperative::OpBase>);
+                  ops::TemporalShiftGradOpMaker<paddle::imperative::OpBase>,
+                  TemporalShiftInferShapeFunctor);
 REGISTER_OPERATOR(temporal_shift_grad, ops::TemporalShiftOpGrad);
 REGISTER_OP_CPU_KERNEL(temporal_shift, ops::TemporalShiftKernel<float>,
                        ops::TemporalShiftKernel<double>);

@@ -35,20 +35,19 @@ class SoftmaxGradFunctor {
                   framework::Tensor* x_grad);
 };
 
-#ifdef PADDLE_WITH_CUDA
-template <typename T>
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+template <typename T, typename DeviceContext>
 class SoftmaxCUDNNFunctor {
  public:
-  void operator()(const platform::CUDADeviceContext& context,
-                  const framework::Tensor* X, framework::Tensor* Y);
+  void operator()(const DeviceContext& context, const framework::Tensor* X,
+                  framework::Tensor* Y);
 };
 
-template <typename T>
+template <typename T, typename DeviceContext>
 class SoftmaxGradCUDNNFunctor {
  public:
-  void operator()(const platform::CUDADeviceContext& context,
-                  const framework::Tensor* Y, const framework::Tensor* y_grad,
-                  framework::Tensor* x_grad);
+  void operator()(const DeviceContext& context, const framework::Tensor* Y,
+                  const framework::Tensor* y_grad, framework::Tensor* x_grad);
 };
 
 #endif

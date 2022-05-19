@@ -13,9 +13,11 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/details/parallel_ssa_graph_executor.h"
+
 #include <algorithm>
 #include <memory>
 #include <utility>
+
 #include "paddle/fluid/framework/ir/graph_helper.h"
 
 namespace paddle {
@@ -43,7 +45,7 @@ static std::vector<std::unique_ptr<ir::Graph>> SeparateMultiDevicesGraph(
   for (auto &op : op_handles) {
     auto &dev_ctx = op->DeviceContext();
     auto &p = dev_ctx.begin()->first;
-    int dev_id = BOOST_GET_CONST(platform::CUDAPlace, p).device;
+    int dev_id = p.device;
     auto &dev_dummys = graphs[dev_id]->Get<GraphDepVars>(kGraphDepVars);
     graphs[dev_id]->AddNode(graph->RemoveNode(op->Node()).release());
 
@@ -104,7 +106,12 @@ ParallelSSAGraphExecutor::ParallelSSAGraphExecutor(
       places_(places),
       graphs_(std::move(graphs)),
       feed_status_(places.size(), FeedStatus::kNone) {
-  PADDLE_ENFORCE_EQ(places_.size(), local_scopes_.size());
+  PADDLE_ENFORCE_EQ(places_.size(), local_scopes_.size(),
+                    platform::errors::InvalidArgument(
+                        "The number of places and the number of local scopes "
+                        "should be equal, but got number of places is %d and "
+                        "number of local scopes is %d.",
+                        places_.size(), local_scopes_.size()));
 
   PADDLE_ENFORCE_EQ(places_.size(), graphs_.size(),
                     platform::errors::InvalidArgument(
@@ -268,7 +275,7 @@ FetchResultType ParallelSSAGraphExecutor::Run(
       }
       if (lodtensor_ptrs.size() != 0) {
         LoDTensor var;
-        var.MergeLoDTensor(lodtensor_ptrs, platform::CPUPlace());
+        MergeLoDTensor(&var, lodtensor_ptrs, platform::CPUPlace());
         ret.emplace_back(var);
       } else {
         LoDTensorArray var_array(lodtensorarray_ptrs[0]->size());
@@ -278,7 +285,7 @@ FetchResultType ParallelSSAGraphExecutor::Run(
           for (size_t j = 0; j < lodtensorarray_ptrs.size(); ++j) {
             ptrs.push_back(&(lodtensorarray_ptrs[j]->at(i)));
           }
-          var.MergeLoDTensor(ptrs, platform::CPUPlace());
+          MergeLoDTensor(&var, ptrs, platform::CPUPlace());
           var_array[i] = std::move(var);
         }
         ret.emplace_back(var_array);

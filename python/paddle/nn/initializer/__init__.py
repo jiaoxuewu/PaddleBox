@@ -13,21 +13,42 @@
 # limitations under the License.
 
 # TODO: define the initializers to create a Parameter in neural network
+from ...fluid.initializer import Bilinear  # noqa: F401
+from ...fluid.initializer import set_global_initializer  # noqa: F401
+from ...fluid.initializer import calculate_gain  # noqa: F401
 
-from ...fluid.initializer import Bilinear  #DEFINE_ALIAS
-from ...fluid.initializer import Constant  #DEFINE_ALIAS
-from ...fluid.initializer import MSRA  #DEFINE_ALIAS
-from ...fluid.initializer import Normal  #DEFINE_ALIAS
-from ...fluid.initializer import TruncatedNormal  #DEFINE_ALIAS
-from ...fluid.initializer import Uniform  #DEFINE_ALIAS
-from ...fluid.initializer import Xavier  #DEFINE_ALIAS
+from .constant import Constant  # noqa: F401
 
-__all__ = [
-    'Bilinear',
-    'Constant',
-    'MSRA',
-    'Normal',
-    'TruncatedNormal',
-    'Uniform',
-    'Xavier',
+from .kaiming import KaimingNormal  # noqa: F401
+from .kaiming import KaimingUniform  # noqa: F401
+
+from .xavier import XavierNormal  # noqa: F401
+from .xavier import XavierUniform  # noqa: F401
+
+from .assign import Assign  # noqa: F401
+
+from .normal import Normal  # noqa: F401
+from .normal import TruncatedNormal  # noqa: F401
+
+from .uniform import Uniform  # noqa: F401
+
+from .orthogonal import Orthogonal  # noqa: F401
+
+from .dirac import Dirac  # noqa: F401
+
+__all__ = [     #noqa
+           'Bilinear',
+           'Constant',
+           'KaimingUniform',
+           'KaimingNormal',
+           'XavierNormal',
+           'XavierUniform',
+           'Assign',
+           'Normal',
+           'TruncatedNormal',
+           'Uniform',
+           'Orthogonal',
+           'Dirac',
+           'set_global_initializer',
+           'calculate_gain'
 ]

@@ -15,6 +15,7 @@
 #pragma once
 #include <memory>
 #include <utility>
+
 #include "paddle/fluid/memory/allocation/allocator.h"
 
 namespace paddle {
@@ -29,9 +30,9 @@ class AlignedAllocator : public Allocator {
   bool IsAllocThreadSafe() const override;
 
  protected:
-  Allocation* AllocateImpl(size_t size) override;
+  phi::Allocation* AllocateImpl(size_t size) override;
 
-  void FreeImpl(Allocation* allocation) override;
+  void FreeImpl(phi::Allocation* allocation) override;
 
  private:
   std::shared_ptr<Allocator> underlying_allocator_;

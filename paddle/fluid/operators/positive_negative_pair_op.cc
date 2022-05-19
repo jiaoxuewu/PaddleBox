@@ -33,17 +33,19 @@ class PositiveNegativePairOp : public framework::OperatorWithKernel {
     OP_INOUT_CHECK(ctx->HasOutput("NeutralPair"), "Output", "NeutralPair",
                    "positive_negative_pair");
 
-    auto scalar_dim = framework::make_ddim({1});
+    auto scalar_dim = phi::make_ddim({1});
     if (ctx->HasInput("AccumulatePositivePair") ||
         ctx->HasInput("AccumulateNegativePair") ||
         ctx->HasInput("AccumulateNeutralPair")) {
-      PADDLE_ENFORCE(ctx->HasInput("AccumulatePositivePair") &&
-                         ctx->HasInput("AccumulateNegativePair") &&
-                         ctx->HasInput("AccumulateNeutralPair"),
-                     "All optional inputs(AccumulatePositivePair, "
-                     "AccumulateNegativePair, AccumulateNeutralPair) of "
-                     "PositiveNegativePairOp are required if one of them is "
-                     "specified.");
+      PADDLE_ENFORCE_EQ(
+          ctx->HasInput("AccumulatePositivePair") &&
+              ctx->HasInput("AccumulateNegativePair") &&
+              ctx->HasInput("AccumulateNeutralPair"),
+          true, platform::errors::InvalidArgument(
+                    "All optional inputs(AccumulatePositivePair, "
+                    "AccumulateNegativePair, AccumulateNeutralPair) of "
+                    "PositiveNegativePairOp are required if one of them "
+                    "is specified."));
       PADDLE_ENFORCE_EQ(
           ctx->GetInputDim("AccumulatePositivePair"), scalar_dim,
           platform::errors::InvalidArgument(
@@ -121,7 +123,7 @@ class PositiveNegativePairOp : public framework::OperatorWithKernel {
           column, depth,
           platform::errors::OutOfRange(
               "Attr(column) should be less than depth(the second "
-              "dimension of Input(Score)). Recieved Attr(column): %d, while "
+              "dimension of Input(Score)). Received Attr(column): %d, while "
               "depth is %d.",
               column, depth));
       PADDLE_ENFORCE_GE(
@@ -129,7 +131,7 @@ class PositiveNegativePairOp : public framework::OperatorWithKernel {
           platform::errors::OutOfRange(
               "Attr(column) should be greater than equal to negative "
               "depth, i.e. the second dimension of Input(Score). "
-              "Recieved Attr(column): %d, while negative depth is %d.",
+              "Received Attr(column): %d, while negative depth is %d.",
               column, -depth));
     }
 

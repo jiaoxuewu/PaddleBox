@@ -12,19 +12,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paddle/fluid/operators/reduce_ops/logsumexp_op.h"
-#include <memory>
+#include <algorithm>
 #include <string>
-#include <utility>
 #include <vector>
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/fluid/operators/reduce_ops/reduce_op_function.h"
+#include "paddle/phi/core/infermeta_utils.h"
+#include "paddle/phi/infermeta/unary.h"
 
 namespace paddle {
 namespace operators {
 
-class LogsumexpOpMaker : public ops::ReduceOpMaker {
- protected:
-  virtual std::string GetName() const { return "logsumexp"; }
-  virtual std::string GetOpType() const { return "Reduce logsumexp"; }
+class LogsumexpOp : public framework::OperatorWithKernel {
+ public:
+  using framework::OperatorWithKernel::OperatorWithKernel;
+};
+
+class LogsumexpOpMaker : public framework::OpProtoAndCheckerMaker {
+ public:
+  void Make() override {
+    AddInput("X",
+             "(Tensor) The input tensor. Tensors with rank at most 4 are "
+             "supported.");
+    AddOutput("Out", "(Tensor) The result tensor.");
+    AddAttr<std::vector<int>>(
+        "axis",
+        "(list<int>, default {0}) The dimensions to reduce. "
+        "Must be in the range [-rank(input), rank(input)). "
+        "If `axis[i] < 0`, the axis[i] to reduce is `rank + axis[i]`. "
+        "Note that reducing on the first dim will make the LoD info lost.")
+        .SetDefault({0});
+    AddAttr<bool>("keepdim",
+                  "(bool, default false) "
+                  "If true, retain the reduced dimension with length 1.")
+        .SetDefault(false);
+    AddAttr<bool>("reduce_all",
+                  "(bool, default false) "
+                  "If true, output a scalar reduced along all dimensions.")
+        .SetDefault(false);
+    AddComment(string::Sprintf(R"DOC(
+logsumexp Operator.
+
+This operator computes the logsumexp of input tensor along the given axis.
+The result tensor has 1 fewer dimension than the input unless keep_dim is true.
+If reduce_all is true, just reduce along all dimensions and output a scalar.
+
+)DOC"));
+  }
+};
+
+class LogsumexpGrapOp : public framework::OperatorWithKernel {
+ public:
+  using framework::OperatorWithKernel::OperatorWithKernel;
+
+  void InferShape(framework::InferShapeContext* ctx) const override {
+    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "logsumexp");
+    OP_INOUT_CHECK(ctx->HasInput("Out"), "Input", "Out", "logsumexp");
+    OP_INOUT_CHECK(ctx->HasInput(framework::GradVarName("Out")), "Input",
+                   "Out@GRAD", "logsumexp");
+    ctx->SetOutputDim(framework::GradVarName("X"), ctx->GetInputDim("X"));
+  }
 };
 
 template <typename T>
@@ -32,7 +79,6 @@ class LogsumexpGradOpMaker : public framework::SingleGradOpMaker<T> {
  public:
   using framework::SingleGradOpMaker<T>::SingleGradOpMaker;
 
- protected:
   void Apply(GradOpPtr<T> op) const override {
     op->SetType("logsumexp_grad");
     op->SetInput("X", this->Input("X"));
@@ -46,18 +92,11 @@ class LogsumexpGradOpMaker : public framework::SingleGradOpMaker<T> {
 }  // namespace operators
 }  // namespace paddle
 
-REGISTER_OPERATOR(logsumexp, ops::ReduceOp, ops::LogsumexpOpMaker,
+namespace ops = paddle::operators;
+DECLARE_INFER_SHAPE_FUNCTOR(logsumexp, LogsumexpInferShapeFunctor,
+                            PD_INFER_META(phi::LogsumexpInferMeta));
+REGISTER_OPERATOR(logsumexp, ops::LogsumexpOp, ops::LogsumexpOpMaker,
                   ops::LogsumexpGradOpMaker<paddle::framework::OpDesc>,
-                  ops::LogsumexpGradOpMaker<paddle::imperative::OpBase>);
-REGISTER_OPERATOR(logsumexp_grad, ops::ReduceGradOp);
-
-REGISTER_OP_CPU_KERNEL(logsumexp,
-                       ops::ReduceKernel<paddle::platform::CPUDeviceContext,
-                                         float, ops::LogsumexpFunctor>,
-                       ops::ReduceKernel<paddle::platform::CPUDeviceContext,
-                                         double, ops::LogsumexpFunctor>);
-REGISTER_OP_CPU_KERNEL(
-    logsumexp_grad, ops::ReduceGradKernel<paddle::platform::CPUDeviceContext,
-                                          float, ops::LogsumexpGradFunctor>,
-    ops::ReduceGradKernel<paddle::platform::CPUDeviceContext, double,
-                          ops::LogsumexpGradFunctor>);
+                  ops::LogsumexpGradOpMaker<paddle::imperative::OpBase>,
+                  LogsumexpInferShapeFunctor);
+REGISTER_OPERATOR(logsumexp_grad, ops::LogsumexpGrapOp);

@@ -16,7 +16,7 @@ from __future__ import print_function
 
 import unittest
 import numpy as np
-from op_test import OpTest
+from op_test import OpTest, _in_eager_without_dygraph_check
 import paddle.fluid.core as core
 import paddle.fluid as fluid
 import paddle
@@ -135,6 +135,10 @@ class TestBicubicInterpOp(OpTest):
         self.data_layout = 'NCHW'
         self.init_test_case()
         self.op_type = "bicubic_interp_v2"
+        # NOTE(dev): some AsDispensible input is not used under imperative mode.
+        # Skip check_eager while found them in Inputs.
+        # TODO(dev): add self.python_api
+        self.check_eager = False
         input_np = np.random.random(self.input_shape).astype("float64")
         scale_h = 0
         scale_w = 0
@@ -166,8 +170,10 @@ class TestBicubicInterpOp(OpTest):
         self.inputs = {'X': input_np}
         if self.out_size is not None:
             self.inputs['OutSize'] = self.out_size
+            self.check_eager = False
         if self.actual_shape is not None:
             self.inputs['OutSize'] = self.actual_shape
+            self.check_eager = False
 
         self.attrs = {
             'out_h': self.out_h,
@@ -186,10 +192,11 @@ class TestBicubicInterpOp(OpTest):
         self.outputs = {'Out': output_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=self.check_eager)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out', in_place=True)
+        self.check_grad(
+            ['X'], 'Out', in_place=True, check_eager=self.check_eager)
 
     def init_test_case(self):
         self.interp_method = 'bicubic'
@@ -484,7 +491,7 @@ class TestBicubicOpError(unittest.TestCase):
                     align_corners=False,
                     scale_factor=[1, 2, 2])
 
-            def test_scale_value():
+            def test_scale_value_1():
                 x = fluid.data(name="x", shape=[2, 3, 6, 6], dtype="float32")
                 out = interpolate(
                     x,
@@ -517,6 +524,11 @@ class TestBicubicOpError(unittest.TestCase):
                 out = interpolate(
                     x, size={2, 2}, mode='bicubic', align_corners=False)
 
+            def test_input_shape_1():
+                x = fluid.data(name="x", shape=[2, 1, 0, 0], dtype="float32")
+                out = interpolate(
+                    x, size=[3, 3], mode="bicubic", align_corners=False)
+
             self.assertRaises(ValueError, test_mode_type)
             self.assertRaises(ValueError, test_input_shape)
             self.assertRaises(TypeError, test_align_corcers)
@@ -530,11 +542,13 @@ class TestBicubicOpError(unittest.TestCase):
             self.assertRaises(ValueError, test_outshape_and_scale)
             self.assertRaises(ValueError, test_align_corners_and_nearest)
             self.assertRaises(ValueError, test_scale_shape)
-            self.assertRaises(ValueError, test_scale_value)
+            self.assertRaises(ValueError, test_scale_value_1)
             self.assertRaises(ValueError, test_size_and_scale)
             self.assertRaises(ValueError, test_size_and_scale2)
             self.assertRaises(TypeError, test_size_type)
+            self.assertRaises(ValueError, test_input_shape_1)
 
 
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

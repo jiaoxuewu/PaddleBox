@@ -13,8 +13,23 @@
 // limitations under the License.
 
 #include "paddle/fluid/operators/isfinite_op.h"
+
 #include <string>
-#include <vector>
+
+namespace paddle {
+namespace framework {
+class InferShapeContext;
+class OpDesc;
+template <typename T>
+class EmptyGradOpMaker;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+namespace platform {
+class CPUDeviceContext;
+}  // namespace platform
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -39,11 +54,17 @@ class OverflowOp : public framework::OperatorWithKernel {
     int dtype = -1;
     auto *x_var = ctx.InputVar("X");
     if (x_var->IsType<framework::LoDTensor>()) {
-      dtype = x_var->Get<framework::LoDTensor>().type();
-    } else if (x_var->IsType<framework::SelectedRows>()) {
-      dtype = x_var->Get<framework::SelectedRows>().value().type();
+      dtype = framework::TransToProtoVarType(
+          x_var->Get<framework::LoDTensor>().type());
+    } else if (x_var->IsType<phi::SelectedRows>()) {
+      dtype = framework::TransToProtoVarType(
+          x_var->Get<phi::SelectedRows>().value().type());
     } else {
-      PADDLE_THROW("Cannot find the input data type by all input data");
+      PADDLE_ENFORCE_EQ(
+          true, false,
+          platform::errors::InvalidArgument(
+              "The input type mismatch, the type of Input(X) must be Tensor or "
+              "SelectedRows, please check your input."));
     }
     return framework::OpKernelType(framework::proto::VarType::Type(dtype),
                                    ctx.GetPlace());
@@ -113,4 +134,33 @@ namespace ops = paddle::operators;
 REGISTER_OP_MAKER(isinf, "isinf(X)");
 REGISTER_OP_MAKER(isnan, "isnan(X)");
 REGISTER_OP_MAKER(isfinite, "isfinite(X)");
-FOR_EACH_KERNEL_FUNCTOR(REGISTER_OVERFLOW_CPU_KERNEL);
+
+REGISTER_OP_CPU_KERNEL(isinf,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int, ops::InfinityFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int64_t, ops::InfinityFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           float, ops::InfinityFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           double, ops::InfinityFunctor>);
+
+REGISTER_OP_CPU_KERNEL(isnan,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int, ops::NANFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int64_t, ops::NANFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           float, ops::NANFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           double, ops::NANFunctor>);
+
+REGISTER_OP_CPU_KERNEL(isfinite,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int, ops::IsfiniteFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           int64_t, ops::IsfiniteFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           float, ops::IsfiniteFunctor>,
+                       ops::OverflowKernel<paddle::platform::CPUDeviceContext,
+                                           double, ops::IsfiniteFunctor>);

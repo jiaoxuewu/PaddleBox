@@ -17,7 +17,8 @@ limitations under the License. */
 #include <string>
 #include <unordered_map>
 #include "paddle/fluid/framework/data_layout.h"
-#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/fluid/framework/op_version_registry.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -31,6 +32,13 @@ void InstanceNormOp::InferShape(framework::InferShapeContext *ctx) const {
                  "InstanceNorm");
 
   const auto x_dims = ctx->GetInputDim("X");
+  PADDLE_ENFORCE_NE(phi::product(x_dims), 0,
+                    platform::errors::PreconditionNotMet(
+                        "The Input variable X(%s) has not "
+                        "been initialized. You may need to confirm "
+                        "if you put exe.run(startup_program) "
+                        "after optimizer.minimize function.",
+                        ctx->Inputs("X").front()));
   PADDLE_ENFORCE_GE(
       x_dims.size(), 2,
       platform::errors::InvalidArgument(
@@ -60,7 +68,7 @@ void InstanceNormOp::InferShape(framework::InferShapeContext *ctx) const {
             "of scale is [%d]",
             scale_dim, scale_dim.size()));
 
-    bool check = !((!ctx->IsRuntime()) && (framework::product(scale_dim) <= 0));
+    bool check = !((!ctx->IsRuntime()) && (phi::product(scale_dim) <= 0));
 
     if (check) {
       PADDLE_ENFORCE_EQ(scale_dim[0], C,
@@ -80,7 +88,7 @@ void InstanceNormOp::InferShape(framework::InferShapeContext *ctx) const {
             "of bias is [%d]",
             bias_dim, bias_dim.size()));
 
-    bool check = !((!ctx->IsRuntime()) && (framework::product(bias_dim) <= 0));
+    bool check = !((!ctx->IsRuntime()) && (phi::product(bias_dim) <= 0));
     if (check) {
       PADDLE_ENFORCE_EQ(bias_dim[0], C,
                         platform::errors::InvalidArgument(
@@ -107,12 +115,14 @@ framework::OpKernelType InstanceNormOp::GetExpectedKernelType(
     in_param_type = framework::proto::VarType::FP64;
   }
   if (ctx.HasInput("Scale")) {
-    PADDLE_ENFORCE_EQ(in_param_type, ctx.Input<Tensor>("Scale")->type(),
+    PADDLE_ENFORCE_EQ(in_param_type, framework::TransToProtoVarType(
+                                         ctx.Input<Tensor>("Scale")->dtype()),
                       platform::errors::InvalidArgument(
                           "Scale input should be of float type"));
   }
   if (ctx.HasInput("Bias")) {
-    PADDLE_ENFORCE_EQ(in_param_type, ctx.Input<Tensor>("Bias")->type(),
+    PADDLE_ENFORCE_EQ(in_param_type, framework::TransToProtoVarType(
+                                         ctx.Input<Tensor>("Bias")->dtype()),
                       platform::errors::InvalidArgument(
                           "Bias input should be of float type"));
   }
@@ -141,11 +151,13 @@ void InstanceNormOpMaker::Make() {
   AddOutput("SavedMean",
             "Mean of the current mini batch, "
             "will apply to output when training")
-      .AsIntermediate();
+      .AsIntermediate()
+      .AsExtra();
   AddOutput("SavedVariance",
             "Variance of the current mini batch, "
             "will apply to output when training")
-      .AsIntermediate();
+      .AsIntermediate()
+      .AsExtra();
   AddComment(R"DOC(
 Instance Normalization.
 
@@ -181,12 +193,24 @@ class InstanceNormKernel<platform::CPUDeviceContext, T>
     auto &dev_ctx = ctx.template device_context<platform::CPUDeviceContext>();
     auto *place = dev_ctx.eigen_device();
 
+    Eigen::DSizes<int, 2> shape(NxC, sample_size);
+// Once eigen on Windows is updated, the if branch can be removed.
+#ifndef EIGEN_HAS_INDEX_LIST
     Eigen::DSizes<int, 2> bcast(1, sample_size);
     Eigen::DSizes<int, 2> C_shape(C, 1);
     Eigen::DSizes<int, 2> NxC_shape(NxC, 1);
-    Eigen::DSizes<int, 2> shape(NxC, sample_size);
+    Eigen::DSizes<int, 1> rdims(1);
+#else
+    Eigen::IndexList<Eigen::type2index<1>, int> bcast;
+    bcast.set(1, sample_size);
+    Eigen::IndexList<int, Eigen::type2index<1>> C_shape;
+    C_shape.set(0, C);
+    Eigen::IndexList<int, Eigen::type2index<1>> NxC_shape;
+    NxC_shape.set(0, NxC);
+    Eigen::IndexList<Eigen::type2index<1>> rdims;
+#endif
 
-    math::SetConstant<platform::CPUDeviceContext, T> set_constant;
+    phi::funcs::SetConstant<platform::CPUDeviceContext, T> set_constant;
 
     saved_mean->mutable_data<T>(ctx.GetPlace());
     saved_variance->mutable_data<T>(ctx.GetPlace());
@@ -200,8 +224,6 @@ class InstanceNormKernel<platform::CPUDeviceContext, T>
 
     auto x_e = framework::EigenVector<T>::Flatten(*x);
     auto x_arr = x_e.reshape(shape);
-
-    Eigen::DSizes<int, 1> rdims(1);
 
     saved_mean_e.device(*place) = x_arr.mean(rdims);
     auto saved_variance_arr =
@@ -316,16 +338,27 @@ class InstanceNormGradKernel<platform::CPUDeviceContext, T>
     auto &dev_ctx = ctx.template device_context<platform::CPUDeviceContext>();
     auto *place = dev_ctx.eigen_device();
 
+    Eigen::DSizes<int, 2> rshape(NxC, sample_size);
+    Eigen::DSizes<int, 2> param_shape(N, C);
+    Eigen::DSizes<int, 2> shape(NxC, sample_size);
+#ifndef EIGEN_HAS_INDEX_LIST
     Eigen::DSizes<int, 1> rdims(0);
     Eigen::DSizes<int, 1> mean_rdims(1);
-    Eigen::DSizes<int, 2> rshape(NxC, sample_size);
     Eigen::DSizes<int, 2> bcast(1, sample_size);
     Eigen::DSizes<int, 2> C_shape(C, 1);
     Eigen::DSizes<int, 2> NxC_shape(NxC, 1);
-    Eigen::DSizes<int, 2> param_shape(N, C);
-    Eigen::DSizes<int, 2> shape(NxC, sample_size);
+#else
+    Eigen::IndexList<Eigen::type2index<0>> rdims;
+    Eigen::IndexList<Eigen::type2index<1>> mean_rdims;
+    Eigen::IndexList<Eigen::type2index<1>, int> bcast;
+    bcast.set(1, sample_size);
+    Eigen::IndexList<int, Eigen::type2index<1>> C_shape;
+    C_shape.set(0, C);
+    Eigen::IndexList<int, Eigen::type2index<1>> NxC_shape;
+    NxC_shape.set(0, NxC);
+#endif
 
-    math::SetConstant<platform::CPUDeviceContext, T> set_constant;
+    phi::funcs::SetConstant<platform::CPUDeviceContext, T> set_constant;
 
     Tensor scale_data;
     if (!scale) {
@@ -461,7 +494,7 @@ class InstanceNormDoubleGradKernel<platform::CPUDeviceContext, T>
     auto *ddY = ctx.Output<Tensor>("DDY");
 
     auto &dev_ctx = ctx.template device_context<platform::CPUDeviceContext>();
-    math::SetConstant<platform::CPUDeviceContext, T> set_constant;
+    phi::funcs::SetConstant<platform::CPUDeviceContext, T> set_constant;
 
     const auto &x_dims = X->dims();
     int N, C, H, W, D;
@@ -520,11 +553,11 @@ class InstanceNormDoubleGradKernel<platform::CPUDeviceContext, T>
     //          (np.mean(dy, axis=(h,w)) - dy) + inv_var.pow(3) / HxW *
     //          np.sum(dy,
     //          axis=(h,w)) * (x - mean) *
-    //          (np.mean(ddx, axis=(h,w)) - ddx) + ddr * (dy * inv_var - inv_var
-    //          *
+    //          (np.mean(ddx, axis=(h,w)) - ddx)) + ddr * (dy * inv_var -
+    //          inv_var *
     //          np.mean(dy, axis=(h,w)) -
     //          inv_var.pow(3) * (x - mean) * np.mean(dy * (x - mean),
-    //          axis=(h,w))))
+    //          axis=(h,w)))
 
     Tensor x_sub_mean_mul_invstd;
     x_sub_mean_mul_invstd.Resize({sample_size, NxC});
@@ -595,9 +628,13 @@ class InstanceNormDoubleGradKernel<platform::CPUDeviceContext, T>
 
         first_grad_arr +=
             inv_var_tile_data *
-            (dy_arr - dy_arr.colwise().sum() / sample_size -
+            (dy_arr -
+             dy_arr.colwise().sum().replicate(sample_size, 1) / sample_size -
              x_sub_mean_mul_invstd_arr *
-                 (dy_arr * x_sub_mean_mul_invstd_arr).colwise().sum() /
+                 (dy_arr * x_sub_mean_mul_invstd_arr)
+                     .colwise()
+                     .sum()
+                     .replicate(sample_size, 1) /
                  sample_size);
         first_grad_arr = first_grad_arr * ddx_arr;
         for (int nc = 0; nc < NxC; ++nc) {
@@ -676,3 +713,20 @@ REGISTER_OP_CPU_KERNEL(
                                       float>,
     ops::InstanceNormDoubleGradKernel<paddle::platform::CPUDeviceContext,
                                       double>);
+
+REGISTER_OP_VERSION(instance_norm)
+    .AddCheckpoint(
+        R"ROC(
+      Change dispensable of attribute from False to True in instance_norm.
+    )ROC",
+        paddle::framework::compatible::OpVersionDesc()
+            .ModifyAttr(
+                "Bias",
+                "The arg 'dispensable' of Input 'Bias' is changed: from "
+                "'False' to 'True'.",
+                true)
+            .ModifyAttr(
+                "Scale",
+                "The arg 'dispensable' of Input 'Scale' is changed: from "
+                "'False' to 'True'.",
+                true));

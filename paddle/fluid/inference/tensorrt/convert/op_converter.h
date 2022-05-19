@@ -53,7 +53,12 @@ class OpConverter {
     OpConverter* it{nullptr};
 
     if (op_desc.Type() == "mul") {
-      PADDLE_ENFORCE_EQ(op_desc.Input("Y").size(), 1UL);
+      PADDLE_ENFORCE_EQ(op_desc.Input("Y").size(), 1UL,
+                        platform::errors::InvalidArgument(
+                            "The input op mul's Input(\"Y\")."
+                            "size() should equal to 1, but reveceid "
+                            "Input(\"Y\").size() = %u.",
+                            op_desc.Input("Y").size()));
       std::string Y = op_desc.Input("Y")[0];
       if (parameters.count(Y)) {
         it = Registry<OpConverter>::Global().Lookup("fc");
@@ -62,48 +67,84 @@ class OpConverter {
     if (op_desc.Type().find("elementwise") != std::string::npos) {
       static std::unordered_set<std::string> add_tensor_op_set{
           "add", "mul", "sub", "div", "max", "min", "pow"};
-      // TODO(xingzhaolong): all mul, sub, div
-      // static std::unordered_set<std::string> add_weight_op_set {"add", "mul",
-      // "sub", "div"};
-      static std::unordered_set<std::string> add_weight_op_set{"add", "mul"};
-      PADDLE_ENFORCE_EQ(op_desc.Input("Y").size(), 1UL);
+      static std::unordered_set<std::string> add_weight_op_set{
+          "add", "mul", "sub", "div", "pow"};
+      PADDLE_ENFORCE_EQ(op_desc.Input("Y").size(), 1UL,
+                        platform::errors::InvalidArgument(
+                            "The input op's Input(\"Y\")."
+                            "size() should equal to 1, but reveceid "
+                            "Input(\"Y\").size() = %u.",
+                            op_desc.Input("Y").size()));
       int op_type_len = op_desc.Type().size();
       std::string op_type = op_desc.Type().substr(op_type_len - 3, op_type_len);
       std::string Y = op_desc.Input("Y")[0];
       if (parameters.count(Y)) {
-        PADDLE_ENFORCE(add_weight_op_set.count(op_type) > 0,
-                       "Unsupported elementwise type" + op_type);
+        PADDLE_ENFORCE_GT(
+            add_weight_op_set.count(op_type), 0,
+            platform::errors::Unimplemented("Unsupported elementwise type %s",
+                                            op_type.c_str()));
         it = Registry<OpConverter>::Global().Lookup("elementwise_" + op_type +
                                                     "_weight");
-        PADDLE_ENFORCE_NOT_NULL(it, "no OpConverter for optype [%s]",
-                                op_desc.Type());
+        PADDLE_ENFORCE_NOT_NULL(
+            it, platform::errors::Unimplemented(
+                    "no OpConverter for optype [%s]", op_desc.Type()));
       } else {
-        PADDLE_ENFORCE(add_tensor_op_set.count(op_type) > 0,
-                       "Unsupported elementwise type" + op_type);
+        PADDLE_ENFORCE_GT(
+            add_tensor_op_set.count(op_type), 0,
+            platform::errors::Unimplemented("Unsupported elementwise type %s",
+                                            op_type.c_str()));
         it = Registry<OpConverter>::Global().Lookup("elementwise_" + op_type +
                                                     "_tensor");
       }
-      PADDLE_ENFORCE_NOT_NULL(it, "no OpConverter for optype [%s]",
-                              op_desc.Type());
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
     }
 
     if (op_desc.Type() == "depthwise_conv2d") {
       it = Registry<OpConverter>::Global().Lookup("conv2d");
-      PADDLE_ENFORCE_NOT_NULL(it, "no OpConverter for optype [%s]",
-                              op_desc.Type());
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
     }
-
+    if (op_desc.Type() == "depthwise_conv2d_transpose") {
+      it = Registry<OpConverter>::Global().Lookup("conv2d_transpose");
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
+    }
+    if (op_desc.Type() == "transpose2") {
+      it = Registry<OpConverter>::Global().Lookup("transpose");
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
+    }
+    if (op_desc.Type() == "flatten2") {
+      it = Registry<OpConverter>::Global().Lookup("flatten");
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
+    }
+    // reshape2 == reshape
+    if (op_desc.Type() == "reshape2") {
+      it = Registry<OpConverter>::Global().Lookup("reshape");
+      PADDLE_ENFORCE_NOT_NULL(
+          it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                              op_desc.Type()));
+    }
     if (!it) {
       it = Registry<OpConverter>::Global().Lookup(op_desc.Type());
     }
-    PADDLE_ENFORCE_NOT_NULL(it, "no OpConverter for optype [%s]",
-                            op_desc.Type());
+    PADDLE_ENFORCE_NOT_NULL(
+        it, platform::errors::Unimplemented("no OpConverter for optype [%s]",
+                                            op_desc.Type()));
 
     it->SetEngine(engine);
     (*it)(op, scope, test_mode);
 
-    bool has_out_scale = op_desc.HasAttr("out_threshold");
-    if (has_out_scale) {
+    size_t output_num = op_desc.OutputNames().size();
+    // only one out settensordynamicRange
+    if (op_desc.HasAttr("out_threshold")) {
       float out_scale =
           BOOST_GET_CONST(float, op_desc.GetAttr("out_threshold"));
       std::string output_name = "";
@@ -124,6 +165,47 @@ class OpConverter {
       engine->SetTensorDynamicRange(output_itensor, out_scale);
       VLOG(1) << "Set out scale = " << out_scale << " for tensor "
               << output_name << ".";
+    }
+    // outs settensordynamicRange
+    for (size_t i = 0; i < output_num; ++i) {
+      if (op_desc.HasAttr("out_" + std::to_string(i) + "_threshold")) {
+        float out_scale = BOOST_GET_CONST(
+            float, op_desc.GetAttr("out_" + std::to_string(i) + "_threshold"));
+        std::string output_name =
+            op_desc.Output(op_desc.OutputNames()[i]).front();
+        auto* output_itensor = engine->GetITensor(output_name);
+        engine->SetTensorDynamicRange(output_itensor, out_scale);
+        VLOG(1) << "Set out scale = " << out_scale << " for tensor "
+                << output_name << ".";
+      }
+    }
+
+    // quant_dequant_linear support for paddle trt
+
+    std::vector<std::string> inputs_name = op_desc.InputNames();
+    std::vector<std::string> outputs_name = op_desc.OutputNames();
+
+    for (size_t i = 0; i < inputs_name.size(); i++) {
+      if (op_desc.HasAttr(inputs_name[i])) {
+        std::string input_tensor_name = op_desc.Input(inputs_name[i])[0];
+        auto* input_itensor = engine->GetITensor(input_tensor_name);
+        float input_scale =
+            BOOST_GET_CONST(float, op_desc.GetAttr(inputs_name[i]));
+        engine->SetTensorDynamicRange(input_itensor, input_scale);
+        VLOG(1) << "Set input tensor scale = " << input_scale
+                << " for tensor: " << input_tensor_name << ".";
+      }
+    }
+    for (size_t i = 0; i < outputs_name.size(); i++) {
+      if (op_desc.HasAttr(outputs_name[i])) {
+        std::string output_tensor_name = op_desc.Output(outputs_name[i])[0];
+        auto* output_itensor = engine->GetITensor(output_tensor_name);
+        float output_scale =
+            BOOST_GET_CONST(float, op_desc.GetAttr(outputs_name[i]));
+        engine->SetTensorDynamicRange(output_itensor, output_scale);
+        VLOG(1) << "Set output tensor scale = " << output_scale
+                << " for tensor: " << output_tensor_name << ".";
+      }
     }
   }
 
@@ -146,12 +228,17 @@ class OpConverter {
       const std::unordered_set<std::string>& parameters,
       const std::vector<std::string>& outputs, TensorRTEngine* engine) {
     engine->InitNetwork();
+    bool all_dynamic_shape_set = true;
     for (auto& input : inputs) {
       if (parameters.count(input)) continue;
       auto* var = block_desc->FindVar(input);
-      PADDLE_ENFORCE(var, "no variable called %s", input);
-      PADDLE_ENFORCE_EQ(var->GetType(), FluidDT::VarType_Type_LOD_TENSOR,
-                        "TensorRT engine only takes LoDTensor as input");
+      PADDLE_ENFORCE_NOT_NULL(
+          var, platform::errors::NotFound("no variable called %s in block.",
+                                          input.c_str()));
+      PADDLE_ENFORCE_EQ(
+          var->GetType(), FluidDT::VarType_Type_LOD_TENSOR,
+          platform::errors::InvalidArgument("TensorRT engine only takes "
+                                            "LoDTensor as input"));
       auto var_shape = var->GetShape();
       if (engine->with_dynamic_shape()) {
 #if IS_TRT_VERSION_GE(6000)
@@ -159,6 +246,13 @@ class OpConverter {
         auto max_input_shape = engine->max_input_shape()[input];
         auto optim_input_shape = engine->optim_input_shape()[input];
         size_t ranks = min_input_shape.size();
+        if (ranks == 0) {
+          all_dynamic_shape_set = false;
+          LOG(INFO) << "trt input [" << input.c_str()
+                    << "] dynamic shape info not set, please check and retry.";
+          // check other input
+          continue;
+        }
         std::vector<int64_t> input_shape;
         input_shape.push_back(-1);
         for (size_t i = 1; i < ranks; i++) {
@@ -185,6 +279,10 @@ class OpConverter {
             Vec2TRT_Dims(var_shape, input));
       }
     }
+    PADDLE_ENFORCE_EQ(all_dynamic_shape_set, true,
+                      platform::errors::InvalidArgument(
+                          "some trt inputs dynamic shape info not set, "
+                          "check the INFO log above for more details."));
     framework::proto::BlockDesc* block_proto = block_desc->Proto();
     ConvertBlock(*block_proto, parameters, scope, engine);
     for (auto& output : outputs) {

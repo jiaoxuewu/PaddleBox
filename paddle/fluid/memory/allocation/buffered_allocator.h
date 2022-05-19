@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+
 #include "paddle/fluid/memory/allocation/allocator.h"
 #include "paddle/fluid/platform/lock_guard_ptr.h"
 
@@ -44,8 +45,8 @@ class BufferedAllocator : public Allocator {
   void FreeCache(size_t size);
 
  protected:
-  void FreeImpl(Allocation *allocation) override;
-  Allocation *AllocateImpl(size_t size) override;
+  void FreeImpl(phi::Allocation *allocation) override;
+  phi::Allocation *AllocateImpl(size_t size) override;
 
  private:
   std::shared_ptr<Allocator> underlying_allocator_;

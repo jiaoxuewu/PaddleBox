@@ -27,7 +27,7 @@ from paddle.io import Dataset, BatchSampler, DataLoader
 from paddle.fluid.dygraph.nn import Linear
 from paddle.fluid.dygraph.base import to_variable
 
-from test_multiprocess_dataloader_iterable_dataset_static import RandomDataset, prepare_places
+from test_multiprocess_dataloader_iterable_dataset_static import RandomDataset, RandomBatchedDataset, prepare_places
 from test_multiprocess_dataloader_iterable_dataset_static import EPOCH_NUM, BATCH_SIZE, IMAGE_SIZE, SAMPLE_NUM, CLASS_NUM
 
 
@@ -66,7 +66,7 @@ class SimpleFCNet(fluid.dygraph.Layer):
 
 
 class TestDygraphDataLoader(unittest.TestCase):
-    def run_main(self, num_workers, places):
+    def run_main(self, num_workers, places, persistent_workers):
         fluid.default_startup_program().random_seed = 1
         fluid.default_main_program().random_seed = 1
         with fluid.dygraph.guard(places[0]):
@@ -76,10 +76,10 @@ class TestDygraphDataLoader(unittest.TestCase):
             dataset = RandomDataset(SAMPLE_NUM, CLASS_NUM)
             dataloader = DataLoader(
                 dataset,
-                places=places,
                 num_workers=num_workers,
                 batch_size=BATCH_SIZE,
-                drop_last=True)
+                drop_last=True,
+                persistent_workers=persistent_workers)
 
             step_list = []
             loss_list = []
@@ -110,14 +110,62 @@ class TestDygraphDataLoader(unittest.TestCase):
     def test_main(self):
         # dynamic graph do not run with_data_parallel
         for p in prepare_places(False):
-            results = []
-            for num_workers in [0, 2]:
-                print(self.__class__.__name__, p, num_workers)
-                sys.stdout.flush()
-                ret = self.run_main(num_workers=num_workers, places=p)
-                results.append(ret)
-            assert results[0]['loss'].shape[0] * 2 == results[1]['loss'].shape[
-                0]
+            for persistent_workers in [False, True]:
+                results = []
+                for num_workers in [0, 2]:
+                    print(self.__class__.__name__, p, num_workers,
+                          persistent_workers)
+                    sys.stdout.flush()
+                    ret = self.run_main(
+                        num_workers=num_workers,
+                        places=p,
+                        persistent_workers=persistent_workers)
+                    results.append(ret)
+                assert results[0]['loss'].shape[0] * 2 == results[1][
+                    'loss'].shape[0]
+
+
+class TestDygraphDataLoaderWithBatchedDataset(TestDygraphDataLoader):
+    def run_main(self, num_workers, places, persistent_workers):
+        fluid.default_startup_program().random_seed = 1
+        fluid.default_main_program().random_seed = 1
+        with fluid.dygraph.guard(places[0]):
+            fc_net = SimpleFCNet()
+            optimizer = fluid.optimizer.Adam(parameter_list=fc_net.parameters())
+
+            dataset = RandomBatchedDataset(SAMPLE_NUM, CLASS_NUM)
+            dataloader = DataLoader(
+                dataset,
+                num_workers=num_workers,
+                batch_size=None,
+                drop_last=True,
+                persistent_workers=persistent_workers)
+
+            step_list = []
+            loss_list = []
+            start_t = time.time()
+            for _ in six.moves.range(EPOCH_NUM):
+                step = 0
+                for image, label in dataloader():
+                    out = fc_net(image)
+                    loss = fluid.layers.cross_entropy(out, label)
+                    avg_loss = fluid.layers.reduce_mean(loss)
+                    avg_loss.backward()
+                    optimizer.minimize(avg_loss)
+                    fc_net.clear_gradients()
+
+                    loss_list.append(np.mean(avg_loss.numpy()))
+                    step += 1
+                step_list.append(step)
+
+        end_t = time.time()
+        ret = {
+            "time": end_t - start_t,
+            "step": step_list,
+            "loss": np.array(loss_list)
+        }
+        print("time cost", ret['time'], 'step_list', ret['step'])
+        return ret
 
 
 if __name__ == '__main__':

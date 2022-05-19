@@ -29,6 +29,8 @@ from paddle.fluid.contrib.decoder.beam_search_decoder import *
 import unittest
 import os
 
+paddle.enable_static()
+
 dict_size = 30000
 source_dict_dim = target_dict_dim = dict_size
 src_dict, trg_dict = paddle.dataset.wmt14.get_dict(dict_size)
@@ -244,7 +246,7 @@ def inject_test_train(use_cuda):
 
 
 def inject_test_decode(use_cuda, decorator=None):
-    f_name = 'test_{0}_decode'.format('cuda' if use_cuda else 'cpu', 'sparse')
+    f_name = 'test_{0}_decode'.format('cuda' if use_cuda else 'cpu')
 
     def f(*args):
         with scope_prog_guard():

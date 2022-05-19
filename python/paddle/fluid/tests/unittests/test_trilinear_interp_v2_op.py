@@ -21,6 +21,8 @@ import paddle.fluid.core as core
 import paddle.fluid as fluid
 from paddle.nn.functional import interpolate
 
+np.random.seed(123)
+
 
 def trilinear_interp_np(input,
                         out_d,
@@ -143,6 +145,10 @@ class TestTrilinearInterpOp(OpTest):
         self.data_layout = 'NCDHW'
         self.init_test_case()
         self.op_type = "trilinear_interp_v2"
+        # NOTE(dev): some AsDispensible input is not used under imperative mode.
+        # Skip check_eager while found them in Inputs.
+        # TODO(dev): add self.python_api
+        self.check_eager = False
         input_np = np.random.random(self.input_shape).astype("float32")
 
         scale_w = 0
@@ -181,8 +187,10 @@ class TestTrilinearInterpOp(OpTest):
         self.inputs = {'X': input_np}
         if self.out_size is not None:
             self.inputs['OutSize'] = self.out_size
+            self.check_eager = False
         if self.actual_shape is not None:
             self.inputs['OutSize'] = self.actual_shape
+            self.check_eager = False
         # c++ end treat NCDHW the same way as NCHW
         if self.data_layout == 'NCDHW':
             data_layout = 'NCHW'
@@ -206,10 +214,11 @@ class TestTrilinearInterpOp(OpTest):
         self.outputs = {'Out': output_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=self.check_eager)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out', in_place=True)
+        self.check_grad(
+            ['X'], 'Out', in_place=True, check_eager=self.check_eager)
 
     def init_test_case(self):
         self.interp_method = 'trilinear'
@@ -355,6 +364,8 @@ class TestTrilinearInterpOpUint8(OpTest):
         self.actual_shape = None
         self.init_test_case()
         self.op_type = "trilinear_interp_v2"
+        # TODO(dev): add self.python_api
+        self.check_eager = False
         input_np = np.random.randint(
             low=0, high=256, size=self.input_shape).astype("uint8")
 
@@ -381,6 +392,7 @@ class TestTrilinearInterpOpUint8(OpTest):
         self.inputs = {'X': input_np}
         if self.out_size is not None:
             self.inputs['OutSize'] = self.out_size
+            self.check_eager = False
 
         self.attrs = {
             'out_d': self.out_d,
@@ -399,7 +411,8 @@ class TestTrilinearInterpOpUint8(OpTest):
         self.outputs = {'Out': output_np}
 
     def test_check_output(self):
-        self.check_output_with_place(place=core.CPUPlace(), atol=1)
+        self.check_output_with_place(
+            place=core.CPUPlace(), atol=1, check_eager=self.check_eager)
 
     def init_test_case(self):
         self.interp_method = 'trilinear'
@@ -459,9 +472,9 @@ class TestTrilinearInterpScale1(TestTrilinearInterpOp):
     def init_test_case(self):
         self.interp_method = 'trilinear'
         self.input_shape = [2, 3, 5, 7, 9]
-        self.out_d = 82
-        self.out_h = 60
-        self.out_w = 25
+        self.out_d = 19
+        self.out_h = 15
+        self.out_w = 8
         self.scale = 2.
         self.align_corners = True
         self.align_mode = 1
@@ -471,8 +484,8 @@ class TestTrilinearInterpScale2(TestTrilinearInterpOp):
     def init_test_case(self):
         self.interp_method = 'trilinear'
         self.input_shape = [2, 3, 5, 7, 9]
-        self.out_d = 60
-        self.out_h = 40
+        self.out_d = 30
+        self.out_h = 20
         self.out_w = 25
         self.scale = 1.
         self.align_corners = True
@@ -483,8 +496,8 @@ class TestTrilinearInterpScale3(TestTrilinearInterpOp):
     def init_test_case(self):
         self.interp_method = 'trilinear'
         self.input_shape = [2, 3, 5, 7, 9]
-        self.out_d = 60
-        self.out_h = 40
+        self.out_d = 30
+        self.out_h = 20
         self.out_w = 25
         self.scale = 1.5
         self.align_corners = True
@@ -495,8 +508,8 @@ class TestTrilinearInterpZero(TestTrilinearInterpOp):
     def init_test_case(self):
         self.interp_method = 'trilinear'
         self.input_shape = [2, 3, 5, 7, 11]
-        self.out_d = 60
-        self.out_h = 40
+        self.out_d = 30
+        self.out_h = 20
         self.out_w = 25
         self.scale = 0.0
         self.align_corners = False
@@ -509,6 +522,8 @@ class TestTrilinearInterpOp_attr_tensor(OpTest):
         self.actual_shape = None
         self.init_test_case()
         self.op_type = "trilinear_interp_v2"
+        # TODO(dev): add self.python_api
+        self.check_eager = False
         self.shape_by_1Dtensor = False
         self.scale_by_1Dtensor = False
         self.attrs = {
@@ -541,12 +556,14 @@ class TestTrilinearInterpOp_attr_tensor(OpTest):
 
         if self.shape_by_1Dtensor:
             self.inputs['OutSize'] = self.out_size
+            self.check_eager = False
         elif self.out_size is not None:
             size_tensor = []
             for index, ele in enumerate(self.out_size):
                 size_tensor.append(("x" + str(index), np.ones(
                     (1)).astype('int32') * ele))
             self.inputs['SizeTensor'] = size_tensor
+            self.check_eager = False
 
         self.attrs['out_d'] = self.out_d
         self.attrs['out_h'] = self.out_h
@@ -563,10 +580,11 @@ class TestTrilinearInterpOp_attr_tensor(OpTest):
         self.outputs = {'Out': output_np}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=self.check_eager)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out', in_place=True)
+        self.check_grad(
+            ['X'], 'Out', in_place=True, check_eager=self.check_eager)
 
     def init_test_case(self):
         self.interp_method = 'trilinear'

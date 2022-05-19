@@ -23,8 +23,8 @@ limitations under the License. */
 #include "pybind11/pybind11.h"
 
 #include "paddle/fluid/operators/distributed/communicator.h"
-#include "paddle/fluid/operators/distributed/communicator_common.h"
 #include "paddle/fluid/operators/distributed/large_scale_kv.h"
+#include "paddle/fluid/operators/distributed/ps/service/communicator/communicator_common.h"
 
 namespace py = pybind11;
 
@@ -109,10 +109,15 @@ void BindLargeScaleKV(py::module* m) {
              auto* sparse_variable = self.Get(table_name);
              sparse_variable->Load(dir);
            })
-      .def("save", [](LargeScaleKV& self, const std::string& table_name,
-                      const std::string& dir) {
+      .def("save",
+           [](LargeScaleKV& self, const std::string& table_name,
+              const std::string& dir) {
+             auto* sparse_variable = self.Get(table_name);
+             sparse_variable->Save(dir);
+           })
+      .def("size", [](LargeScaleKV& self, const std::string& table_name) {
         auto* sparse_variable = self.Get(table_name);
-        sparse_variable->Save(dir);
+        return sparse_variable->Size();
       });
 }
 }  // namespace pybind

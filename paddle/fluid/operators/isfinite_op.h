@@ -15,11 +15,16 @@
 #pragma once
 
 #include <vector>
+
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/tensor_util.h"
 #include "paddle/fluid/platform/float16.h"
 #include "paddle/fluid/platform/transform.h"
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
 
 namespace paddle {
 namespace operators {
@@ -53,19 +58,18 @@ class OverflowKernel : public framework::OpKernel<T> {
     if (x->IsType<framework::LoDTensor>()) {
       auto* in = ctx.Input<framework::Tensor>("X");
       functor(*in, out);
-    } else if (x->IsType<framework::SelectedRows>()) {
-      auto& in = ctx.Input<framework::SelectedRows>("X")->value();
+    } else if (x->IsType<phi::SelectedRows>()) {
+      auto& in = ctx.Input<phi::SelectedRows>("X")->value();
       functor(in, out);
     } else {
-      PADDLE_THROW("Unsupported input type.");
+      PADDLE_ENFORCE_EQ(
+          true, false,
+          platform::errors::InvalidArgument(
+              "The input type mismatch, the type of Input(X) must be Tensor or "
+              "SelectedRows, please check your input."));
     }
   }
 };
 
 }  // namespace operators
 }  // namespace paddle
-
-#define FOR_EACH_KERNEL_FUNCTOR(__macro) \
-  __macro(isinf, InfinityFunctor);       \
-  __macro(isnan, NANFunctor);            \
-  __macro(isfinite, IsfiniteFunctor);

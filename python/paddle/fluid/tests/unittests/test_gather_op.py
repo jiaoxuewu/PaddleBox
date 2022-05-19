@@ -16,9 +16,11 @@ from __future__ import print_function
 
 import unittest
 import numpy as np
-from op_test import OpTest
+from op_test import OpTest, convert_float_to_uint16
 import paddle
 import paddle.fluid as fluid
+from paddle.framework import core
+from paddle.fluid.dygraph.base import switch_to_static_graph
 
 
 def gather_numpy(x, index, axis):
@@ -31,6 +33,7 @@ def gather_numpy(x, index, axis):
 class TestGatherOp(OpTest):
     def setUp(self):
         self.op_type = "gather"
+        self.python_api = paddle.gather
         self.config()
         xnp = np.random.random(self.x_shape).astype(self.x_type)
         self.inputs = {
@@ -40,10 +43,10 @@ class TestGatherOp(OpTest):
         self.outputs = {'Out': self.inputs["X"][self.inputs["Index"]]}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out')
+        self.check_grad(['X'], 'Out', check_eager=True)
 
     def config(self):
         """
@@ -115,9 +118,44 @@ class TestCase6(TestGatherOp):
         self.index_type = "int32"
 
 
+class TestGatherBF16Op(OpTest):
+    def setUp(self):
+        self.op_type = "gather"
+        self.python_api = paddle.gather
+        self.dtype = np.uint16
+        self.config()
+        xnp = np.random.random(self.x_shape).astype(np.float32)
+        axis_np = np.array(self.axis).astype(self.axis_type)
+        index_np = np.array(self.index).astype(self.index_type)
+        self.inputs = {
+            'X': convert_float_to_uint16(xnp),
+            'Index': index_np,
+            'Axis': axis_np
+        }
+        out = gather_numpy(self.inputs['X'], index_np, axis_np[0])
+        self.outputs = {'Out': out}
+
+    def test_check_output(self):
+        self.check_output(check_eager=True)
+
+    def test_check_grad(self):
+        self.check_grad(['X'], 'Out', numeric_grad_delta=0.5, check_eager=True)
+
+    def config(self):
+        """
+        For multi-dimension input
+        """
+        self.x_shape = (3, 88, 3)
+        self.index = [1, 3, 5]
+        self.index_type = "int32"
+        self.axis = [1]
+        self.axis_type = "int32"
+
+
 class TestGatherOp1(OpTest):
     def setUp(self):
         self.op_type = "gather"
+        self.python_api = paddle.gather
         self.config()
         xnp = np.random.random(self.x_shape).astype(self.x_type)
         axis_np = np.array(self.axis).astype(self.index_type)
@@ -127,10 +165,10 @@ class TestGatherOp1(OpTest):
         self.outputs = {'Out': out}
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['X'], 'Out')
+        self.check_grad(['X'], 'Out', check_eager=True)
 
     def config(self):
         """
@@ -181,6 +219,7 @@ class TestGatherOp4(TestGatherOp1):
         self.index_type = "int64"
         self.axis = [0]
         self.axis_type = "int32"
+        self.attrs = {'overwrite': False}
 
 
 class API_TestGather(unittest.TestCase):
@@ -202,9 +241,9 @@ class API_TestGather(unittest.TestCase):
     def test_out2(self):
         with paddle.static.program_guard(paddle.static.Program(),
                                          paddle.static.Program()):
-            x = paddle.data('x', shape=[-1, 2], dtype='float64')
-            index = paddle.data('index', shape=[-1, 1], dtype='int32')
-            axis = paddle.data('axis', shape=[1], dtype='int32')
+            x = paddle.fluid.data('x', shape=[-1, 2], dtype='float64')
+            index = paddle.fluid.data('index', shape=[-1, 1], dtype='int32')
+            axis = paddle.fluid.data('axis', shape=[1], dtype='int32')
             out = paddle.gather(x, index, axis)
             place = paddle.CPUPlace()
             exe = paddle.static.Executor(place)
@@ -216,7 +255,7 @@ class API_TestGather(unittest.TestCase):
                       "index": index_np,
                       'axis': axis_np},
                 fetch_list=[out])
-            expected_output = gather_numpy(x_np, index_np, axis_np)
+            expected_output = gather_numpy(x_np, index_np, axis_np[0])
         self.assertTrue(np.allclose(result, expected_output))
 
 
@@ -245,6 +284,47 @@ class API_TestDygraphGather(unittest.TestCase):
         self.assertTrue(np.allclose(output_np, expected_output))
         paddle.enable_static()
 
+    def test_zero_index(self):
+        paddle.disable_static()
+        x = paddle.to_tensor([[1, 2], [3, 4]])
+        index = paddle.to_tensor(np.array([]).astype('int64'))
+        for axis in range(len(x.shape)):
+            out = paddle.gather(x, index, axis)
+            expected_shape = list(x.shape)
+            expected_shape[axis] = 0
+            self.assertEqual(list(out.shape), expected_shape)
+        paddle.enable_static()
+
+    def test_large_data(self):
+        if not paddle.is_compiled_with_cuda():
+            return
+
+        x = np.random.rand(226862, 256).astype("float32")
+        index = np.random.randint(0, 22682, size=(11859027))
+
+        def test_dygraph():
+            with fluid.dygraph.guard():
+                gpu_out = paddle.gather(
+                    paddle.to_tensor(x), paddle.to_tensor(index))
+                return gpu_out.numpy()
+
+        @switch_to_static_graph
+        def test_static_graph():
+            with paddle.static.program_guard(paddle.static.Program(),
+                                             paddle.static.Program()):
+                x_t = paddle.static.data(name="x", dtype=x.dtype, shape=x.shape)
+                index_t = paddle.static.data(
+                    name="index", dtype=index.dtype, shape=index.shape)
+                out_t = paddle.gather(x_t, index_t)
+                feed = {x_t.name: x, index_t.name: index}
+                fetch = [out_t]
+
+                gpu_exe = paddle.static.Executor(paddle.CUDAPlace(0))
+                gpu_value = gpu_exe.run(feed=feed, fetch_list=fetch)[0]
+                return gpu_value
+
+        self.assertTrue(np.array_equal(test_dygraph(), test_static_graph()))
+
 
 class TestGathertError(unittest.TestCase):
     def test_error1(self):
@@ -252,10 +332,10 @@ class TestGathertError(unittest.TestCase):
                                          paddle.static.Program()):
 
             shape = [8, 9, 6]
-            x = paddle.data(shape=shape, dtype='int8', name='x')
-            axis = paddle.data(shape=[1], dtype='float32', name='axis')
-            index = paddle.data(shape=shape, dtype='int32', name='index')
-            index_float = paddle.data(
+            x = paddle.fluid.data(shape=shape, dtype='int8', name='x')
+            axis = paddle.fluid.data(shape=[1], dtype='float32', name='axis')
+            index = paddle.fluid.data(shape=shape, dtype='int32', name='index')
+            index_float = paddle.fluid.data(
                 shape=shape, dtype='float32', name='index_float')
 
             def test_x_type():
@@ -273,10 +353,10 @@ class TestGathertError(unittest.TestCase):
 
             self.assertRaises(TypeError, test_axis_dtype)
 
-            def test_axis_dtype():
+            def test_axis_dtype1():
                 paddle.gather(x, index, axis=axis)
 
-            self.assertRaises(TypeError, test_axis_dtype)
+            self.assertRaises(TypeError, test_axis_dtype1)
 
     def test_error2(self):
         with fluid.program_guard(fluid.Program(), fluid.Program()):
@@ -298,5 +378,14 @@ class TestGathertError(unittest.TestCase):
             self.assertRaises(TypeError, test_index_type)
 
 
+class TestCheckOutType(unittest.TestCase):
+    def test_out_type(self):
+        data = paddle.static.data(shape=[16, 10], dtype='int64', name='x')
+        index = paddle.static.data(shape=[4], dtype='int64', name='index')
+        out = paddle.gather(data, index)
+        self.assertTrue(out.dtype == core.VarDesc.VarType.INT64)
+
+
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

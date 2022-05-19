@@ -15,6 +15,9 @@ limitations under the License. */
 #include "paddle/fluid/operators/split_op.h"
 #include <string>
 
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/phi/infermeta/unary.h"
+
 namespace paddle {
 namespace operators {
 using framework::Tensor;
@@ -25,9 +28,11 @@ class SplitOp : public framework::OperatorWithKernel {
 
   void InferShape(framework::InferShapeContext *ctx) const override {
     PADDLE_ENFORCE_EQ(ctx->HasInput("X"), true,
-                      "Input(X) of SplitOp should not be null.");
+                      platform::errors::InvalidArgument(
+                          "Input(X) of SplitOp should not be null."));
     PADDLE_ENFORCE_GE(ctx->Outputs("Out").size(), 1UL,
-                      "Outputs(Out) of SplitOp should not be empty.");
+                      platform::errors::InvalidArgument(
+                          "Outputs(Out) of SplitOp should not be empty."));
     auto in_dims = ctx->GetInputDim("X");
     auto outs_names = ctx->Outputs("Out");
     size_t axis = static_cast<size_t>(ctx->Attrs().Get<int>("axis"));
@@ -37,14 +42,14 @@ class SplitOp : public framework::OperatorWithKernel {
     const size_t outs_number = outs_names.size();
 
     if (sections.size() > 0) {
-      PADDLE_ENFORCE_EQ(sections.size(), outs_number,
-                        "tensor split sections size "
-                        "should be equal to output size.");
+      PADDLE_ENFORCE_EQ(
+          sections.size(), outs_number,
+          platform::errors::InvalidArgument("tensor split sections size "
+                                            "should be equal to output size."));
     }
 
     if (ctx->HasInput("AxisTensor")) {
-      auto out_dims =
-          framework::make_ddim(std::vector<int>(in_dims.size(), -1));
+      auto out_dims = phi::make_ddim(std::vector<int>(in_dims.size(), -1));
       std::vector<framework::DDim> outs_dims(outs_number, out_dims);
       ctx->SetOutputsDim("Out", outs_dims);
       for (size_t i = 0; i < outs_number; ++i) {
@@ -70,8 +75,23 @@ class SplitOp : public framework::OperatorWithKernel {
  protected:
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext &ctx) const override {
-    return framework::OpKernelType(ctx.Input<framework::LoDTensor>("X")->type(),
-                                   ctx.device_context());
+    auto input_data_type =
+        framework::OperatorWithKernel::IndicateVarDataType(ctx, "X");
+
+#ifdef PADDLE_WITH_MKLDNN
+    if (this->CanMKLDNNBeUsed(ctx, input_data_type)) {
+      // OneDNN uses blocking format, which cannot be always supported with
+      // reorders, because if blocked dimension is not divisible by 8 or
+      // 16(depending on which blocking format is used) submemory cannot be
+      // created, so in that scenario a fallback is needed
+      const auto x_md = ctx.Input<Tensor>("X")->mem_desc();
+      if (x_md.data.format_desc.blocking.inner_nblks == 0)
+        return framework::OpKernelType(input_data_type, ctx.GetPlace(),
+                                       framework::DataLayout::kMKLDNN,
+                                       framework::LibraryType::kMKLDNN);
+    }
+#endif
+    return framework::OpKernelType(input_data_type, ctx.GetPlace());
   }
 
   framework::OpKernelType GetKernelTypeForVar(
@@ -133,6 +153,14 @@ Example:
                  "(int, default 0) "
                  "The axis which the input will be split on.")
         .SetDefault(0);
+    AddAttr<bool>("use_mkldnn",
+                  "(bool, default false) Only used in mkldnn kernel")
+        .SetDefault(false);
+    AddAttr<std::string>(
+        "mkldnn_data_type",
+        "(string, default \"float32\"). Data type of mkldnn kernel")
+        .SetDefault("float32")
+        .InEnum({"float32", "bfloat16"});
   }
 };
 
@@ -144,11 +172,3 @@ namespace ops = paddle::operators;
 REGISTER_OPERATOR(split, ops::SplitOp, ops::SplitOpMaker,
                   ops::SplitGradMaker<paddle::framework::OpDesc>,
                   ops::SplitGradMaker<paddle::imperative::OpBase>);
-namespace plat = paddle::platform;
-REGISTER_OP_CPU_KERNEL(
-    split, ops::SplitOpKernel<plat::CPUDeviceContext, double>,
-    ops::SplitOpKernel<plat::CPUDeviceContext, float>,
-    ops::SplitOpKernel<plat::CPUDeviceContext, int64_t>,
-    ops::SplitOpKernel<plat::CPUDeviceContext, int>,
-    ops::SplitOpKernel<plat::CPUDeviceContext, bool>,
-    ops::SplitOpKernel<plat::CPUDeviceContext, plat::float16>);

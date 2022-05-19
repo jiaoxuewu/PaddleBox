@@ -17,9 +17,13 @@ from __future__ import print_function
 import unittest
 import numpy as np
 import paddle.fluid.core as core
-from op_test import OpTest
+from op_test import OpTest, convert_float_to_uint16
 import paddle.fluid as fluid
 import paddle.fluid.layers as layers
+import paddle
+from paddle.fluid.framework import _test_eager_guard
+
+paddle.enable_static()
 
 
 # Situation 1: starts(list, no tensor), ends(list, no tensor)
@@ -481,6 +485,35 @@ class TestFP16_2(OpTest):
                 numeric_grad_delta=0.5)
 
 
+class TestBF16(OpTest):
+    def setUp(self):
+        self.op_type = "slice"
+        self.config()
+        self.inputs = {'Input': convert_float_to_uint16(self.input)}
+        self.outputs = {'Out': convert_float_to_uint16(self.out)}
+        self.attrs = {
+            'axes': self.axes,
+            'starts': self.starts,
+            'ends': self.ends,
+            'infer_flags': self.infer_flags
+        }
+
+    def config(self):
+        self.dtype = np.uint16
+        self.input = np.random.random([3, 4, 5, 6]).astype(np.float32)
+        self.starts = [-3, 0, 2]
+        self.ends = [3, 100, -1]
+        self.axes = [0, 1, 3]
+        self.out = self.input[-3:3, 0:100, :, 2:-1]
+        self.infer_flags = [1, 1, 1]
+
+    def test_check_output(self):
+        self.check_output()
+
+    def test_check_grad_normal(self):
+        self.check_grad(['Input'], 'Out')
+
+
 # Test python API
 class TestSliceAPI(unittest.TestCase):
     def test_1(self):
@@ -501,13 +534,13 @@ class TestSliceAPI(unittest.TestCase):
         # value_int64 is greater than 2147483647 which is the max of int32
         value_int64 = fluid.layers.fill_constant([1], "int64", 2147483648)
 
-        out_1 = fluid.layers.slice(
+        out_1 = paddle.slice(
             x, axes=[0, 1, 2], starts=[-3, 0, 2], ends=[value_int64, 100, -1])
-        out_2 = fluid.layers.slice(
+        out_2 = paddle.slice(
             x, axes=[0, 1, 3], starts=[minus_3, 0, 2], ends=[3, 100, -1])
-        out_3 = fluid.layers.slice(
+        out_3 = paddle.slice(
             x, axes=[0, 1, 3], starts=[minus_3, 0, 2], ends=[3, 100, minus_1])
-        out_4 = fluid.layers.slice(x, axes=[0, 1, 2], starts=starts, ends=ends)
+        out_4 = paddle.slice(x, axes=[0, 1, 2], starts=starts, ends=ends)
 
         out_5 = x[-3:3, 0:100, 2:-1]
         out_6 = x[minus_3:3, 0:100, :, 2:-1]
@@ -530,6 +563,66 @@ class TestSliceAPI(unittest.TestCase):
         assert np.array_equal(res_5, input[-3:3, 0:100, 2:-1, :])
         assert np.array_equal(res_6, input[-3:3, 0:100, :, 2:-1])
         assert np.array_equal(res_7, input[-1, 0:100, :, 2:-1])
+
+
+class TestSliceApiWithTensor(unittest.TestCase):
+    def test_starts_ends_is_tensor(self):
+        with paddle.fluid.dygraph.guard():
+            a = paddle.rand(shape=[4, 5, 6], dtype='float32')
+            axes = [0, 1, 2]
+            starts = [-3, 0, 2]
+            ends = [3, 2, 4]
+            a_1 = paddle.slice(
+                a,
+                axes=axes,
+                starts=paddle.to_tensor(
+                    starts, dtype='int32'),
+                ends=paddle.to_tensor(
+                    ends, dtype='int32'))
+            a_2 = paddle.slice(a, axes=axes, starts=starts, ends=ends)
+
+            self.assertTrue(np.array_equal(a_1.numpy(), a_2.numpy()))
+
+    def test_bool_tensor(self):
+        with paddle.fluid.dygraph.guard():
+            array = (np.arange(60).reshape([3, 4, 5]) % 3).astype('bool')
+            tt = paddle.to_tensor(array)
+            tt.stop_gradient = False
+
+            starts = [0, 1, 2]
+            ends = [3, 5, 4]
+            axes = [0, 1, 2]
+
+            y_paddle = paddle.slice(tt, axes, starts, ends)
+            y_np = tt[0:3, 1:5, 2:4]
+
+            self.assertTrue(paddle.bool == y_paddle.dtype)
+            self.assertTrue(np.array_equal(y_paddle.numpy(), y_np))
+
+
+class TestSliceApiEager(unittest.TestCase):
+    def test_slice_api(self):
+        with paddle.fluid.dygraph.guard():
+            with _test_eager_guard():
+                a = paddle.rand(shape=[4, 5, 6], dtype='float32')
+                a.stop_gradient = False
+                axes = [0, 1, 2]
+                starts = [-3, 0, 2]
+                ends = [3, 2, 4]
+                a_1 = paddle.slice(a, axes=axes, starts=starts, ends=ends)
+
+                a_2 = paddle.slice(
+                    a,
+                    axes=axes,
+                    starts=paddle.to_tensor(starts),
+                    ends=paddle.to_tensor(ends))
+
+                a_1.backward()
+                grad_truth = paddle.zeros_like(a)
+                grad_truth[-3:3, 0:2, 2:4] = 1
+                self.assertTrue(np.array_equal(grad_truth, a.gradient()))
+
+                self.assertTrue(np.allclose(a_1.numpy(), a[-3:3, 0:2, 2:4]))
 
 
 class TestSliceApiWithLoDTensorArray(unittest.TestCase):
@@ -663,6 +756,55 @@ class TestImperativeVarBaseGetItem(unittest.TestCase):
         self.assertRaises(Exception, test_float_in_index)
 
 
+class TestInferShape(unittest.TestCase):
+    def test(self):
+        x = paddle.ones(shape=[3, 4, 5])
+        x.desc.set_shape([3, -1, 5])
+        self.assertEqual(x.shape, (3, -1, 5))
+
+        out0 = paddle.slice(x, axes=[1], starts=[0], ends=[3])
+        self.assertEqual(out0.shape, (3, 3, 5))
+
+    def test_axis_less_than_zero(self):
+
+        # Using paddle.disable_static will make other unittests fail.
+        with fluid.dygraph.guard():
+            x_arr = np.arange(0, 24, dtype=np.float32).reshape([2, 3, 4])
+            x = paddle.to_tensor(x_arr)
+
+            pp_slice = paddle.slice(x, [100, ], [0], [1])
+            np_slice = x_arr[:, :, 0:1]
+            self.assertTrue(np.array_equal(pp_slice, np_slice))
+
+            pp_slice = paddle.slice(x, (-100, ), [0], [1])
+            np_slice = x_arr[0:1]
+            self.assertTrue(np.array_equal(pp_slice, np_slice))
+
+            x_arr = np.array([], dtype=np.float32)
+            x = paddle.to_tensor(np.reshape(x_arr, (0, 0, 0)))
+
+            starts = paddle.to_tensor(
+                np.reshape(
+                    np.array(
+                        [], dtype=np.int32), (0, )))
+            ends = paddle.to_tensor(
+                np.reshape(
+                    np.array(
+                        [], dtype=np.int32), (0, )))
+
+            with self.assertRaises(ValueError):
+                paddle.slice(x, [-1000000], starts, ends)
+
+            with self.assertRaises(ValueError):
+                paddle.slice(x, [1000000], starts, ends)
+
+            with self.assertRaises(ValueError):
+                paddle.slice(x, [], starts, ends)
+
+            with self.assertRaises(ValueError):
+                paddle.slice(x, 0, starts, ends)
+
+
 @unittest.skipIf(not core.is_compiled_with_cuda(),
                  "core is not compiled with CUDA")
 class TestImperativeCUDAPinnedInput(unittest.TestCase):
@@ -680,4 +822,5 @@ class TestImperativeCUDAPinnedInput(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

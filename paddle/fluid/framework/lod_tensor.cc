@@ -12,50 +12,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include <stdint.h>
-#include <string.h>
-#include <algorithm>
-#include <iterator>
-
-#include "paddle/fluid/framework/data_type.h"
-#include "paddle/fluid/framework/framework.pb.h"
 #include "paddle/fluid/framework/lod_tensor.h"
-#include "paddle/fluid/framework/var_type.h"
-#include "paddle/fluid/framework/version.h"
 
-#include "paddle/fluid/memory/memcpy.h"
-#include "paddle/fluid/memory/memory.h"
+#include <stdint.h>
+
+#include "paddle/fluid/framework/convert_utils.h"
+#include "paddle/fluid/framework/version.h"
 
 namespace paddle {
 namespace framework {
-
-std::ostream &operator<<(std::ostream &os, const LoD &lod) {
-  os << "{";
-  for (auto &v : lod) {
-    os << "{";
-    bool is_first = true;
-    for (auto &i : v) {
-      if (is_first) {
-        os << i;
-        is_first = false;
-      } else {
-        os << ", " << i;
-      }
-    }
-    os << "}";
-  }
-  os << "}";
-
-  return os;
-}
-
-std::ostream &operator<<(std::ostream &os, const LoDTensor &t) {
-  if (t.lod().size() > 0) {
-    os << "  - lod: " << t.lod() << "\n";
-  }
-  os << static_cast<Tensor>(t);
-  return os;
-}
 
 std::string LoDToString(const LoD &lod) {
   std::ostringstream stream;
@@ -153,7 +118,8 @@ bool CheckLoD(const LoD &in, int tensor_height) {
   }
   // check: the lowest level's last offset should equals `tensor_height` if
   //        tensor_height>0.
-  if (tensor_height > 0 && (size_t)tensor_height != in.back().back())
+  if (tensor_height > 0 &&
+      static_cast<size_t>(tensor_height) != in.back().back())
     return false;
 
   // check: the higher level's last offset should equals the lower level's
@@ -186,7 +152,7 @@ bool CheckAbsLoD(const LoD &in, int tensor_height) {
     if (level.front() != 0) return false;
     if (tensor_height < 0) {
       tensor_height = level.back();
-    } else if ((size_t)tensor_height != level.back()) {
+    } else if (static_cast<size_t>(tensor_height) != level.back()) {
       return false;
     }
   }
@@ -222,27 +188,6 @@ LoDAndOffset GetSubLoDAndAbsoluteOffset(const LoD &lod, size_t start_idx,
   return LoDAndOffset{sub_lod, {start_idx, end_idx}};
 }
 
-void AppendLoD(LoD *lod, const LoD &lod_length) {
-  PADDLE_ENFORCE(
-      lod->empty() || lod->size() == lod_length.size(),
-      platform::errors::InvalidArgument(
-          "The input LoD length should be equal to the appended LoD size, but "
-          "received input LoD length is %d, actual LoD size is %d.",
-          lod_length, lod->size()));
-  if (lod->empty()) {
-    for (size_t i = 0; i < lod_length.size(); ++i) {
-      lod->emplace_back(1, 0);  // size = 1, value = 0;
-    }
-    *lod = LoD(lod_length.size(), std::vector<size_t>({0}));
-  }
-  for (size_t i = 0; i < lod->size(); ++i) {
-    auto &level = (*lod)[i];
-    for (size_t len : lod_length[i]) {
-      level.push_back(level.back() + len);
-    }
-  }
-}
-
 void SerializeToStream(std::ostream &os, const LoDTensor &tensor,
                        const platform::DeviceContext &dev_ctx) {
   {  // the 1st field, uint32_t version for LoDTensor
@@ -270,6 +215,21 @@ void SerializeToStream(std::ostream &os, const LoDTensor &tensor,
   TensorToStream(os, static_cast<Tensor>(tensor), dev_ctx);
 }
 
+void SerializeToStream(std::ostream &os, const LoDTensor &tensor) {
+  platform::DeviceContextPool &pool = platform::DeviceContextPool::Instance();
+  const platform::DeviceContext *dev_ctx;
+  auto place = tensor.place();
+  dev_ctx = pool.Get(place);
+  SerializeToStream(os, tensor, *dev_ctx);
+}
+
+void DeserializeFromStream(std::istream &os, LoDTensor *tensor) {
+  platform::DeviceContextPool &pool = platform::DeviceContextPool::Instance();
+  const platform::DeviceContext *dev_ctx;
+  dev_ctx = pool.Get(platform::CPUPlace());
+  DeserializeFromStream(os, tensor, *dev_ctx);
+}
+
 void DeserializeFromStream(std::istream &is, LoDTensor *tensor,
                            const platform::DeviceContext &dev_ctx,
                            const size_t &seek,
@@ -284,7 +244,8 @@ void DeserializeFromStream(std::istream &is, LoDTensor *tensor,
     PADDLE_ENFORCE_EQ(
         version, 0U,
         platform::errors::InvalidArgument(
-            "Tensor version %u is not supported, only version 0 is supported.",
+            "Deserialize to tensor failed, maybe the loaded file is "
+            "not a paddle model(expected file format: 0, but %u found).",
             version));
   }
   {
@@ -310,7 +271,8 @@ void DeserializeFromStream(std::istream &is, LoDTensor *tensor,
     PADDLE_ENFORCE_EQ(
         version, 0U,
         platform::errors::InvalidArgument(
-            "Tensor version %u is not supported, only version 0 is supported.",
+            "Deserialize to tensor failed, maybe the loaded file is "
+            "not a paddle model(expected file format: 0, but %u found).",
             version));
   }
   {
@@ -332,14 +294,31 @@ void DeserializeFromStream(std::istream &is, LoDTensor *tensor,
   TensorFromStream(is, static_cast<Tensor *>(tensor), dev_ctx);
 }
 
-std::vector<LoDTensor> LoDTensor::SplitLoDTensor(
-    const std::vector<platform::Place> places) const {
+LoD ConvertToOffsetBasedLoD(const LoD &length_lod) {
+  LoD offset_lod;
+  offset_lod.reserve(length_lod.size());
+  for (size_t lvl = 0; lvl < length_lod.size(); ++lvl) {
+    std::vector<size_t> level;
+    level.reserve(length_lod[lvl].size() + 1);
+    size_t tmp = 0;
+    level.push_back(tmp);
+    for (size_t idx = 0; idx < length_lod[lvl].size(); ++idx) {
+      tmp += length_lod[lvl][idx];
+      level.push_back(tmp);
+    }
+    offset_lod.push_back(level);
+  }
+  return offset_lod;
+}
+
+std::vector<LoDTensor> SplitLoDTensor(
+    const LoDTensor &src, const std::vector<platform::Place> places) {
   PADDLE_ENFORCE_GT(places.size(), 0,
                     platform::errors::InvalidArgument(
                         "Place number cannot be empty when splitting."));
-  check_memory_size();
-  size_t batch_size =
-      lod().empty() ? static_cast<size_t>(dims()[0]) : lod()[0].size() - 1;
+  src.check_memory_size();
+  size_t batch_size = src.lod().empty() ? static_cast<size_t>(src.dims()[0])
+                                        : src.lod()[0].size() - 1;
 
   // if batch_size is 0, just return #places.size() copys of empty
   // tensors.
@@ -348,10 +327,10 @@ std::vector<LoDTensor> LoDTensor::SplitLoDTensor(
     empty_results.reserve(places.size());
     for (size_t i = 0; i < places.size(); ++i) {
       LoDTensor dst;
-      dst.Resize(dims());
-      dst.mutable_data(places[i], type());
-      if (!lod().empty()) {
-        dst.set_lod(lod());
+      dst.Resize(src.dims());
+      dst.mutable_data(places[i], src.dtype());
+      if (!src.lod().empty()) {
+        dst.set_lod(src.lod());
       }
       empty_results.emplace_back(std::move(dst));
     }
@@ -373,17 +352,18 @@ std::vector<LoDTensor> LoDTensor::SplitLoDTensor(
                           begin, end));
 
     LoDTensor dst;
-    if (lod().empty()) {
-      auto src = Slice(begin, end);
+    if (src.lod().empty()) {
+      auto sliced_src = src.Slice(begin, end);
       auto &dst_place = places[i];
-      framework::TensorCopy(src, dst_place, &dst);
+      framework::TensorCopy(sliced_src, dst_place, &dst);
     } else {
-      auto lod_and_offset = GetSubLoDAndAbsoluteOffset(lod(), begin, end, 0);
+      auto lod_and_offset =
+          GetSubLoDAndAbsoluteOffset(src.lod(), begin, end, 0);
 
       auto &offset = lod_and_offset.second;
-      auto src = Slice(offset.first, offset.second);
+      auto sliced_src = src.Slice(offset.first, offset.second);
       auto &dst_place = places[i];
-      framework::TensorCopy(src, dst_place, &dst);
+      framework::TensorCopy(sliced_src, dst_place, &dst);
 
       LoD my_lod;
       for (auto &l : lod_and_offset.first) {
@@ -401,9 +381,9 @@ std::vector<LoDTensor> LoDTensor::SplitLoDTensor(
   return results;
 }
 
-void LoDTensor::MergeLoDTensor(
-    const std::vector<const LoDTensor *> &lod_tensors,
-    platform::Place dst_place) {
+void MergeLoDTensor(LoDTensor *target,
+                    const std::vector<const LoDTensor *> &lod_tensors,
+                    platform::Place dst_place) {
   PADDLE_ENFORCE_EQ(lod_tensors.empty(), false,
                     platform::errors::InvalidArgument(
                         "The LoDTensors to be merged are empty."));
@@ -414,7 +394,7 @@ void LoDTensor::MergeLoDTensor(
   for (auto *t : lod_tensors) {
     if (t->numel() && t->IsInitialized()) {
       new_dim = t->dims();
-      new_type = t->type();
+      new_type = framework::TransToProtoVarType(t->dtype());
       new_layout = t->layout();
       break;
     }
@@ -426,11 +406,12 @@ void LoDTensor::MergeLoDTensor(
     auto *t = lod_tensors[i];
     if (t->numel() && t->IsInitialized()) {
       PADDLE_ENFORCE_EQ(
-          new_type, t->type(),
+          new_type, framework::TransToProtoVarType(t->dtype()),
           platform::errors::InvalidArgument(
               "LoDTensor data type does not match, expected type is %s, actual "
               "type is %s.",
-              DataTypeToString(new_type), DataTypeToString(t->type())));
+              DataTypeToString(new_type),
+              DataTypeToString(framework::TransToProtoVarType(t->dtype()))));
       PADDLE_ENFORCE_EQ(
           new_layout, t->layout(),
           platform::errors::InvalidArgument(
@@ -438,8 +419,8 @@ void LoDTensor::MergeLoDTensor(
               "actual layout is %s.",
               DataLayoutToString(new_layout), DataLayoutToString(t->layout())));
       PADDLE_ENFORCE_EQ(
-          framework::product(new_dim) / new_dim[0],
-          framework::product(t->dims()) / t->dims()[0],
+          phi::product(new_dim) / new_dim[0],
+          phi::product(t->dims()) / t->dims()[0],
           platform::errors::InvalidArgument(
               "LoDTensor dimension does not match, all dimensions except the "
               "first dimension need to be equal,"
@@ -462,10 +443,11 @@ void LoDTensor::MergeLoDTensor(
       }
     }
   }
-  Resize(new_dim);
-  set_layout(new_layout);
-  set_lod(new_lod);
-  mutable_data(dst_place, new_type);
+  target->Resize(new_dim);
+  target->set_layout(new_layout);
+  target->set_lod(new_lod);
+  target->mutable_data(dst_place,
+                       paddle::framework::TransToPhiDataType(new_type));
 
   int begin = 0;
   for (auto *src : lod_tensors) {
@@ -473,43 +455,10 @@ void LoDTensor::MergeLoDTensor(
     if (end == begin) {
       continue;
     }
-    auto dst = Slice(begin, end);
+    auto dst = target->Slice(begin, end);
     framework::TensorCopy(*src, dst_place, &dst);
     begin = end;
   }
-}
-
-LoD ConvertToLengthBasedLoD(const LoD &offset_lod) {
-  LoD length_lod;
-  length_lod.reserve(offset_lod.size());
-  for (size_t lvl = 0; lvl < offset_lod.size(); ++lvl) {
-    std::vector<size_t> level;
-    if (offset_lod[lvl].size() > 0) {
-      level.reserve(offset_lod[lvl].size() - 1);
-    }
-    for (size_t idx = 0; idx < offset_lod[lvl].size() - 1; ++idx) {
-      level.push_back(offset_lod[lvl][idx + 1] - offset_lod[lvl][idx]);
-    }
-    length_lod.push_back(level);
-  }
-  return length_lod;
-}
-
-LoD ConvertToOffsetBasedLoD(const LoD &length_lod) {
-  LoD offset_lod;
-  offset_lod.reserve(length_lod.size());
-  for (size_t lvl = 0; lvl < length_lod.size(); ++lvl) {
-    std::vector<size_t> level;
-    level.reserve(length_lod[lvl].size() + 1);
-    size_t tmp = 0;
-    level.push_back(tmp);
-    for (size_t idx = 0; idx < length_lod[lvl].size(); ++idx) {
-      tmp += length_lod[lvl][idx];
-      level.push_back(tmp);
-    }
-    offset_lod.push_back(level);
-  }
-  return offset_lod;
 }
 
 }  // namespace framework

@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paddle/fluid/framework/ir/graph_traits.h"
+#include <list>
+#include <map>
 
-#include <set>
-#include <utility>
-#include <vector>
+#include "paddle/fluid/framework/ir/graph_traits.h"
 
 namespace paddle {
 namespace framework {
@@ -25,6 +24,53 @@ namespace ir {
 //
 // NodesDFSIterator
 //
+class Node;
+
+bool IsReachable(ir::Graph *graph, Node *from, Node *to) {
+  if (from == to) {
+    return true;
+  }
+
+  std::map<Node *, bool> visited;
+
+  for (auto &node : GraphTraits::DFS(*graph)) {
+    visited[&node] = false;
+  }
+
+  visited[from] = true;
+
+  std::list<Node *> queue;
+  queue.push_back(from);
+
+  while (!queue.empty()) {
+    auto cur = FindNode(graph, queue.front());
+    queue.pop_front();
+
+    if (!cur) return false;
+
+    for (const auto &n : cur->outputs) {
+      if (n == to) {
+        return true;
+      }
+
+      if (!visited[n]) {
+        visited[n] = true;
+        queue.push_back(n);
+      }
+    }
+  }
+  return false;
+}
+
+Node *FindNode(ir::Graph *graph, const Node *node) {
+  for (const auto &n : graph->Nodes()) {
+    if (n == node) {
+      return n;
+    }
+  }
+  return nullptr;
+}
+
 NodesDFSIterator::NodesDFSIterator(const std::vector<Node *> &source) {
   for (auto *x : source) stack_.push(x);
 }

@@ -14,6 +14,7 @@
 
 #pragma once
 #include <vector>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
 
@@ -21,8 +22,11 @@ namespace paddle {
 namespace framework {
 namespace ir {
 
+class Graph;
+
 class ShuffleChannelDetectPass : public FusePassBase {
  public:
+  ShuffleChannelDetectPass();
   virtual ~ShuffleChannelDetectPass() {}
 
  protected:

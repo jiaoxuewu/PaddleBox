@@ -18,8 +18,9 @@
 #include "paddle/fluid/framework/data_layout.h"
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
+#include "paddle/fluid/operators/eigen/eigen_function.h"
 #include "paddle/fluid/operators/math/im2col.h"
-#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -52,7 +53,8 @@ class Im2SequenceKernel : public framework::OpKernel<T> {
       const Tensor* imgrealsize = ctx.Input<Tensor>("Y");
       auto out_stride = ctx.Attr<std::vector<int>>("out_stride");
       Tensor cpu_shape_tensor;
-      TensorCopySync(*imgrealsize, platform::CPUPlace(), &cpu_shape_tensor);
+      paddle::framework::TensorCopySync(*imgrealsize, platform::CPUPlace(),
+                                        &cpu_shape_tensor);
       std::vector<int> imgreal_h;
       std::vector<int> imgreal_w;
       std::vector<int> output_height;
@@ -157,7 +159,7 @@ class Im2SequenceGradKernel : public framework::OpKernel<T> {
 
     auto x_v = framework::EigenVector<T>::Flatten(*d_x);
     auto& place = *ctx.template device_context<DeviceContext>().eigen_device();
-    x_v.device(place) = x_v.constant(0.0);
+    EigenConstant<std::decay_t<decltype(place)>, T, 1>::Eval(place, x_v, 0.0);
 
     auto in_dim = in->dims();
     int batch_size = in_dim[0];

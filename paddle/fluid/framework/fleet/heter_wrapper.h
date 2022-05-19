@@ -23,8 +23,9 @@ limitations under the License. */
 #include <unordered_map>
 #include <vector>
 
-#ifdef PADDLE_WITH_PSLIB
+#if defined(PADDLE_WITH_PSLIB) && !defined(PADDLE_WITH_HETERPS)
 #include "paddle/fluid/framework/heter_service.h"
+#include "paddle/fluid/framework/heter_util.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/fluid/framework/variable_helper.h"
@@ -86,14 +87,12 @@ class HeterWrapper {
 
   framework::proto::VarType::Type ToVarType(VariableMessage::Type type);
 
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   void DeSerializeToTensor(Scope* scope, const VariableMessage& req_var,
-                           platform::Place place,
-                           cudaStream_t stream = nullptr);
-#else
+                           platform::Place place, gpuStream_t stream);
+#endif
   void DeSerializeToTensor(Scope* scope, const VariableMessage& req_var,
                            platform::Place place);
-#endif
   // HeterWrapper singleton
   static std::shared_ptr<HeterWrapper> GetInstance() {
     if (NULL == s_instance_) {

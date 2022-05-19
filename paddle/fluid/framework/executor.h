@@ -19,18 +19,22 @@ limitations under the License. */
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "paddle/fluid/framework/data_set.h"
+
 #include "paddle/fluid/framework/executor_gc_helper.h"
 #include "paddle/fluid/framework/garbage_collector.h"
 #include "paddle/fluid/framework/op_info.h"
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/framework/tensor.h"
-#include "paddle/fluid/framework/trainer.h"
 #include "paddle/fluid/platform/device_context.h"
 
 namespace paddle {
 namespace framework {
+
+class Dataset;
+class ProgramDesc;
+class Scope;
+class TrainerBase;
 
 struct ExecutorPrepareContext {
   ExecutorPrepareContext(const framework::ProgramDesc& prog, size_t block_id);

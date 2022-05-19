@@ -17,7 +17,7 @@ from __future__ import print_function
 import copy
 import numpy as np
 
-from .framework import Variable, default_main_program, default_startup_program, in_dygraph_mode, _current_expected_place
+from .framework import Variable, default_main_program, default_startup_program, _non_static_mode, _current_expected_place, _in_eager_without_dygraph_check
 from . import unique_name
 from .param_attr import ParamAttr, WeightNormParamAttr
 from . import core
@@ -59,7 +59,7 @@ class LayerHelperBase(object):
         return cls.__dtype
 
     def to_variable(self, value, name=None):
-        """
+        r"""
         The API will create a ``Variable`` object from numpy\.ndarray or Variable object.
 
         Parameters:
@@ -82,16 +82,19 @@ class LayerHelperBase(object):
 
         """
         if isinstance(value, np.ndarray):
-            assert in_dygraph_mode(
-            ), "to_variable could only be called in dygraph mode"
-            py_var = core.VarBase(
-                value=value,
-                name=name if name else '',
-                persistable=False,
-                place=_current_expected_place(),
-                zero_copy=False)
-            return py_var
-        elif isinstance(value, (core.VarBase, Variable)):
+            if _in_eager_without_dygraph_check():
+                return core.eager.Tensor(value,
+                                         _current_expected_place(), False,
+                                         False, name if name else None, True)
+            else:
+                py_var = core.VarBase(
+                    value=value,
+                    name=name if name else '',
+                    persistable=False,
+                    place=_current_expected_place(),
+                    zero_copy=False)
+                return py_var
+        elif isinstance(value, (core.VarBase, Variable, core.eager.Tensor)):
             return value
         else:
             raise TypeError(
@@ -231,7 +234,7 @@ class LayerHelperBase(object):
                 x=g, y=norm)  # The shapes of g and norm are the same.
             # Currently, elementwise_mul only support broadcast when the shape
             # of y is a subset of the shape of x. Thus, we reshape y to squeeze
-            # to achive the subset.
+            # to achieve the subset.
             w = elementwise_mul(
                 x=v,
                 y=scale if dim is None else reshape(
@@ -312,6 +315,10 @@ class LayerHelperBase(object):
         if not attr:
             return None
         assert isinstance(attr, ParamAttr)
+        for i, size in enumerate(shape):
+            assert size > 0, (
+                "Expected every dim's size to be larger than 0, "
+                "but the size of the {}-th dim is {}".format(i, size))
         # set global dtype
         if not dtype:
             dtype = self.__dtype
@@ -331,12 +338,14 @@ class LayerHelperBase(object):
             if isinstance(dtype, core.VarDesc.VarType):
                 if dtype != core.VarDesc.VarType.FP32 and \
                         dtype != core.VarDesc.VarType.FP64 and \
-                        dtype != core.VarDesc.VarType.FP16:
+                        dtype != core.VarDesc.VarType.FP16 and \
+                        dtype != core.VarDesc.VarType.BF16:
                     raise TypeError(
                         "Can not create parameter with default initializer when dtype is not float type. Set default_initializer to fit the parameter dtype!"
                     )
             else:
-                if not (dtype.startswith("float") or dtype == "double"):
+                if not (dtype.startswith("float") or
+                        dtype in ["double", "uint16"]):
                     raise TypeError(
                         "Can not create parameter with default initializer when dtype is not float type. Set default_initializer to fit the parameter dtype!"
                     )
@@ -353,7 +362,7 @@ class LayerHelperBase(object):
             param = self._create_weight_normalize(attr, shape, dtype)
             WeightNormParamAttr.params_with_weight_norm.append(param)
             return param
-        if in_dygraph_mode():
+        if _non_static_mode():
             # In dygraph mode, we want the returned parameter to be
             # initialized so that it can be used imperatively.
             # check parameter name
@@ -379,7 +388,10 @@ class LayerHelperBase(object):
             return self.main_program.global_block().create_parameter(
                 dtype=dtype, shape=shape, type=type, **attr._to_kwargs())
 
-    def create_variable_for_type_inference(self, dtype, stop_gradient=False):
+    def create_variable_for_type_inference(self,
+                                           dtype,
+                                           stop_gradient=False,
+                                           shape=None):
         """Create a temporary variable that should be type inferred layer.
 
         Note:
@@ -395,6 +407,7 @@ class LayerHelperBase(object):
             name=unique_name.generate_with_ignorable_key(".".join(
                 [self.name, 'tmp'])),
             dtype=dtype,
+            shape=shape,
             type=core.VarDesc.VarType.LOD_TENSOR,
             persistable=False,
             stop_gradient=stop_gradient)
@@ -436,7 +449,7 @@ class LayerHelperBase(object):
                initializer: initializer to use
         """
         assert isinstance(var, Variable)
-        if in_dygraph_mode():
+        if _non_static_mode():
             initializer(var, self.main_program.global_block())
         else:
             self.startup_program.global_block().create_var(

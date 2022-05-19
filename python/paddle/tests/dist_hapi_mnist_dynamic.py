@@ -58,17 +58,16 @@ def compute_accuracy(pred, gt):
 @unittest.skipIf(not fluid.is_compiled_with_cuda(),
                  'CPU testing is not supported')
 class TestDistTraning(unittest.TestCase):
-    def test_static_multiple_gpus(self):
+    def test_dynamic_multiple_gpus(self):
         device = set_device('gpu')
 
-        fluid.enable_dygraph(device)
         im_shape = (-1, 1, 28, 28)
         batch_size = 128
 
         inputs = [Input(im_shape, 'float32', 'image')]
         labels = [Input([None, 1], 'int64', 'label')]
 
-        model = Model(LeNet(classifier_activation=None), inputs, labels)
+        model = Model(LeNet(), inputs, labels)
         optim = fluid.optimizer.Momentum(
             learning_rate=0.001, momentum=.9, parameter_list=model.parameters())
         model.prepare(optim, CrossEntropyLoss(), Accuracy())

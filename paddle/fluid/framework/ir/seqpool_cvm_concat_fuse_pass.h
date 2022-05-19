@@ -15,6 +15,7 @@
 #pragma once
 
 #include <string>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/framework/ir/graph.h"
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
@@ -39,9 +40,11 @@ namespace ir {
  * FusionSeqPoolCVMConcat
  *           |
  */
+class Graph;
+
 class SeqPoolCVMConcatFusePass : public FusePassBase {
  public:
-  virtual ~SeqPoolCVMConcatFusePass() {}
+  SeqPoolCVMConcatFusePass();
 
  protected:
   void ApplyImpl(ir::Graph* graph) const override;

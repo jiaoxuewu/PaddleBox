@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#define GLOG_NO_ABBREVIATED_SEVERITIES  // msvc conflict logging with windows.h
 #include "paddle/fluid/framework/io/shell.h"
+
 #include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/timer.h"
 
@@ -133,7 +135,12 @@ static int shell_popen_fork_internal(const char* real_cmd, bool do_read,
   }
 
   close_open_fds_internal();
+
+#if defined(PADDLE_WITH_MUSL)
+  PCHECK(execl("/bin/sh", "sh", "-c", real_cmd, NULL) >= 0);
+#else
   PCHECK(execl("/bin/bash", "bash", "-c", real_cmd, NULL) >= 0);
+#endif
   // Note: just for compilation. the child don't run this line.
   _exit(0);
 #endif

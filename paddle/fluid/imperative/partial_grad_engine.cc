@@ -24,14 +24,15 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include "paddle/fluid/framework/convert_utils.h"
 #include "paddle/fluid/imperative/gradient_accumulator.h"
 #include "paddle/fluid/imperative/layer.h"
 #include "paddle/fluid/imperative/op_base.h"
 #include "paddle/fluid/imperative/tracer.h"
-#include "paddle/fluid/operators/math/math_function.h"
 #include "paddle/fluid/platform/device_context.h"
-#include "paddle/fluid/platform/profiler.h"
+#include "paddle/fluid/platform/profiler/event_tracing.h"
 #include "paddle/fluid/string/string_helper.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 DECLARE_bool(sort_sum_gradient);
 
@@ -73,6 +74,7 @@ static void GetGraphInfoBetweenTargets(
     std::unordered_map<OpBase *, size_t> *op_deps_ptr,
     std::unordered_set<VariableWrapper *> *related_grad_vars_ptr,
     const std::unordered_set<VariableWrapper *> &no_grad_var_grad) {
+  VLOG(10) << "prune graph starts";
   /**
    * Step 1. Find the candidate startup grad ops, prepared for following BFS.
    */
@@ -117,6 +119,8 @@ static void GetGraphInfoBetweenTargets(
     auto *op = op_node_pair.first;
     auto *node = op_node_pair.second;
 
+    VLOG(10) << "Visit node " << node << " , visit op " << op->Type();
+
     for (auto &output_pair : op->GetOutsMap()) {
       if (!output_pair.second.IsGrad()) {
         VLOG(10) << "WARNING: " << op->Type() << " outputs a forward var";
@@ -134,14 +138,19 @@ static void GetGraphInfoBetweenTargets(
     }
 
     for (auto &pending_node : node->GradPendingNodes()) {
+      for (auto &pending_op : *pending_node) {
+        preceding_ops[&pending_op].insert(op);
+      }
       if (visited.count(pending_node.get()) == 0) {
+        visited.insert(pending_node.get());
         for (auto &pending_op : *pending_node) {
-          preceding_ops[&pending_op].insert(op);
           q.emplace(&pending_op, pending_node.get());
         }
       }
     }
   }
+
+  VLOG(10) << "Found endpoint op ends";
 
   /**
    * Step 3. Based on the found input_target_grads, BFS the graph in reverse
@@ -246,6 +255,8 @@ static void GetGraphInfoBetweenTargets(
     }
   }
 
+  VLOG(10) << "Found startup op ends";
+
   /**
    * Step 4. Prune output_targets which is not the input of startup_ops
    */
@@ -297,8 +308,18 @@ static void FillConstantLike(const VariableWrapper &ref_var,
   auto *dst_tensor = dst_var->MutableVar()->GetMutable<framework::LoDTensor>();
   auto *dev_ctx = platform::DeviceContextPool::Instance().Get(place);
   dst_tensor->Resize(ref_tensor.dims());
-  dst_tensor->mutable_data(place, ref_var.DataType());
-  operators::math::set_constant(*dev_ctx, dst_tensor, value);
+  // TOOD(jiabin): Ugly fix here we have fwd_data_type_ and data_type, since in
+  // grad mission
+  // we can't get data_type_ directly. We need to check if we can only use
+  // default data_type for now.
+  if (ref_var.ForwardDataType() != -1) {
+    dst_tensor->mutable_data(
+        place, framework::TransToPhiDataType(ref_var.ForwardDataType()));
+  } else {
+    dst_tensor->mutable_data(place,
+                             framework::TransToPhiDataType(ref_var.DataType()));
+  }
+  phi::funcs::set_constant(*dev_ctx, dst_tensor, value);
 }
 
 /**
@@ -367,7 +388,11 @@ class GradientAccumulationInfo {
                           "Reference count overflows, this may be a bug"));
 
     *is_finished = (cur_ref_cnt_ == total_ref_cnt_);
-    accumulator_->Add(grad_var_partial, trace_id, unchange_input);
+    accumulator_->SumGrad(grad_var_partial, trace_id, unchange_input);
+
+    if (*is_finished && accumulator_->HasInnerVar()) {
+      accumulator_->AccumulateGrad();
+    }
 
     if (create_graph_) {
       VLOG(10) << "Store partial grad grad for double grad "
@@ -717,7 +742,8 @@ PartialGradTask::PartialGradTask(
           platform::errors::InvalidArgument(
               "The %d-th grad_output's shape does not match the %d-th output",
               i, i));
-      PADDLE_ENFORCE_EQ(grad_tensor.type(), out_tensor.type(),
+      PADDLE_ENFORCE_EQ(framework::TransToProtoVarType(grad_tensor.dtype()),
+                        framework::TransToProtoVarType(out_tensor.dtype()),
                         platform::errors::InvalidArgument(
                             "The %d-th grad_output's data type does not "
                             "match the %d-th output",
@@ -800,6 +826,8 @@ std::vector<std::shared_ptr<VarBase>> PartialGradTask::Run() {
 }
 
 void PartialGradTask::RunEachOp(OpBase *op) {
+  platform::RecordEvent op_type_record_event(
+      op->Type() + " grad trace_op", platform::TracerEventType::Operator, 1);
   // Prepare new inputs
   NameVarMap<VarBase> tmp_ins;
   for (auto &input_pair : op->GetInsMap()) {
@@ -857,6 +885,7 @@ void PartialGradTask::RunEachOp(OpBase *op) {
 
           auto new_grad_var = std::make_shared<VarBase>(true, grad_var->Name());
           new_grad_var->SetOverridedStopGradient(false);
+          new_grad_var->SetForwardDataType(grad_var->ForwardDataType());
           if (new_grad_var_iter->second->TotalRefCnt() > 1) {
             grads_to_accumulate_.emplace_back(new_grad_var_iter->second.get(),
                                               new_grad_var->SharedVar());
@@ -879,11 +908,12 @@ void PartialGradTask::RunEachOp(OpBase *op) {
   }
 
   // Run op
-  OpBase::Run(op->InnerOp(), tmp_ins, tmp_outs, op->Attrs(), op->place());
-
+  OpBase::Run(op->InnerOp(), tmp_ins, tmp_outs, op->Attrs(),
+              op->DefaultAttrsMap(), op->place());
   if (create_graph_) {
-    auto double_grad_node = CreateGradOpNode(op->InnerOp(), tmp_ins, tmp_outs,
-                                             op->Attrs(), op->place());
+    auto double_grad_node =
+        CreateGradOpNode(op->InnerOp(), tmp_ins, tmp_outs, op->Attrs(),
+                         op->DefaultAttrsMap(), op->place(), {});
     PADDLE_ENFORCE_NOT_NULL(
         double_grad_node,
         platform::errors::NotFound("The Op %s doesn't have any grad op. If you "

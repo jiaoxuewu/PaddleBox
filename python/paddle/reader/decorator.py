@@ -12,16 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = [
-    'cache', 'map_readers', 'buffered', 'compose', 'chain', 'shuffle',
-    'ComposeNotAligned', 'firstn', 'xmap_readers', 'multiprocess_reader'
-]
-
 from threading import Thread
 import subprocess
 import multiprocessing
 import six
 import sys
+import warnings
+import logging
 
 from six.moves.queue import Queue
 from six.moves import zip_longest
@@ -30,7 +27,26 @@ from six.moves import zip
 import itertools
 import random
 import zlib
+
 import paddle.compat as cpt
+from paddle.fluid.reader import QUEUE_GET_TIMEOUT
+
+__all__ = []
+
+# On macOS, the 'spawn' start method is now the default in Python3.8 multiprocessing,
+# Paddle is currently unable to solve this, so forces the process to start using 
+# the 'fork' start method.
+#
+# TODO: This solution is not good, because the fork start method could lead to 
+# crashes of the subprocess. Figure out how to make 'spawn' work.
+#
+# For more details, please refer to
+# https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+# https://bugs.python.org/issue33725
+if sys.version_info >= (3, 8) and sys.platform == 'darwin':
+    fork_context = multiprocessing.get_context('fork')
+else:
+    fork_context = multiprocessing
 
 
 def cache(reader):
@@ -47,6 +63,22 @@ def cache(reader):
 
     Returns:
         generator: a decorated reader object which yields data from cached memory.
+    
+    Examples:
+        .. code-block:: python
+
+            import paddle
+            
+            def reader():
+                for i in range(3):
+                    yield i
+            
+            # All data is cached into memory
+            cached_reader = paddle.io.cache(reader)
+            
+            # Output: 0 1 2
+            for i in cached_reader():
+                print(i)
     """
     all_data = tuple(reader())
 
@@ -281,12 +313,28 @@ def buffered(reader, size):
     buffer. Reading from the buffered data reader will proceed as long
     as the buffer is not empty.
 
-    :param reader: the data reader to read from.
-    :type reader: callable
-    :param size: max buffer size.
-    :type size: int
+    Args:
+        reader(generator): the data reader to read from.
+        size(int): max buffer size.
 
-    :returns: the buffered data reader.
+    Returns:
+        generator: the buffered data reader.
+    
+    Examples:
+        .. code-block:: python
+
+            import paddle
+            
+            def reader():
+                for i in range(3):
+                    yield i
+            
+            # Create a buffered reader, and the buffer size is 2.
+            buffered_reader = paddle.io.buffered(reader, 2)
+            
+            # Output: 0 1 2
+            for i in buffered_reader():
+                print(i)
     """
 
     class EndSignal():
@@ -540,13 +588,17 @@ def multiprocess_reader(readers, use_pipe=True, queue_size=1000):
         raise NotImplementedError(
             "The multiprocess_reader method is not supported on windows.")
 
+    # ujson is ultra fast json encoder and decoder written in pure C with bindings for Python 3.6+.
     try:
         import ujson as json
     except Exception as e:
-        sys.stderr.write("import ujson error: " + str(e) + " use json\n")
+        warnings.warn(
+            "The `ujson` module is not found, use the `json` module, `ujson` encodes and decodes faster, "
+            "you can install `ujson` through `pip install ujson`.")
         import json
 
-    assert type(readers) is list and len(readers) > 0
+    assert isinstance(readers, (list, tuple)) and len(readers) > 0, (
+        "`readers` must be list or tuple.")
 
     def _read_into_queue(reader, queue):
         try:
@@ -560,20 +612,29 @@ def multiprocess_reader(readers, use_pipe=True, queue_size=1000):
             six.reraise(*sys.exc_info())
 
     def queue_reader():
-        queue = multiprocessing.Queue(queue_size)
+        queue = fork_context.Queue(queue_size)
         for reader in readers:
-            p = multiprocessing.Process(
+            p = fork_context.Process(
                 target=_read_into_queue, args=(reader, queue))
             p.start()
 
         reader_num = len(readers)
         finish_num = 0
         while finish_num < reader_num:
-            sample = queue.get()
+            try:
+                sample = queue.get(timeout=QUEUE_GET_TIMEOUT)
+            except:
+                logging.error(
+                    "multiprocess_reader failed to get data from the multiprocessing.Queue."
+                )
+                six.reraise(*sys.exc_info())
+
             if sample is None:
                 finish_num += 1
             elif sample == "":
-                raise ValueError("multiprocess reader raises an exception")
+                raise ValueError(
+                    "multiprocess_reader failed to put data into the multiprocessing.Queue."
+                )
             else:
                 yield sample
 
@@ -593,9 +654,9 @@ def multiprocess_reader(readers, use_pipe=True, queue_size=1000):
     def pipe_reader():
         conns = []
         for reader in readers:
-            parent_conn, child_conn = multiprocessing.Pipe()
+            parent_conn, child_conn = fork_context.Pipe()
             conns.append(parent_conn)
-            p = multiprocessing.Process(
+            p = fork_context.Process(
                 target=_read_into_pipe, args=(reader, child_conn))
             p.start()
 
@@ -615,7 +676,9 @@ def multiprocess_reader(readers, use_pipe=True, queue_size=1000):
                 elif sample == "":
                     conn.close()
                     conn_to_remove.append(conn)
-                    raise ValueError("multiprocess reader raises an exception")
+                    raise ValueError(
+                        "multiprocess_reader failed to send data into the multiprocessing.Pipe."
+                    )
                 else:
                     yield sample
 

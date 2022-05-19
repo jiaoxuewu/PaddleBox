@@ -1,4 +1,4 @@
-if(NOT WITH_GPU)
+if(NOT WITH_GPU OR NOT WITH_TENSORRT)
     return()
 endif()
 
@@ -40,17 +40,29 @@ if(TENSORRT_INCLUDE_DIR AND TENSORRT_LIBRARY)
     set(TENSORRT_FOUND ON)
 else()
     set(TENSORRT_FOUND OFF)
-    message(STATUS "TensorRT is disabled.")
+    message(WARNING "TensorRT is disabled. You are compiling PaddlePaddle with option -DWITH_TENSORRT=ON, but TensorRT is not found, please configure path to TensorRT with option -DTENSORRT_ROOT or install it.")
 endif()
 
 if(TENSORRT_FOUND)
     file(READ ${TENSORRT_INCLUDE_DIR}/NvInfer.h TENSORRT_VERSION_FILE_CONTENTS)
     string(REGEX MATCH "define NV_TENSORRT_MAJOR +([0-9]+)" TENSORRT_MAJOR_VERSION
         "${TENSORRT_VERSION_FILE_CONTENTS}")
+    string(REGEX MATCH "define NV_TENSORRT_MINOR +([0-9]+)" TENSORRT_MINOR_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
+    string(REGEX MATCH "define NV_TENSORRT_PATCH +([0-9]+)" TENSORRT_PATCH_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
+    string(REGEX MATCH "define NV_TENSORRT_BUILD +([0-9]+)" TENSORRT_BUILD_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
 
     if("${TENSORRT_MAJOR_VERSION}" STREQUAL "")
         file(READ ${TENSORRT_INCLUDE_DIR}/NvInferVersion.h TENSORRT_VERSION_FILE_CONTENTS)
         string(REGEX MATCH "define NV_TENSORRT_MAJOR +([0-9]+)" TENSORRT_MAJOR_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
+        string(REGEX MATCH "define NV_TENSORRT_MINOR +([0-9]+)" TENSORRT_MINOR_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
+        string(REGEX MATCH "define NV_TENSORRT_PATCH +([0-9]+)" TENSORRT_PATCH_VERSION
+        "${TENSORRT_VERSION_FILE_CONTENTS}")
+        string(REGEX MATCH "define NV_TENSORRT_BUILD +([0-9]+)" TENSORRT_BUILD_VERSION
         "${TENSORRT_VERSION_FILE_CONTENTS}")
     endif()
 
@@ -60,9 +72,15 @@ if(TENSORRT_FOUND)
 
     string(REGEX REPLACE "define NV_TENSORRT_MAJOR +([0-9]+)" "\\1"
         TENSORRT_MAJOR_VERSION "${TENSORRT_MAJOR_VERSION}")
+    string(REGEX REPLACE "define NV_TENSORRT_MINOR +([0-9]+)" "\\1"
+        TENSORRT_MINOR_VERSION "${TENSORRT_MINOR_VERSION}")
+    string(REGEX REPLACE "define NV_TENSORRT_PATCH +([0-9]+)" "\\1"
+        TENSORRT_PATCH_VERSION "${TENSORRT_PATCH_VERSION}")
+    string(REGEX REPLACE "define NV_TENSORRT_BUILD +([0-9]+)" "\\1"
+        TENSORRT_BUILD_VERSION "${TENSORRT_BUILD_VERSION}")
 
     message(STATUS "Current TensorRT header is ${TENSORRT_INCLUDE_DIR}/NvInfer.h. "
-        "Current TensorRT version is v${TENSORRT_MAJOR_VERSION}. ")
+        "Current TensorRT version is v${TENSORRT_MAJOR_VERSION}.${TENSORRT_MINOR_VERSION}.${TENSORRT_PATCH_VERSION}.${TENSORRT_BUILD_VERSION} ")
     include_directories(${TENSORRT_INCLUDE_DIR})
     link_directories(${TENSORRT_LIBRARY})
     add_definitions(-DPADDLE_WITH_TENSORRT)

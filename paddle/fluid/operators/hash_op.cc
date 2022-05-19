@@ -13,7 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/hash_op.h"
+
 #include <string>
+
+namespace paddle {
+namespace framework {
+class InferShapeContext;
+class OpDesc;
+template <typename T>
+class EmptyGradOpMaker;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -37,7 +50,7 @@ class HashOp : public framework::OperatorWithKernel {
     int num_hash = ctx->Attrs().Get<int>("num_hash");
     HashOutputSize(dims, out_dims, num_hash);
 
-    ctx->SetOutputDim("Out", framework::make_ddim(out_dims));
+    ctx->SetOutputDim("Out", phi::make_ddim(out_dims));
     ctx->ShareLoD("X", /*->*/ "Out");
   }
 };

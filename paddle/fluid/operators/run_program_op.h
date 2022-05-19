@@ -16,12 +16,14 @@ limitations under the License. */
 
 #include <algorithm>
 #include <iterator>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "paddle/fluid/framework/executor.h"
+#include "paddle/fluid/framework/executor_cache.h"
 #include "paddle/fluid/framework/op_desc.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/operator.h"
@@ -40,10 +42,11 @@ namespace operators {
 
 using StepScopeVar = std::vector<framework::Scope *>;
 using BlockDesc = framework::BlockDesc;
+using ProgramDesc = framework::ProgramDesc;
 
 using Variable = framework::Variable;
 using LoDTensor = framework::LoDTensor;
-using SelectedRows = framework::SelectedRows;
+using SelectedRows = phi::SelectedRows;
 
 namespace details {
 
@@ -83,21 +86,21 @@ static void CheckOutputVarStatus(const Variable &src_var,
                           "RunProgram(Grad)Op's internal "
                           "scope is not initialized.",
                           var_name));
-  } else if (dst_var.IsType<SelectedRows>()) {
+  } else if (dst_var.IsType<phi::SelectedRows>()) {
     PADDLE_ENFORCE_EQ(
-        src_var.IsType<SelectedRows>(), true,
+        src_var.IsType<phi::SelectedRows>(), true,
         platform::errors::InvalidArgument(
             "The output variable %s get from "
             "RunProgram(Grad)Op's internal scope holds "
             "wrong type. Expect type is SelectedRows, but receive type is %s.",
             var_name,
             platform::demangle(framework::ToTypeName(src_var.Type()))));
-    PADDLE_ENFORCE_EQ(src_var.Get<SelectedRows>().value().IsInitialized(), true,
-                      platform::errors::InvalidArgument(
-                          "The tensor in output variable %s get from "
-                          "RunProgram(Grad)Op's "
-                          "internal scope is not initialized.",
-                          var_name));
+    PADDLE_ENFORCE_EQ(src_var.Get<phi::SelectedRows>().value().IsInitialized(),
+                      true, platform::errors::InvalidArgument(
+                                "The tensor in output variable %s get from "
+                                "RunProgram(Grad)Op's "
+                                "internal scope is not initialized.",
+                                var_name));
 
   } else {
     PADDLE_THROW(platform::errors::InvalidArgument(
@@ -115,12 +118,12 @@ static void VariableShare(const Variable &src_var, Variable *dst_var) {
     auto *lod_tensor = dst_var->GetMutable<LoDTensor>();
     lod_tensor->ShareDataWith(src_var.Get<LoDTensor>());
     lod_tensor->set_lod(src_var.Get<LoDTensor>().lod());
-  } else if (src_var.IsType<SelectedRows>()) {
-    auto *selected_rows = dst_var->GetMutable<SelectedRows>();
+  } else if (src_var.IsType<phi::SelectedRows>()) {
+    auto *selected_rows = dst_var->GetMutable<phi::SelectedRows>();
     selected_rows->mutable_value()->ShareDataWith(
-        src_var.Get<SelectedRows>().value());
-    selected_rows->set_rows(src_var.Get<SelectedRows>().rows());
-    selected_rows->set_height(src_var.Get<SelectedRows>().height());
+        src_var.Get<phi::SelectedRows>().value());
+    selected_rows->set_rows(src_var.Get<phi::SelectedRows>().rows());
+    selected_rows->set_height(src_var.Get<phi::SelectedRows>().height());
   }
 }
 
@@ -128,6 +131,9 @@ static void ShareVarsIntoScope(const std::vector<Variable *> &vars,
                                const std::vector<std::string> &var_names,
                                framework::Scope *scope) {
   for (size_t i = 0; i < vars.size(); ++i) {
+    if (var_names[i] == "Fake_var") {
+      continue;
+    }
     auto *var = scope->Var(var_names[i]);
     CheckInputVarStatus(*vars[i], var_names[i]);
     VariableShare(*vars[i], var);
@@ -136,11 +142,16 @@ static void ShareVarsIntoScope(const std::vector<Variable *> &vars,
 
 static void ShareVarsFromScope(const std::vector<Variable *> &vars,
                                const std::vector<std::string> &var_names,
+                               const BlockDesc &global_block,
                                framework::Scope *scope) {
   for (size_t i = 0; i < vars.size(); ++i) {
-    if (var_names[i] == framework::kEmptyVarName) {
-      VLOG(2) << "find variable name is " << framework::kEmptyVarName
-              << ", skip it!";
+    // NOTE: In case of setting out_tmp.stop_gradient = True in model code, all
+    // parameters before generating out_tmp have no @GRAD, it will raise error
+    // because we can't findthem in scope. So we skip sharing these vars or
+    // var@GRAD if they don't appear in global block.
+    if (var_names[i] == framework::kEmptyVarName ||
+        var_names[i] == "Fake_var" || !global_block.HasVar(var_names[i])) {
+      VLOG(2) << "find variable name is " << var_names[i] << ", skip it!";
       continue;
     }
     // NOTE: Here skip not found var is dangerous, if a bug is caused here,
@@ -156,46 +167,6 @@ static void ShareVarsFromScope(const std::vector<Variable *> &vars,
   }
 }
 
-static void AppendSkipDeletionVars(const std::vector<std::string> &append_vars,
-                                   std::vector<std::string> *all_vars) {
-  for (auto &var : append_vars) {
-    all_vars->emplace_back(var);
-  }
-}
-
-static void AppendSafeEagerDeletionSkipVars(
-    const framework::ProgramDesc &program,
-    std::vector<std::string> *skip_vars) {
-  const framework::BlockDesc &block = program.Block(0);
-  const std::vector<framework::OpDesc *> &all_ops = block.AllOps();
-
-  std::unordered_set<std::string> grad_op_output;
-  std::unordered_set<std::string> grad_op_input;
-  for (const framework::OpDesc *op : all_ops) {
-    int op_role = BOOST_GET_CONST(
-        int, op->GetAttr(framework::OpProtoAndCheckerMaker::OpRoleAttrName()));
-    if ((op_role & static_cast<int>(framework::OpRole::kBackward)) == 0) {
-      continue;
-    }
-
-    for (const std::string &in_arg_name : op->InputArgumentNames()) {
-      grad_op_input.emplace(in_arg_name);
-    }
-    for (const std::string &out_arg_name : op->OutputArgumentNames()) {
-      grad_op_output.emplace(out_arg_name);
-    }
-  }
-
-  // For the grad op input variables, if it is not output of grad_op, it may
-  // be output of forward op and we should set the variables as skip_var to
-  // prevent it being deleted when grad op is called multiple times.
-  for (const std::string &var_name : grad_op_input) {
-    if (grad_op_output.find(var_name) == grad_op_output.end()) {
-      skip_vars->emplace_back(var_name);
-    }
-  }
-}
-
 }  // namespace details
 
 template <typename DeviceContext, typename T>
@@ -207,16 +178,22 @@ class RunProgramOpKernel : public framework::OpKernel<T> {
     auto &input_vars = ctx.MultiInputVar("X");
     auto &param_vars = ctx.MultiInputVar("Params");
     auto output_vars = ctx.MultiOutputVar("Out");
+    auto dout_vars = ctx.MultiOutputVar("DOut");
 
     auto input_var_names = ctx.InputNames("X");
-    auto param_names = ctx.InputNames("Params");
     auto output_var_names = ctx.OutputNames("Out");
+    auto dout_var_names = ctx.OutputNames("DOut");
 
-    auto *block = ctx.Attr<BlockDesc *>("global_block");
-    auto *program = block->Program();
+    // current program may not hold parameters
+    std::vector<std::string> param_names;
+    if (!param_vars.empty()) {
+      param_names = ctx.InputNames("Params");
+    }
+
     auto start_op_index = ctx.Attr<int64_t>("start_op_index");
     auto end_op_index = ctx.Attr<int64_t>("end_op_index");
     auto is_test = ctx.Attr<bool>("is_test");
+    auto program_id = ctx.Attr<int64_t>("program_id");
 
     // NOTE(chenweihang): In order not to add new variable type, use vector
     // here. Originally, here can use scope directly.
@@ -227,15 +204,6 @@ class RunProgramOpKernel : public framework::OpKernel<T> {
             "The OutScope of RunProgramGradOp should only hold one scope."));
 
     // Step 2. prepare executor and init persistable variables
-    framework::Executor exe(ctx.GetPlace());
-
-    // skip delete vars
-    std::vector<std::string> skip_vars;
-    details::AppendSkipDeletionVars(output_var_names, &skip_vars);
-    VLOG(2) << "Prepare to skip " << skip_vars.size()
-            << " var(s): " << string::join_strings(skip_vars, ' ');
-
-    auto exe_ctx = exe.Prepare(*program, 0, skip_vars);
 
     // NOTE(Aurelius84): While training some models, forward can be called many
     // times and then apply backpropagation all at once, such as Reinforcement
@@ -251,13 +219,38 @@ class RunProgramOpKernel : public framework::OpKernel<T> {
     details::ShareVarsIntoScope(input_vars, input_var_names, &scope);
     details::ShareVarsIntoScope(param_vars, param_names, &scope);
 
-    // Step 3. run ops
-    exe.RunPartialPreparedContext(exe_ctx.get(), &scope, start_op_index,
-                                  end_op_index, /*create_local_scope=*/false,
-                                  /*create_vars=*/true, /*keep_kids=*/!is_test);
+    auto *global_block = ctx.Attr<BlockDesc *>("global_block");
 
+    if (end_op_index > start_op_index) {
+      auto *program = global_block->Program();
+      auto cache_info = framework::GetExecutorInfoFromCache(
+          *program, ctx.GetPlace(), start_op_index, end_op_index,
+          /*is_grad=*/false, program_id, &scope);
+      auto &parallel_executor = cache_info.first;
+      // all out_vars are skip_eager_var
+      auto &skip_eager_delete_vars =
+          framework::ExecutorInfoCache::Instance().SkipEagerDeleteVars(
+              program_id, false);
+      if (cache_info.second /*is_new_created*/) {
+        parallel_executor->SkipMemoryReuse(/*scope_idx=*/0, input_var_names);
+        skip_eager_delete_vars.insert(skip_eager_delete_vars.end(),
+                                      output_var_names.begin(),
+                                      output_var_names.end());
+        skip_eager_delete_vars.insert(skip_eager_delete_vars.end(),
+                                      dout_var_names.begin(),
+                                      dout_var_names.end());
+        framework::details::ParseSafeEagerDeletionSkipVars(
+            *program, end_op_index, output_var_names, &skip_eager_delete_vars);
+      }
+
+      // Step 3. run ops
+      parallel_executor->RunWithoutFetch(skip_eager_delete_vars);
+    }
     // Step 4. Get Output
-    details::ShareVarsFromScope(output_vars, output_var_names, &scope);
+    details::ShareVarsFromScope(output_vars, output_var_names, *global_block,
+                                &scope);
+    details::ShareVarsFromScope(dout_vars, dout_var_names, *global_block,
+                                &scope);
 
     // Debug info: scope info when run end
     VLOG(3) << framework::GenScopeTreeDebugInfo(out_scope_vec->front());
@@ -268,7 +261,7 @@ class RunProgramOpKernel : public framework::OpKernel<T> {
     VLOG(2) << "The number of sub scopes after forward: "
             << out_scope_vec->front()->kids().size();
 #ifdef PADDLE_WITH_MKLDNN
-    if (FLAGS_use_mkldnn) DontClearMKLDNNCache(ctx.GetPlace());
+    if (FLAGS_use_mkldnn) platform::DontClearMKLDNNCache(ctx.GetPlace());
 #endif
   }
 };
@@ -300,9 +293,8 @@ class RunProgramGradOpKernel : public framework::OpKernel<T> {
     }
 
     auto *block = ctx.Attr<BlockDesc *>("global_block");
-    auto *program = block->Program();
-
     auto orig_end_op_index = ctx.Attr<int64_t>("end_op_index");
+    auto program_id = ctx.Attr<int64_t>("program_id");
     // NOTE: skip `shape` and `fill_constant` op created by
     // fluid.backward.gradients, one forward output will generate one `shape`
     // and `fill_constant`
@@ -324,34 +316,45 @@ class RunProgramGradOpKernel : public framework::OpKernel<T> {
                           "least one sub scope."));
 
     auto &scope = *(global_inner_scope->kids().front());
+    auto *global_block = ctx.Attr<BlockDesc *>("global_block");
 
-    // Step 2. prepare executor and scope
-    framework::Executor exe(ctx.GetPlace());
+    if (end_op_index > start_op_index) {
+      // Step 2. prepare executor and scope
+      auto *program = global_block->Program();
+      auto cache_info = framework::GetExecutorInfoFromCache(
+          *program, ctx.GetPlace(), start_op_index, end_op_index,
+          /*is_grad*/ true, program_id, &scope);
+      auto &parallel_executor = cache_info.first;
 
-    // skip delete vars
-    std::vector<std::string> skip_vars;
-    details::AppendSkipDeletionVars(input_grad_var_names, &skip_vars);
-    details::AppendSkipDeletionVars(param_grad_names, &skip_vars);
-    details::AppendSafeEagerDeletionSkipVars(*program, &skip_vars);
-    VLOG(2) << "Prepare to skip " << skip_vars.size()
-            << " var(s): " << string::join_strings(skip_vars, ' ');
+      auto &skip_eager_delete_vars =
+          framework::ExecutorInfoCache::Instance().SkipEagerDeleteVars(
+              program_id, true);
+      if (cache_info.second /*is_new_created*/) {
+        parallel_executor->SkipMemoryReuse(/*scope_idx=*/0,
+                                           output_grad_var_names);
 
-    auto exe_ctx = exe.Prepare(*program, 0, skip_vars);
+        skip_eager_delete_vars.insert(skip_eager_delete_vars.end(),
+                                      input_grad_var_names.begin(),
+                                      input_grad_var_names.end());
+        framework::details::AppendSkipDeletionVars(param_grad_names,
+                                                   &skip_eager_delete_vars);
+      }
 
-    details::ShareVarsIntoScope(output_grad_vars, output_grad_var_names,
-                                &scope);
+      details::ShareVarsIntoScope(output_grad_vars, output_grad_var_names,
+                                  &scope);
+      // Debug info: scope info when run end
+      VLOG(3) << framework::GenScopeTreeDebugInfo(out_scope_vec->front());
 
-    // Debug info: scope info when run end
-    VLOG(3) << framework::GenScopeTreeDebugInfo(out_scope_vec->front());
-
-    // Step 3. run ops
-    exe.RunPartialPreparedContext(exe_ctx.get(), &scope, start_op_index,
-                                  end_op_index, /*create_local_scope=*/false,
-                                  /*create_vars=*/true, /*keep_kids=*/false);
+      // Step 3. run ops
+      parallel_executor->RunWithoutFetch(
+          /*skip_eager_delete_vars=*/skip_eager_delete_vars);
+    }
 
     // Step 4. get outputs
-    details::ShareVarsFromScope(input_grad_vars, input_grad_var_names, &scope);
-    details::ShareVarsFromScope(param_grad_vars, param_grad_names, &scope);
+    details::ShareVarsFromScope(input_grad_vars, input_grad_var_names,
+                                *global_block, &scope);
+    details::ShareVarsFromScope(param_grad_vars, param_grad_names,
+                                *global_block, &scope);
 
     // Step5. drop current scope
     global_inner_scope->DeleteScope(&scope);

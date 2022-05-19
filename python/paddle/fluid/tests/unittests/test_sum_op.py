@@ -18,9 +18,14 @@ import unittest
 import numpy as np
 from op_test import OpTest
 import paddle
+from paddle import enable_static
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 from paddle.fluid.op import Operator
+from paddle.fluid.tests.unittests.op_test import (
+    OpTest, convert_float_to_uint16, convert_uint16_to_float)
+from paddle import _C_ops
+from paddle.fluid.framework import _test_eager_guard
 
 
 class TestSumOp(OpTest):
@@ -45,9 +50,6 @@ class TestSumOp(OpTest):
 
     def test_check_grad(self):
         self.check_grad(['x0'], 'Out')
-
-    def init_kernel_type(self):
-        pass
 
 
 class TestSelectedRowsSumOp(unittest.TestCase):
@@ -141,6 +143,78 @@ class TestSelectedRowsSumOp(unittest.TestCase):
                 self.check_with_place(place, inplace)
 
 
+class TestSelectedRowsSumOpInt(TestSelectedRowsSumOp):
+    def init_kernel_type(self):
+        self.dtype = np.int32
+
+
+@unittest.skipIf(not core.supports_bfloat16(),
+                 'place does not support BF16 evaluation')
+class TestSelectedRowsSumBF16Op(TestSelectedRowsSumOp):
+    def setUp(self):
+        self.height = 10
+        self.row_numel = 12
+        self.rows = [0, 1, 2, 3, 4, 5, 6]
+        self.dtype = np.uint16
+        self.init_kernel_type()
+        np.random.seed(12345)
+        self.data = np.random.random((len(self.rows),
+                                      self.row_numel)).astype(np.float32)
+
+    def _get_array(self, rows, row_numel):
+        if len(rows) > 0:
+            return convert_float_to_uint16(self.data)
+        else:
+            return np.ndarray((0, row_numel), dtype=self.dtype)
+
+    def check_input_and_optput(self,
+                               scope,
+                               place,
+                               inplace,
+                               w1_has_data=False,
+                               w2_has_data=False,
+                               w3_has_data=False):
+
+        self.create_selected_rows(scope, place, "W1", w1_has_data)
+        self.create_selected_rows(scope, place, "W2", w2_has_data)
+        self.create_selected_rows(scope, place, "W3", w3_has_data)
+
+        # create Out Variable
+        if inplace:
+            out_var_name = "W1"
+        else:
+            out_var_name = "Out"
+        out = scope.var(out_var_name).get_selected_rows()
+
+        # create and run sum operator
+        sum_op = Operator("sum", X=["W1", "W2", "W3"], Out=out_var_name)
+        sum_op.run(scope, place)
+
+        has_data_w_num = 0
+        for has_data in [w1_has_data, w2_has_data, w3_has_data]:
+            if has_data:
+                has_data_w_num += 1
+
+        if has_data_w_num > 0:
+            self.assertEqual(len(out.rows()), 7)
+            out_bf16 = np.array(out.get_tensor())
+            out_fp32 = convert_uint16_to_float(out_bf16)
+            ref_fp32 = convert_uint16_to_float(
+                self._get_array(self.rows, self.row_numel)) * has_data_w_num
+            np.testing.assert_allclose(out_fp32, ref_fp32, atol=0, rtol=0.95e-2)
+        else:
+            self.assertEqual(len(out.rows()), 0)
+
+    def test_w_is_selected_rows(self):
+        for inplace in [True, False]:
+            self.check_with_place(core.CPUPlace(), inplace)
+
+
+class TestSelectedRowsSumBF16OpBigRow(TestSelectedRowsSumBF16Op):
+    def init_kernel_type(self):
+        self.row_numel = 102
+
+
 class TestLoDTensorAndSelectedRowsOp(TestSelectedRowsSumOp):
     def setUp(self):
         self.height = 10
@@ -225,7 +299,33 @@ def create_test_sum_fp16_class(parent):
     globals()[cls_name] = TestSumFp16Case
 
 
-class API_Test_Elementwise_Sum(unittest.TestCase):
+#----------- test bf16 -----------
+class TestSumBF16Op(OpTest):
+    def setUp(self):
+        self.op_type = "sum"
+        self.init_kernel_type()
+        x0 = np.random.random((3, 40)).astype(np.float32)
+        x1 = np.random.random((3, 40)).astype(np.float32)
+        x2 = np.random.random((3, 40)).astype(np.float32)
+        y = x0 + x1 + x2
+        self.inputs = {
+            "X": [("x0", convert_float_to_uint16(x0)),
+                  ("x1", convert_float_to_uint16(x1)),
+                  ("x2", convert_float_to_uint16(x2))]
+        }
+        self.outputs = {'Out': convert_float_to_uint16(y)}
+
+    def init_kernel_type(self):
+        self.dtype = np.uint16
+
+    def test_check_output(self):
+        self.check_output()
+
+    def test_check_grad(self):
+        self.check_grad(['x0'], 'Out', numeric_grad_delta=0.5)
+
+
+class API_Test_Add_n(unittest.TestCase):
     def test_api(self):
         with fluid.program_guard(fluid.Program(), fluid.Program()):
             input0 = fluid.layers.fill_constant(
@@ -234,11 +334,40 @@ class API_Test_Elementwise_Sum(unittest.TestCase):
                 shape=[2, 3], dtype='int64', value=3)
             expected_result = np.empty((2, 3))
             expected_result.fill(8)
-            sum_value = paddle.elementwise_sum([input0, input1])
+            sum_value = paddle.add_n([input0, input1])
             exe = fluid.Executor(fluid.CPUPlace())
             result = exe.run(fetch_list=[sum_value])
 
-        self.assertEqual((result == expected_result).all(), True)
+            self.assertEqual((result == expected_result).all(), True)
+
+        with fluid.dygraph.guard():
+            input0 = paddle.ones(shape=[2, 3], dtype='float32')
+            expected_result = np.empty((2, 3))
+            expected_result.fill(2)
+            sum_value = paddle.add_n([input0, input0])
+
+            self.assertEqual((sum_value.numpy() == expected_result).all(), True)
+
+    def test_dygraph_final_state_api(self):
+        with fluid.dygraph.guard():
+            with _test_eager_guard():
+                input0 = paddle.ones(shape=[2, 3], dtype='float32')
+                input1 = paddle.ones(shape=[2, 3], dtype='float32')
+                input0.stop_gradient = False
+                input1.stop_gradient = False
+                expected_result = np.empty((2, 3))
+                expected_result.fill(2)
+                sum_value = paddle.add_n([input0, input1])
+                self.assertEqual((sum_value.numpy() == expected_result).all(),
+                                 True)
+
+                expected_grad_result = np.empty((2, 3))
+                expected_grad_result.fill(1)
+                sum_value.backward()
+                self.assertEqual(
+                    (input0.grad.numpy() == expected_grad_result).all(), True)
+                self.assertEqual(
+                    (input1.grad.numpy() == expected_grad_result).all(), True)
 
 
 class TestRaiseSumError(unittest.TestCase):
@@ -302,11 +431,11 @@ class TestSumOpError(unittest.TestCase):
     def test_errors(self):
         def test_empty_list_input():
             with fluid.dygraph.guard():
-                fluid.core.ops.sum([])
+                fluid._C_ops.sum([])
 
         def test_list_of_none_input():
             with fluid.dygraph.guard():
-                fluid.core.ops.sum([None])
+                fluid._C_ops.sum([None])
 
         self.assertRaises(Exception, test_empty_list_input)
         self.assertRaises(Exception, test_list_of_none_input)
@@ -316,4 +445,5 @@ create_test_sum_fp16_class(TestSelectedRowsSumOp)
 create_test_sum_fp16_class(TestLoDTensorAndSelectedRowsOp)
 
 if __name__ == "__main__":
+    enable_static()
     unittest.main()

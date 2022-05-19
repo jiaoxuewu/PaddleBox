@@ -22,6 +22,7 @@ limitations under the License. */
 #ifdef PADDLE_WITH_MKLDNN
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #endif
+#include "paddle/fluid/framework/convert_utils.h"
 
 namespace paddle {
 namespace operators {
@@ -63,10 +64,10 @@ class SumOp : public framework::OperatorWithKernel {
           x_dim.size() == 1) {
         continue;
       }
-      if (framework::product(x_dim) == 0) {
+      if (phi::product(x_dim) == 0) {
         continue;
       }
-      if (framework::product(in_dim) == 0) {
+      if (phi::product(in_dim) == 0) {
         in_dim = x_dim;
       } else {
         if (ctx->IsRuntime()) {
@@ -134,9 +135,10 @@ class SumOp : public framework::OperatorWithKernel {
           continue;
         }
         if (dtype == -1) {
-          dtype = tensor->type();
+          dtype = framework::TransToProtoVarType(tensor->dtype());
         } else {
-          PADDLE_ENFORCE_EQ(dtype, tensor->type(),
+          PADDLE_ENFORCE_EQ(dtype,
+                            framework::TransToProtoVarType(tensor->dtype()),
                             platform::errors::InvalidArgument(
                                 "The inputs type of sum op must be same"));
         }
@@ -145,32 +147,33 @@ class SumOp : public framework::OperatorWithKernel {
                         platform::errors::InvalidArgument(
                             "Sum operator should have at least one tensor"));
 
+      auto data_type = static_cast<framework::proto::VarType::Type>(dtype);
 #ifdef PADDLE_WITH_MKLDNN
       if (library == framework::LibraryType::kPlain &&
-          platform::CanMKLDNNBeUsed(ctx) &&
-          static_cast<framework::proto::VarType::Type>(dtype) ==
-              framework::proto::VarType::FP32 &&
+          this->CanMKLDNNBeUsed(ctx, data_type) &&
+          (data_type == framework::proto::VarType::FP32 ||
+           data_type == framework::proto::VarType::BF16) &&
           ctx.OutputVar("Out")->IsType<framework::LoDTensor>()) {
         if (std::all_of(x_vars.begin(), x_vars.end(),
                         [](const framework::Variable* v) {
                           return v->IsType<framework::LoDTensor>();
                         })) {
-          return framework::OpKernelType(
-              framework::proto::VarType::FP32, ctx.GetPlace(),
-              framework::DataLayout::kMKLDNN, framework::LibraryType::kMKLDNN);
+          return framework::OpKernelType(data_type, ctx.GetPlace(),
+                                         framework::DataLayout::kMKLDNN,
+                                         framework::LibraryType::kMKLDNN);
         }
       }
 #endif
 
-      return framework::OpKernelType(
-          static_cast<framework::proto::VarType::Type>(dtype), ctx.GetPlace(),
-          layout, library);
-    } else if (x_vars[0]->IsType<framework::SelectedRows>()) {
+      return framework::OpKernelType(data_type, ctx.GetPlace(), layout,
+                                     library);
+    } else if (x_vars[0]->IsType<phi::SelectedRows>()) {
       for (auto& var : x_vars) {
-        auto& value = var->Get<framework::SelectedRows>().value();
+        auto& value = var->Get<phi::SelectedRows>().value();
         if (value.IsInitialized()) {
-          return framework::OpKernelType(value.type(), ctx.device_context(),
-                                         layout, library);
+          return framework::OpKernelType(
+              framework::TransToProtoVarType(value.dtype()),
+              ctx.device_context(), layout, library);
         }
       }
       // if input sparse vars are not initialized, use an default kernel type.
@@ -181,15 +184,23 @@ class SumOp : public framework::OperatorWithKernel {
         auto& array = x_var->Get<framework::LoDTensorArray>();
         for (auto& each : array) {
           if (each.numel() != 0 && each.IsInitialized()) {
-            return framework::OpKernelType(each.type(), ctx.device_context(),
-                                           layout, library);
+            return framework::OpKernelType(
+                framework::TransToProtoVarType(each.dtype()),
+                ctx.device_context(), layout, library);
           }
         }
       }
-      PADDLE_THROW("Cannot find the input data type by all input data");
+      PADDLE_THROW(platform::errors::InvalidArgument(
+          "Expected each tensor in Input(x) in sum op has be initialized, but "
+          "some tensor in Input(x) is not be initialized, please check your "
+          "code.",
+          framework::ToTypeName(x_vars[0]->Type())));
     }
-    PADDLE_THROW("Unexpected branch. Input type is %s",
-                 framework::ToTypeName(x_vars[0]->Type()));
+    PADDLE_THROW(platform::errors::InvalidArgument(
+        "Expected type of Input(X) must be Tensor,  SelectedRows or "
+        "LodTensorArray. But got "
+        "unsupport type: %s.",
+        framework::ToTypeName(x_vars[0]->Type())));
   }
 };
 
@@ -208,6 +219,11 @@ class SumOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<bool>("use_mkldnn",
                   "(bool, default false) Only used in mkldnn kernel")
         .SetDefault(false);
+    AddAttr<std::string>(
+        "mkldnn_data_type",
+        "(string, default \"float32\"). Data type of mkldnn kernel")
+        .SetDefault("float32")
+        .InEnum({"float32", "bfloat16"});
     AddComment(R"DOC(This OP is used to sum one or more Tensor or LoDTensor
                     of the input. If the input is LoDTensor, the output only
                     shares LoD information with the first input.)DOC");
@@ -314,4 +330,6 @@ REGISTER_OP_CPU_KERNEL(
     sum, ops::SumKernel<paddle::platform::CPUDeviceContext, float>,
     ops::SumKernel<paddle::platform::CPUDeviceContext, double>,
     ops::SumKernel<paddle::platform::CPUDeviceContext, int>,
+    ops::SumKernel<paddle::platform::CPUDeviceContext,
+                   paddle::platform::bfloat16>,
     ops::SumKernel<paddle::platform::CPUDeviceContext, int64_t>);

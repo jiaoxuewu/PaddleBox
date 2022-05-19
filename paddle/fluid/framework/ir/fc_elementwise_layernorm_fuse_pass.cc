@@ -13,10 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/ir/fc_elementwise_layernorm_fuse_pass.h"
+
 #include <string>
-#include <unordered_set>
-#include <vector>
+
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
+#include "paddle/fluid/framework/op_version_registry.h"
+
+namespace paddle {
+namespace framework {
+namespace ir {
+class Node;
+}  // namespace ir
+}  // namespace framework
+}  // namespace paddle
 
 namespace paddle {
 namespace framework {
@@ -128,6 +137,70 @@ static bool IsEqual(const std::vector<T> &x, const std::vector<T> &y) {
   return true;
 }
 
+FCElementwiseLayerNormFusePass::FCElementwiseLayerNormFusePass() {
+  AddOpCompat(OpCompat("fc"))
+      .AddInput("Input")
+      .IsTensor()
+      .End()
+      .AddInput("W")
+      .IsTensor()
+      .End()
+      .AddInput("Bias")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("in_num_col_dims")
+      .IsNumGE(1)
+      .End()
+      .AddAttr("activation_type")
+      .IsStringIn({"relu", ""})
+      .End();
+
+  AddOpCompat(OpCompat("layer_norm"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddInput("Scale")
+      .IsTensor()
+      .End()
+      .AddInput("Bias")
+      .IsTensor()
+      .End()
+      .AddOutput("Y")
+      .IsTensor()
+      .End()
+      .AddOutput("Mean")
+      .IsOptional()
+      .End()
+      .AddOutput("Variance")
+      .IsOptional()
+      .End()
+
+      .AddAttr("epsilon")
+      .IsNumGE(0.0f)
+      .IsNumLE(0.001f)
+      .End()
+      .AddAttr("begin_norm_axis")
+      .IsNumGT(0)
+      .End();
+
+  AddOpCompat(OpCompat("elementwise_add"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddInput("Y")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("axis")
+      .IsIntIn({-1, 0})
+      .End();
+}
+
 void FCElementwiseLayerNormFusePass::ApplyImpl(ir::Graph *graph) const {
   PADDLE_ENFORCE_NOT_NULL(graph,
                           platform::errors::InvalidArgument(
@@ -148,6 +221,11 @@ void FCElementwiseLayerNormFusePass::ApplyImpl(ir::Graph *graph) const {
                      Graph *graph) {
     if (subgraph.count(x) <= 0) {
       LOG(WARNING) << "The subgraph is empty.";
+      return;
+    }
+
+    if (!IsCompat(subgraph, graph)) {
+      LOG(WARNING) << "Pass in op compat failed.";
       return;
     }
 
@@ -177,8 +255,8 @@ void FCElementwiseLayerNormFusePass::ApplyImpl(ir::Graph *graph) const {
     int begin_norm_axis =
         BOOST_GET_CONST(int, layer_norm->Op()->GetAttr("begin_norm_axis"));
     auto layer_norm_x_dims = fc_out->Var()->GetShape();
-    auto layer_norm_x_mat_dims = framework::flatten_to_2d(
-        framework::make_ddim(layer_norm_x_dims), begin_norm_axis);
+    auto layer_norm_x_mat_dims =
+        phi::flatten_to_2d(phi::make_ddim(layer_norm_x_dims), begin_norm_axis);
     if (fc_w->Var()->GetShape()[1] != layer_norm_x_mat_dims[1]) {
       return;
     }
@@ -261,3 +339,9 @@ void FCElementwiseLayerNormFusePass::ApplyImpl(ir::Graph *graph) const {
 
 REGISTER_PASS(fc_elementwise_layernorm_fuse_pass,
               paddle::framework::ir::FCElementwiseLayerNormFusePass);
+REGISTER_PASS_CAPABILITY(fc_elementwise_layernorm_fuse_pass)
+    .AddCombination(
+        paddle::framework::compatible::OpVersionComparatorCombination()
+            .EQ("fc", 0)
+            .LE("elementwise_add", 1)
+            .EQ("layer_norm", 0));

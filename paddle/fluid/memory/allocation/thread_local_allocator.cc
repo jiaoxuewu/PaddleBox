@@ -23,8 +23,7 @@ ThreadLocalAllocatorImpl::ThreadLocalAllocatorImpl(const platform::Place& p)
   if (platform::is_gpu_place(place_)) {
     buddy_allocator_.reset(new memory::detail::BuddyAllocator(
         std::unique_ptr<memory::detail::SystemAllocator>(
-            new memory::detail::GPUAllocator(
-                BOOST_GET_CONST(platform::CUDAPlace, place_).device)),
+            new memory::detail::GPUAllocator(place_.device)),
         platform::GpuMinChunkSize(), platform::GpuMaxChunkSize()));
   } else {
     PADDLE_THROW(platform::errors::Unavailable(
@@ -70,6 +69,10 @@ void ThreadLocalAllocatorImpl::FreeImpl(ThreadLocalAllocation* allocation) {
   VLOG(10) << "ThreadLocalAllocatorImpl::FreeImpl " << allocation;
   buddy_allocator_->Free(allocation->ptr());
   delete allocation;
+}
+
+uint64_t ThreadLocalAllocatorImpl::ReleaseImpl() {
+  return buddy_allocator_->Release();
 }
 
 }  // namespace allocation

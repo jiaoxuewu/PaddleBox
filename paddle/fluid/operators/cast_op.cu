@@ -15,11 +15,19 @@ limitations under the License. */
 #include "paddle/fluid/operators/cast_op.h"
 #include "paddle/fluid/platform/float16.h"
 
-template <typename T>
-using CastOpKernel =
-    paddle::operators::CastOpKernel<paddle::platform::CUDADeviceContext, T>;
+namespace ops = paddle::operators;
+namespace plat = paddle::platform;
 
-REGISTER_OP_CUDA_KERNEL(cast, CastOpKernel<float>, CastOpKernel<double>,
-                        CastOpKernel<int>, CastOpKernel<int64_t>,
-                        CastOpKernel<bool>, CastOpKernel<uint8_t>,
-                        CastOpKernel<paddle::platform::float16>);
+using CUDA = paddle::platform::CUDADeviceContext;
+// See [ why register transfer_dtype_op alias with cast_op? ] in cast_op.cc
+REGISTER_OP_CUDA_KERNEL(transfer_dtype, ops::CastOpKernel<CUDA, float>,
+                        ops::CastOpKernel<CUDA, double>,
+                        ops::CastOpKernel<CUDA, int>,
+                        ops::CastOpKernel<CUDA, int64_t>,
+                        ops::CastOpKernel<CUDA, int16_t>,
+                        ops::CastOpKernel<CUDA, bool>,
+                        ops::CastOpKernel<CUDA, uint8_t>,
+                        ops::CastOpKernel<CUDA, plat::float16>,
+                        ops::CastOpKernel<CUDA, plat::complex<float>>,
+                        ops::CastOpKernel<CUDA, plat::complex<double>>,
+                        ops::CastOpKernel<CUDA, plat::bfloat16>);

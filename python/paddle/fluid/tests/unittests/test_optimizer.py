@@ -23,7 +23,12 @@ import paddle.fluid.core as core
 import paddle.compat as cpt
 import numpy as np
 from paddle.fluid.backward import append_backward
-from paddle.fluid.framework import Program, program_guard
+from paddle.fluid.framework import Program, program_guard, convert_np_dtype_to_dtype_
+from paddle.fluid.framework import _test_eager_guard
+import paddle
+from paddle.io import Dataset
+import numpy
+paddle.enable_static()
 
 
 class TestOptimizer(unittest.TestCase):
@@ -162,10 +167,10 @@ class TestMomentumOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 2)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
         self.assertEqual(init_ops[1].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[1].attr('value'), 0.0)
+        self.assertAlmostEqual(init_ops[1].attr('value'), learning_rate)
+        self.assertEqual(init_ops[0].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[0].attr('value'), 0.0)
 
     def test_nesterov_momentum_optimizer(self):
         init_program = framework.Program()
@@ -215,10 +220,10 @@ class TestMomentumOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 2)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
         self.assertEqual(init_ops[1].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[1].attr('value'), 0.0)
+        self.assertAlmostEqual(init_ops[1].attr('value'), learning_rate)
+        self.assertEqual(init_ops[0].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[0].attr('value'), 0.0)
 
 
 class TestAdagradOptimizer(unittest.TestCase):
@@ -275,10 +280,10 @@ class TestAdagradOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 2)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
         self.assertEqual(init_ops[1].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[1].attr('value'), 0.0)
+        self.assertAlmostEqual(init_ops[1].attr('value'), learning_rate)
+        self.assertEqual(init_ops[0].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[0].attr('value'), 0.0)
 
 
 class TestAdamOptimizer(unittest.TestCase):
@@ -342,8 +347,8 @@ class TestAdamOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 5)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
+        self.assertEqual(init_ops[-1].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[-1].attr('value'), learning_rate)
 
 
 class TestAdamaxOptimizer(unittest.TestCase):
@@ -407,8 +412,8 @@ class TestAdamaxOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 4)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
+        self.assertEqual(init_ops[-1].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[-1].attr('value'), learning_rate)
 
 
 class TestDpsgdOptimizer(unittest.TestCase):
@@ -507,10 +512,10 @@ class TestDecayedAdagradOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 2)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
         self.assertEqual(init_ops[1].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[1].attr('value'), 0.0)
+        self.assertAlmostEqual(init_ops[1].attr('value'), learning_rate)
+        self.assertEqual(init_ops[0].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[0].attr('value'), 0.0)
 
 
 class TestFtrlOptimizer(unittest.TestCase):
@@ -574,8 +579,8 @@ class TestFtrlOptimizer(unittest.TestCase):
         # Check init_program
         init_ops = init_program.global_block().ops
         self.assertEqual(len(init_ops), 3)
-        self.assertEqual(init_ops[0].type, "fill_constant")
-        self.assertAlmostEqual(init_ops[0].attr('value'), learning_rate)
+        self.assertEqual(init_ops[-1].type, "fill_constant")
+        self.assertAlmostEqual(init_ops[-1].attr('value'), learning_rate)
 
 
 class TestLookaheadOptimizer(unittest.TestCase):
@@ -617,7 +622,7 @@ class TestLookaheadOptimizer(unittest.TestCase):
 
 
 class TestRecomputeOptimizer(unittest.TestCase):
-    def net(self, return_input=False, with_dropout=False):
+    def net(self, return_input=False, with_dropout=False, with_seed=False):
         program = framework.Program()
         block = program.global_block()
         mul_x = block.create_parameter(
@@ -626,7 +631,8 @@ class TestRecomputeOptimizer(unittest.TestCase):
             dtype="float32", shape=[10, 8], lod_level=0, name="mul.y")
         mul_out = block.create_var(
             dtype="float32", shape=[5, 8], lod_level=0, name="mul.out")
-        if with_dropout == True:
+
+        if with_dropout is True:
             mul_out_drop = block.create_var(
                 dtype="float32",
                 shape=[5, 8],
@@ -634,6 +640,10 @@ class TestRecomputeOptimizer(unittest.TestCase):
                 name="mul.out.dropout")
             mul_out_mask = block.create_var(
                 dtype="uint8", shape=[5, 8], lod_level=0, name="mul.out.mask")
+            if with_seed is True:
+                seed_out = block.create_var(
+                    dtype="int32", shape=[1], name="seed.out")
+
         b1 = block.create_parameter(
             dtype="float32", shape=[5, 8], lod_level=0, name="b1")
         b1_out = block.create_var(
@@ -650,10 +660,23 @@ class TestRecomputeOptimizer(unittest.TestCase):
                     "Y": mul_y},
             outputs={"Out": mul_out},
             attrs={"x_num_col_dims": 1})
-        if with_dropout == True:
+
+        if with_dropout is True:
+            dropout_inputs = {'X': [mul_out]}
+            if with_seed is True:
+                block.append_op(
+                    type='seed',
+                    outputs={'Out': seed_out},
+                    attrs={
+                        'deterministic': True,
+                        'rng_name': 'rng0',
+                        'force_cpu': True
+                    })
+                dropout_inputs = {'X': [mul_out], 'Seed': [seed_out]}
+
             block.append_op(
                 type='dropout',
-                inputs={'X': [mul_out]},
+                inputs=dropout_inputs,
                 outputs={'Out': [mul_out_drop],
                          'Mask': [mul_out_mask]},
                 attrs={'dropout_prob': 0.5, })
@@ -668,6 +691,7 @@ class TestRecomputeOptimizer(unittest.TestCase):
                 inputs={"X": mul_out,
                         "Y": b1},
                 outputs={"Out": b1_out})
+
         block.append_op(
             type="elementwise_add",
             inputs={"X": b1_out,
@@ -862,6 +886,27 @@ class TestRecomputeOptimizer(unittest.TestCase):
             "sgd", "sgd", "sgd"
         ])
 
+    def test_dropout_with_determinate_seed(self):
+        mul_out, b1_out, b2_out, mean_out = self.net(with_dropout=True,
+                                                     with_seed=True)
+        self.assertEqual(len(mean_out.block.ops), 6)
+        self.assertEqual([op.type for op in mean_out.block.ops], [
+            "mul", "seed", "dropout", "elementwise_add", "elementwise_add",
+            "mean"
+        ])
+        sgd_optimizer = optimizer.SGD(learning_rate=1.0)
+        recompute_optimizer = optimizer.RecomputeOptimizer(sgd_optimizer)
+        recompute_optimizer._set_checkpoints([b1_out])
+        opts, params_grads = recompute_optimizer.minimize(mean_out)
+
+        self.assertEqual(len(mean_out.block.ops), 17)
+        self.assertEqual([op.type for op in mean_out.block.ops], [
+            "mul", "seed", "dropout", "elementwise_add", "elementwise_add",
+            "mean", "fill_constant", "mean_grad", "elementwise_add_grad", "mul",
+            "dropout", "elementwise_add_grad", "dropout_grad", "mul_grad",
+            "sgd", "sgd", "sgd"
+        ])
+
     def test_dropout_with_seed(self):
         """
         when we recompute a dropout op, make sure that the recomputed one
@@ -1010,36 +1055,155 @@ class TestGradientMergeOptimizer(unittest.TestCase):
         with framework.program_guard(main_program, init_program):
             ops, params_grads = opt.minimize(cost)
 
-        self.assertEqual(main_program.num_blocks, 4)
+        self.assertEqual(main_program.num_blocks, 2)
 
         # main block
-        self.assertEqual(len(cost.block.ops), 17)
-        self.assertEqual([op.type for op in cost.block.ops], [
-            'mul', 'elementwise_add', 'mean', 'fill_constant', 'mean_grad',
-            'elementwise_add_grad', 'mul_grad', 'increment', 'fill_constant',
-            'fill_constant', 'elementwise_mod', 'cast', 'not_equal',
-            'logical_not', 'conditional_block', 'conditional_block',
-            'conditional_block_grad'
-        ])
-
-        # merge block
-        self.assertEqual(len(main_program.block(1).ops), 2)
-        self.assertEqual([op.type for op in main_program.block(1).ops], [
-            'elementwise_add',
-            'elementwise_add',
-        ])
-
-        # reset block
-        self.assertEqual(len(main_program.block(2).ops), 6)
-        self.assertEqual([op.type for op in main_program.block(2).ops], [
-            'elementwise_add', 'scale', 'elementwise_add', 'scale',
-            'fill_constant', 'fill_constant'
-        ])
+        self.assertEqual(len(cost.block.ops), 13)
+        self.assertEqual(
+            [op.type for op in cost.block.ops],
+            [
+                'mul',
+                'elementwise_add',
+                'mean',
+                'fill_constant',
+                'mean_grad',
+                'elementwise_add_grad',
+                'mul_grad',
+                'increment',  # step += 1
+                'elementwise_mod',  # step %= k_steps
+                'equal',  # cond_var == (step == 0)
+                'elementwise_add',
+                'elementwise_add',
+                'conditional_block',
+            ])
 
         # optimize block
-        self.assertEqual(len(main_program.block(3).ops), 2)
-        self.assertEqual([op.type for op in main_program.block(3).ops],
-                         ['sgd', 'sgd'])
+        self.assertEqual(len(main_program.block(1).ops), 6)
+        self.assertEqual([op.type for op in main_program.block(1).ops], [
+            'scale', 'scale', 'sgd', 'sgd', 'fill_constant', 'fill_constant'
+        ])
+
+
+class TestOptimizerDtype(unittest.TestCase):
+    '''
+    The dtype of optimizer should be inferred by parameters, and the learning rate
+    is cteated with the same dtype.
+    '''
+
+    def check_with_dtype(self, dtype):
+        class MyLayer(paddle.nn.Layer):
+            def __init__(self, dtype):
+                super(MyLayer, self).__init__()
+                self._w = self.create_parameter([2, 3], dtype=dtype)
+                self._b = self.create_parameter([2, 3], dtype=dtype)
+
+            def forward(self, x):
+                return x * self._w + self._b
+
+        with paddle.fluid.dygraph.guard():
+            model = MyLayer(dtype)
+            x = paddle.rand([10, 2, 3], dtype=dtype)
+            loss = model(x)
+            adam = paddle.optimizer.Adam(parameters=model.parameters())
+            loss.backward()
+            adam.step()
+            self.assertEqual(adam._dtype, convert_np_dtype_to_dtype_(dtype))
+
+    def test_float64(self):
+        self.check_with_dtype('float64')
+
+    def test_float32(self):
+        self.check_with_dtype('float32')
+
+    def test_api_eager_dygraph(self):
+        with _test_eager_guard():
+            self.test_float64()
+            self.test_float32()
+
+
+class TestMasterWeightSaveForFP16(unittest.TestCase):
+    '''
+    For Amp-O2, some optimizer(Momentum, Adam ...) will create master weights for parameters to improve the accuracy.
+    Master weights will be saved by optimizer::state_dict.
+    '''
+
+    def check_with_opt_state_dict(self, use_save_load=True):
+        paddle.seed(100)
+        numpy.random.seed(100)
+
+        class SimpleNet(paddle.nn.Layer):
+            def __init__(self, input_size, output_size):
+                super(SimpleNet, self).__init__()
+                self.linears = paddle.nn.LayerList([
+                    paddle.nn.Linear(input_size, output_size) for i in range(1)
+                ])
+
+            def forward(self, x):
+                for i, l in enumerate(self.linears):
+                    x = self.linears[i](x)
+                return x
+
+        input_size = 2  # 设为较大的值
+        output_size = 2  # 设为较大的值
+        batch_size = 2  # batch_size 为8的倍数
+        nums_batch = 10
+
+        class RandomDataset(Dataset):
+            def __init__(self, num_samples):
+                self.num_samples = num_samples
+
+            def __getitem__(self, idx):
+                data = numpy.random.random([input_size]).astype('float16')
+                label = numpy.random.random([output_size]).astype('float16')
+                return data, label
+
+            def __len__(self):
+                return self.num_samples
+
+        dataset = RandomDataset(nums_batch * batch_size)
+        loader = paddle.io.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=True,
+            num_workers=0)
+
+        mse = paddle.nn.MSELoss()
+        model = SimpleNet(input_size, output_size)  # 定义模型
+        optimizer = paddle.optimizer.Momentum(
+            learning_rate=0.0001,
+            parameters=model.parameters(),
+            multi_precision=True)  # 定义优化器
+        scaler = paddle.amp.GradScaler(init_loss_scaling=1024)
+        model = paddle.amp.decorate(models=model, level='O2')
+
+        for i, (data, label) in enumerate(loader):
+            with paddle.amp.auto_cast(level='O2'):
+                output = model(data)
+                loss = mse(output, label)
+            scaled = scaler.scale(loss)
+            scaled.backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.clear_grad(set_to_zero=False)
+
+            if use_save_load and i == 5:
+                paddle.save(model.state_dict(), "model.pdparams")
+                paddle.save(optimizer.state_dict(), "opt.pdopt")
+                model.set_state_dict(paddle.load("model.pdparams"))
+                optimizer.set_state_dict(paddle.load("opt.pdopt"))
+
+        return loss.numpy()
+
+    def test_with_state_dict(self):
+        if core.is_compiled_with_cuda():
+            with fluid.dygraph.guard():
+                out_use_state_dict = self.check_with_opt_state_dict(
+                    use_save_load=True)
+                out_no_state_dict = self.check_with_opt_state_dict(
+                    use_save_load=False)
+            self.assertTrue(
+                np.array_equal(out_use_state_dict, out_no_state_dict))
 
 
 if __name__ == '__main__':

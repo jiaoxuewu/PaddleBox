@@ -18,6 +18,7 @@ limitations under the License. */
 #include <thread>  // NOLINT
 
 #include "gflags/gflags.h"
+#include "paddle/fluid/framework/convert_utils.h"
 #include "paddle/fluid/inference/api/api_impl.h"
 #include "paddle/fluid/inference/tests/test_helper.h"
 
@@ -36,20 +37,23 @@ namespace paddle {
 PaddleTensor LodTensorToPaddleTensor(framework::LoDTensor* t) {
   PaddleTensor pt;
 
-  if (t->type() == framework::proto::VarType::INT64) {
-    pt.data.Reset(t->data<void>(), t->numel() * sizeof(int64_t));
+  if (framework::TransToProtoVarType(t->dtype()) ==
+      framework::proto::VarType::INT64) {
+    pt.data.Reset(t->data(), t->numel() * sizeof(int64_t));
     pt.dtype = PaddleDType::INT64;
-  } else if (t->type() == framework::proto::VarType::FP32) {
-    pt.data.Reset(t->data<void>(), t->numel() * sizeof(float));
+  } else if (framework::TransToProtoVarType(t->dtype()) ==
+             framework::proto::VarType::FP32) {
+    pt.data.Reset(t->data(), t->numel() * sizeof(float));
     pt.dtype = PaddleDType::FLOAT32;
-  } else if (t->type() == framework::proto::VarType::INT32) {
-    pt.data.Reset(t->data<void>(), t->numel() * sizeof(int32_t));
+  } else if (framework::TransToProtoVarType(t->dtype()) ==
+             framework::proto::VarType::INT32) {
+    pt.data.Reset(t->data(), t->numel() * sizeof(int32_t));
     pt.dtype = PaddleDType::INT32;
   } else {
     PADDLE_THROW(platform::errors::Unimplemented(
         "Unsupported tensor date type. Now only supports INT64, FP32, INT32."));
   }
-  pt.shape = framework::vectorize<int>(t->dims());
+  pt.shape = phi::vectorize<int>(t->dims());
   return pt;
 }
 
@@ -58,19 +62,16 @@ NativeConfig GetConfig() {
   config.model_dir = FLAGS_word2vec_dirname;
   LOG(INFO) << "dirname  " << config.model_dir;
   config.fraction_of_gpu_memory = 0.15;
-#ifdef PADDLE_WITH_CUDA
-  config.use_gpu = true;
-#else
-  config.use_gpu = false;
-#endif
   config.device = 0;
   return config;
 }
 
-void MainWord2Vec(bool use_gpu) {
+void MainWord2Vec(const paddle::PaddlePlace& place) {
   NativeConfig config = GetConfig();
   auto predictor = CreatePaddlePredictor<NativeConfig>(config);
-  config.use_gpu = use_gpu;
+  config.use_gpu = paddle::gpu_place_used(place);
+  config.use_xpu = paddle::xpu_place_used(place);
+  config.use_npu = paddle::npu_place_used(place);
 
   framework::LoDTensor first_word, second_word, third_word, fourth_word;
   framework::LoD lod{{0, 1}};
@@ -117,11 +118,13 @@ void MainWord2Vec(bool use_gpu) {
   }
 }
 
-void MainImageClassification(bool use_gpu) {
+void MainImageClassification(const paddle::PaddlePlace& place) {
   int batch_size = 2;
   bool repeat = false;
   NativeConfig config = GetConfig();
-  config.use_gpu = use_gpu;
+  config.use_gpu = paddle::gpu_place_used(place);
+  config.use_xpu = paddle::xpu_place_used(place);
+  config.use_npu = paddle::npu_place_used(place);
   config.model_dir =
       FLAGS_book_dirname + "/image_classification_resnet.inference.model";
 
@@ -133,7 +136,7 @@ void MainImageClassification(bool use_gpu) {
   // Use normilized image pixels as input data,
   // which should be in the range [0.0, 1.0].
   feed_target_shapes[0][0] = batch_size;
-  framework::DDim input_dims = framework::make_ddim(feed_target_shapes[0]);
+  framework::DDim input_dims = phi::make_ddim(feed_target_shapes[0]);
   SetupTensor<float>(&input, input_dims, static_cast<float>(0),
                      static_cast<float>(1));
   std::vector<framework::LoDTensor*> cpu_feeds;
@@ -162,9 +165,11 @@ void MainImageClassification(bool use_gpu) {
   }
 }
 
-void MainThreadsWord2Vec(bool use_gpu) {
+void MainThreadsWord2Vec(const paddle::PaddlePlace& place) {
   NativeConfig config = GetConfig();
-  config.use_gpu = use_gpu;
+  config.use_gpu = paddle::gpu_place_used(place);
+  config.use_xpu = paddle::xpu_place_used(place);
+  config.use_npu = paddle::npu_place_used(place);
   auto main_predictor = CreatePaddlePredictor<NativeConfig>(config);
 
   // prepare inputs data and reference results
@@ -223,11 +228,13 @@ void MainThreadsWord2Vec(bool use_gpu) {
   }
 }
 
-void MainThreadsImageClassification(bool use_gpu) {
+void MainThreadsImageClassification(const paddle::PaddlePlace& place) {
   constexpr int num_jobs = 4;  // each job run 1 batch
   constexpr int batch_size = 1;
   NativeConfig config = GetConfig();
-  config.use_gpu = use_gpu;
+  config.use_gpu = paddle::gpu_place_used(place);
+  config.use_xpu = paddle::xpu_place_used(place);
+  config.use_npu = paddle::npu_place_used(place);
   config.model_dir =
       FLAGS_book_dirname + "/image_classification_resnet.inference.model";
 
@@ -240,7 +247,7 @@ void MainThreadsImageClassification(bool use_gpu) {
     std::vector<std::vector<int64_t>> feed_target_shapes =
         GetFeedTargetShapes(config.model_dir, /*is_combined*/ false);
     feed_target_shapes[0][0] = batch_size;
-    framework::DDim input_dims = framework::make_ddim(feed_target_shapes[0]);
+    framework::DDim input_dims = phi::make_ddim(feed_target_shapes[0]);
     SetupTensor<float>(&jobs[i], input_dims, 0.f, 1.f);
     paddle_tensor_feeds[i].push_back(LodTensorToPaddleTensor(&jobs[i]));
 
@@ -276,29 +283,51 @@ void MainThreadsImageClassification(bool use_gpu) {
   }
 }
 
-TEST(inference_api_native, word2vec_cpu) { MainWord2Vec(false /*use_gpu*/); }
+TEST(inference_api_native, word2vec_cpu) {
+  MainWord2Vec(paddle::PaddlePlace::kCPU);
+}
 TEST(inference_api_native, word2vec_cpu_threads) {
-  MainThreadsWord2Vec(false /*use_gpu*/);
+  MainThreadsWord2Vec(paddle::PaddlePlace::kCPU);
 }
 TEST(inference_api_native, image_classification_cpu) {
-  MainImageClassification(false /*use_gpu*/);
+  MainImageClassification(paddle::PaddlePlace::kCPU);
 }
 TEST(inference_api_native, image_classification_cpu_threads) {
-  MainThreadsImageClassification(false /*use_gpu*/);
+  MainThreadsImageClassification(paddle::PaddlePlace::kCPU);
 }
 
-#ifdef PADDLE_WITH_CUDA
-TEST(inference_api_native, word2vec_gpu) { MainWord2Vec(true /*use_gpu*/); }
+#ifdef PADDLE_WITH_XPU
+TEST(inference_api_native, word2vec_xpu) {
+  MainWord2Vec(paddle::PaddlePlace::kXPU);
+}
+TEST(inference_api_native, image_classification_xpu) {
+  MainImageClassification(paddle::PaddlePlace::kXPU);
+}
+#endif
+
+#ifdef PADDLE_WITH_ASCEND_CL
+TEST(inference_api_native, word2vec_npu) {
+  MainWord2Vec(paddle::PaddlePlace::kNPU);
+}
+// TEST(inference_api_native, image_classification_npu) {
+//   MainImageClassification(paddle::PaddlePlace::kNPU);
+// }
+#endif
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+TEST(inference_api_native, word2vec_gpu) {
+  MainWord2Vec(paddle::PaddlePlace::kGPU);
+}
 // Turn off temporarily for the unstable result.
 // TEST(inference_api_native, word2vec_gpu_threads) {
-//   MainThreadsWord2Vec(true /*use_gpu*/);
+//   MainThreadsWord2Vec(paddle::PaddlePlace::kGPU);
 // }
 TEST(inference_api_native, image_classification_gpu) {
-  MainImageClassification(true /*use_gpu*/);
+  MainImageClassification(paddle::PaddlePlace::kGPU);
 }
 // Turn off temporarily for the unstable result.
 // TEST(inference_api_native, image_classification_gpu_threads) {
-//   MainThreadsImageClassification(true /*use_gpu*/);
+//   MainThreadsImageClassification(paddle::PaddlePlace::kGPU);
 // }
 #endif
 

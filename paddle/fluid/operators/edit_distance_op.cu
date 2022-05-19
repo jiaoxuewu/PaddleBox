@@ -16,9 +16,9 @@ limitations under the License. */
 #include "paddle/fluid/framework/mixed_vector.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/edit_distance_op.h"
-#include "paddle/fluid/operators/math/math_function.h"
-#include "paddle/fluid/platform/cuda_primitives.h"
-#include "paddle/fluid/platform/gpu_info.h"
+#include "paddle/fluid/platform/device/gpu/gpu_info.h"
+#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -111,13 +111,14 @@ class EditDistanceGPUKernel : public framework::OpKernel<T> {
 
     if (normalized) {
       for (size_t i = 1; i < ref_lod.size(); ++i) {
-        PADDLE_ENFORCE(ref_lod[i] > ref_lod[i - 1],
-                       "Reference string %d is empty.", i);
+        PADDLE_ENFORCE_GT(ref_lod[i], ref_lod[i - 1],
+                          platform::errors::InvalidArgument(
+                              "Reference string %d is empty.", i));
       }
     }
 
     const size_t num_strs = hyp_lod.size() - 1;
-    math::SetConstant<platform::CUDADeviceContext, int64_t> set_constant;
+    phi::funcs::SetConstant<platform::CUDADeviceContext, int64_t> set_constant;
     set_constant(ctx.template device_context<platform::CUDADeviceContext>(),
                  sequence_num, static_cast<int64_t>(num_strs));
 
@@ -134,8 +135,8 @@ class EditDistanceGPUKernel : public framework::OpKernel<T> {
         if (normalized) {
           distance = distance / n;
         }
-        memory::Copy(BOOST_GET_CONST(Place, ctx.GetPlace()), out + num,
-                     platform::CPUPlace(), &distance, sizeof(T), stream);
+        memory::Copy(ctx.GetPlace(), out + num, platform::CPUPlace(), &distance,
+                     sizeof(T), stream);
       } else {
         framework::Tensor dist_t;
         dist_t.Resize({m + 1, n + 1});

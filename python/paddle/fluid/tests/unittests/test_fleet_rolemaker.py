@@ -52,7 +52,7 @@ class TestCloudRoleMaker(unittest.TestCase):
         self.assertTrue(ro.is_server())
         self.assertEqual(ro.worker_num(), 2)
 
-    def test_traing_role(self):
+    def test_training_role(self):
         """Test training role."""
         os.environ["TRAINING_ROLE"] = "TEST"
         ro = role_maker.PaddleCloudRoleMaker(is_collective=False)
@@ -64,11 +64,7 @@ class TestCloudRoleMaker(unittest.TestCase):
         from paddle.fluid.incubate.fleet.parameter_server.pslib import fleet
         from paddle.fluid.incubate.fleet.parameter_server.pslib import PSLib
         from paddle.fluid.incubate.fleet.base.role_maker import GeneralRoleMaker
-        try:
-            import netifaces
-        except:
-            print("warning: no netifaces, skip test_pslib_1")
-            return
+
         os.environ["POD_IP"] = "127.0.0.1"
         os.environ["PADDLE_PORT"] = "36001"
         os.environ["TRAINING_ROLE"] = "TRAINER"

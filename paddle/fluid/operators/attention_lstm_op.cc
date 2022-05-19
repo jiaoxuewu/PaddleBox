@@ -14,10 +14,10 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/attention_lstm_op.h"
 #include <string>
-#include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/operators/math/cpu_vec.h"
-#include "paddle/fluid/operators/math/fc.h"
 #include "paddle/fluid/platform/cpu_info.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
+#include "paddle/phi/kernels/funcs/cpu_vec.h"
+#include "paddle/phi/kernels/funcs/fc_functor.h"
 
 namespace paddle {
 namespace operators {
@@ -44,14 +44,18 @@ void AttentionLSTMOp::InferShape(framework::InferShapeContext* ctx) const {
 
   auto x_dims = ctx->GetInputDim("X");
   const int M = x_dims[1];
-  PADDLE_ENFORCE_EQ(x_dims.size(), 2, platform::errors::InvalidArgument(
-                                          "Input(X)'s rank must be 2."));
+  PADDLE_ENFORCE_EQ(x_dims.size(), 2,
+                    platform::errors::InvalidArgument(
+                        "Expected input(X)'s dimension is 2. But received %d.",
+                        x_dims.size()));
 
   auto w_dims = ctx->GetInputDim("LSTMWeight");
   const int D = w_dims[1] / 4;
   PADDLE_ENFORCE_EQ(
       w_dims.size(), 2,
-      platform::errors::InvalidArgument("Input(LSTMWeight)'s rank must be 2."));
+      platform::errors::InvalidArgument(
+          "Expected input(LSTMWeight)'s dimension is 2.But received %d.",
+          w_dims.size()));
   PADDLE_ENFORCE_EQ(
       w_dims[0], D + M,
       platform::errors::InvalidArgument(
@@ -77,10 +81,13 @@ void AttentionLSTMOp::InferShape(framework::InferShapeContext* ctx) const {
 
   if (ctx->HasInput("H0")) {
     auto h_dims = ctx->GetInputDim("H0");
-    PADDLE_ENFORCE_EQ(h_dims.size(), 2UL, platform::errors::InvalidArgument(
-                                              "Input(H0)'s rank must be 2."));
+    PADDLE_ENFORCE_EQ(
+        h_dims.size(), 2UL,
+        platform::errors::InvalidArgument(
+            "Expected input(H0)'s dimension is 2. But received %d.",
+            h_dims.size()));
     if (ctx->IsRuntime() ||
-        (framework::product(c_dims) > 0 && framework::product(h_dims) > 0)) {
+        (phi::product(c_dims) > 0 && phi::product(h_dims) > 0)) {
       PADDLE_ENFORCE_EQ(h_dims, c_dims,
                         platform::errors::InvalidArgument(
                             "The dimension of Input(H0) and Input(C0) "
@@ -94,7 +101,9 @@ void AttentionLSTMOp::InferShape(framework::InferShapeContext* ctx) const {
                         "Input(AttentionWeight)'s rank must be 2."));
   PADDLE_ENFORCE_EQ(atten_w_dims[0], M + D,
                     platform::errors::InvalidArgument(
-                        "AttentionWeight shapes must be (%d + %d) * 1.", M, D));
+                        "Expected `AttentionWeight` shape is [(%d + %d), 1]. "
+                        "But received shape = [%d, 1], shape[0] is not %d.",
+                        M, D, atten_w_dims[0], M + D));
   PADDLE_ENFORCE_EQ(atten_w_dims[1], 1,
                     platform::errors::InvalidArgument(
                         "AttentionWeight shapes must be (%d + %d) * 1.", M, D));
@@ -260,10 +269,10 @@ use lstm_x_t as input and compute as standard LSTM.
 template <typename T>
 inline void bias_relu(const int n, const T* x, const T* bias, T* y) {
   if (bias) {
-    math::vec_add_bias<T, platform::avx>(n, *bias, x, y);
-    math::vec_relu<T, platform::avx>(n, y, y);
+    phi::funcs::vec_add_bias<T, platform::avx>(n, *bias, x, y);
+    phi::funcs::vec_relu<T, platform::avx>(n, y, y);
   } else {
-    math::vec_relu<T, platform::avx>(n, x, y);
+    phi::funcs::vec_relu<T, platform::avx>(n, x, y);
   }
 }
 
@@ -274,14 +283,14 @@ inline void vec_softmax(const int n, const T* x, T* y) {
   for (int i = 1; i < n; ++i) {
     scalar = scalar < x[i] ? x[i] : scalar;
   }
-  math::vec_add_bias<T, platform::avx>(n, -scalar, x, y);  // sub
-  math::vec_exp<T>(n, y, y);                               // exp
+  phi::funcs::vec_add_bias<T, platform::avx>(n, -scalar, x, y);  // sub
+  phi::funcs::vec_exp<T>(n, y, y);                               // exp
   // sum
   scalar = T(0);
   for (int i = 0; i < n; ++i) {
     scalar += y[i];
   }
-  math::vec_scal<T>(n, static_cast<T>(1) / scalar, y);  // scale
+  phi::funcs::vec_scal<T>(n, static_cast<T>(1) / scalar, y);  // scale
 }
 
 template <typename T>
@@ -335,12 +344,12 @@ class AttentionLSTMKernel : public framework::OpKernel<T> {
     auto& act_cell_str = ctx.Attr<std::string>("cell_activation");
     auto& act_cand_str = ctx.Attr<std::string>("candidate_activation");
     if (platform::MayIUse(platform::avx)) {
-      math::VecActivations<T, platform::avx> act_functor;
+      phi::funcs::VecActivations<T, platform::avx> act_functor;
       act_gate = act_functor(act_gate_str);
       act_cell = act_functor(act_cell_str);
       act_cand = act_functor(act_cand_str);
     } else {
-      math::VecActivations<T, platform::isa_any> act_functor;
+      phi::funcs::VecActivations<T, platform::isa_any> act_functor;
       act_gate = act_functor(act_gate_str);
       act_cell = act_functor(act_cell_str);
       act_cand = act_functor(act_cand_str);
@@ -364,11 +373,11 @@ class AttentionLSTMKernel : public framework::OpKernel<T> {
     T* lstm_x_data = lstm_x->mutable_data<T>(ctx.GetPlace());
     T* lstm_out_data = lstm_out->mutable_data<T>(ctx.GetPlace());
 
-    auto blas = math::GetBlas<platform::CPUDeviceContext, T>(ctx);
+    auto blas = phi::funcs::GetBlas<platform::CPUDeviceContext, T>(ctx);
 
     // x(TxM) * fc (Mx1) part of atten_wgt(M+D)x1
     auto& dev_ctx = ctx.template device_context<platform::CPUDeviceContext>();
-    math::FCFunctor<DeviceContext, T> fc;
+    phi::funcs::FCFunctor<DeviceContext, T> fc;
     fc(dev_ctx, total_T, 1, M, x_data, atten_w_data, atted_x_data,
        atten_b_data);
 

@@ -18,10 +18,38 @@ limitations under the License. */
 #include <vector>
 
 #include "paddle/fluid/framework/attribute.h"
-#include "paddle/fluid/framework/ddim.h"
-#include "paddle/fluid/framework/framework.pb.h"
 #include "paddle/fluid/framework/var_desc.h"
 #include "paddle/fluid/framework/variable.h"
+#include "paddle/phi/core/ddim.h"
+#include "paddle/phi/core/type_defs.h"
+#include "paddle/utils/small_vector.h"
+
+namespace paddle {
+namespace framework {
+namespace proto {
+
+class BlockDesc;
+class OpDesc;
+class OpDesc_Attr;
+class OpDesc_Var;
+class OpProto;
+class OpProto_Attr;
+class OpProto_Var;
+class OpVersion;
+class OpVersionMap;
+class OpVersionMap_OpVersionPair;
+class ProgramDesc;
+class VarDesc;
+class VarType;
+class VarType_LoDTensorArrayDesc;
+class VarType_LoDTensorDesc;
+class VarType_ReaderDesc;
+class VarType_TensorDesc;
+class VarType_Tuple;
+class Version;
+}  // namespace proto
+}  // namespace framework
+}  // namespace paddle
 
 namespace paddle {
 namespace framework {
@@ -35,14 +63,18 @@ class InferShapeContext {
   virtual ~InferShapeContext() = default;
   virtual bool HasInput(const std::string &name) const = 0;
   virtual bool HasOutput(const std::string &name) const = 0;
+  virtual bool HasAttr(const std::string &name) const = 0;
 
+  virtual proto::VarType::Type GetInputVarType(
+      const std::string &name) const = 0;
   virtual std::vector<proto::VarType::Type> GetInputsVarType(
       const std::string &name) const = 0;
   virtual std::vector<proto::VarType::Type> GetOutputsVarType(
       const std::string &name) const = 0;
 
   virtual bool HasInputs(const std::string &name) const = 0;
-  virtual bool HasOutputs(const std::string &name) const = 0;
+  virtual bool HasOutputs(const std::string &name,
+                          bool allow_null = false) const = 0;
 
   virtual DDim GetInputDim(const std::string &name) const = 0;
   virtual std::vector<DDim> GetInputsDim(const std::string &name) const = 0;
@@ -76,10 +108,16 @@ class InferShapeContext {
 
   virtual bool IsRuntime() const = 0;
 
-  virtual std::vector<InferShapeVarPtr> GetInputVarPtrs(
-      const std::string &name) = 0;
-  virtual std::vector<InferShapeVarPtr> GetOutputVarPtrs(
-      const std::string &name) = 0;
+  virtual bool IsRunMKLDNNKernel() const = 0;
+
+  virtual paddle::small_vector<InferShapeVarPtr, phi::kInputSmallVectorSize>
+  GetInputVarPtrs(const std::string &name) const = 0;
+  virtual paddle::small_vector<InferShapeVarPtr, phi::kOutputSmallVectorSize>
+  GetOutputVarPtrs(const std::string &name) const = 0;
+
+  virtual const phi::ArgumentMappingFn *GetPhiArgumentMappingFn() const = 0;
+
+  virtual const phi::KernelSignature *GetPhiDefaultKernelSignature() const = 0;
 
  protected:
   virtual std::vector<DDim> GetRepeatedDims(const std::string &name) const = 0;

@@ -14,7 +14,6 @@
 
 #include "paddle/fluid/operators/jit/kernel_key.h"
 #include <xxhash.h>  // XXH64: 13.8 GB/s
-#include "paddle/fluid/platform/enforce.h"
 
 namespace paddle {
 namespace operators {
@@ -62,6 +61,11 @@ int64_t JitCodeKey<emb_seq_pool_attr_t>(const emb_seq_pool_attr_t& attr) {
 template <>
 int64_t JitCodeKey<sgd_attr_t>(const sgd_attr_t& attr) {
   return attr.grad_width;
+}
+
+template <>
+int64_t JitCodeKey<adam_attr_t>(const adam_attr_t& attr) {
+  return static_cast<int64_t>(attr.beta1 + attr.beta2);
 }
 
 }  // namespace jit

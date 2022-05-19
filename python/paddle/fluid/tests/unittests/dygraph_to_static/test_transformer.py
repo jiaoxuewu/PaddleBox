@@ -15,6 +15,7 @@
 import logging
 import os
 import time
+import tempfile
 import unittest
 
 import numpy as np
@@ -32,7 +33,8 @@ STEP_NUM = 10
 
 
 def train_static(args, batch_generator):
-    paddle.manual_seed(SEED)
+    paddle.enable_static()
+    paddle.seed(SEED)
     paddle.framework.random._manual_program_seed(SEED)
     train_prog = fluid.Program()
     startup_prog = fluid.Program()
@@ -130,7 +132,7 @@ def train_static(args, batch_generator):
 def train_dygraph(args, batch_generator):
     with fluid.dygraph.guard(place):
         if SEED is not None:
-            paddle.manual_seed(SEED)
+            paddle.seed(SEED)
             paddle.framework.random._manual_program_seed(SEED)
         # define data loader
         train_loader = fluid.io.DataLoader.from_generator(capacity=10)
@@ -222,7 +224,7 @@ def train_dygraph(args, batch_generator):
 
 def predict_dygraph(args, batch_generator):
     with fluid.dygraph.guard(place):
-        paddle.manual_seed(SEED)
+        paddle.seed(SEED)
         paddle.framework.random._manual_program_seed(SEED)
 
         # define data loader
@@ -294,7 +296,7 @@ def predict_dygraph(args, batch_generator):
 def predict_static(args, batch_generator):
     test_prog = fluid.Program()
     with fluid.program_guard(test_prog):
-        paddle.manual_seed(SEED)
+        paddle.seed(SEED)
         paddle.framework.random._manual_program_seed(SEED)
 
         # define input and reader
@@ -370,8 +372,21 @@ def predict_static(args, batch_generator):
 
 
 class TestTransformer(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+
+    def tearDwon(self):
+        self.temp_dir.cleanup()
+
     def prepare(self, mode='train'):
         args = util.ModelHyperParams()
+        args.save_dygraph_model_path = os.path.join(
+            self.temp_dir.name, args.save_dygraph_model_path)
+        args.save_static_model_path = os.path.join(self.temp_dir.name,
+                                                   args.save_static_model_path)
+        args.inference_model_dir = os.path.join(self.temp_dir.name,
+                                                args.inference_model_dir)
+        args.output_file = os.path.join(self.temp_dir.name, args.output_file)
         batch_generator = util.get_feed_data_reader(args, mode)
         return args, batch_generator
 
@@ -401,4 +416,6 @@ class TestTransformer(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    # switch into new eager mode
+    with fluid.framework._test_eager_guard():
+        unittest.main()

@@ -12,11 +12,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/softmax_with_cross_entropy_op.h"
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include "paddle/fluid/framework/op_registry.h"
+#include "paddle/fluid/framework/op_version_registry.h"
+#include "paddle/phi/kernels/funcs/axis_utils.h"
 
 namespace paddle {
 namespace operators {
@@ -43,6 +41,18 @@ class SoftmaxWithCrossEntropyOpMaker
         "The outputs value of softmax activation by given the input batch, "
         "which will be used in backward calculation.")
         .AsIntermediate();
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    AddOutput(
+        "Backprop",
+        "(Tensor, default: Tensor<float>), A tensor in same shape with "
+        "Input(Logits). "
+        "The intermediate value used for backward calculation. The calculation "
+        "is :"
+        "exp(logits -max_logits) / sum(exp(logits - max_logits)) - labels, "
+        "where labels is ont-hot."
+        "Currently, the tensor is generated and used in npu/mlu kernel. ")
+        .AsIntermediate();
+#endif
     AddOutput("Loss",
               "(Tensor, default: Tensor<float>), A tensor in same shape with "
               "Input(Logits) "
@@ -53,6 +63,10 @@ class SoftmaxWithCrossEntropyOpMaker
         "(bool, default: false), A flag to indicate whether to interpretant "
         "the given labels as soft labels.")
         .SetDefault(false);
+    AddAttr<bool>(
+        "use_softmax",
+        "(bool, default: true), A flag to indicate whether to do softmax ")
+        .SetDefault(true);
     AddAttr<bool>(
         "numeric_stable_mode",
         "(bool, default: true), A flag to indicate whether to use more "
@@ -118,6 +132,11 @@ class SoftmaxWithCrossEntropyOp : public framework::OperatorWithKernel {
     PADDLE_ENFORCE_EQ(ctx->HasOutput("Softmax"), true,
                       platform::errors::InvalidArgument(
                           "Output(Softmax) should be not null."));
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    PADDLE_ENFORCE_EQ(ctx->HasOutput("Backprop"), true,
+                      platform::errors::InvalidArgument(
+                          "Output(Backprop) should be not null."));
+#endif
     PADDLE_ENFORCE_EQ(
         ctx->HasOutput("Loss"), true,
         platform::errors::InvalidArgument("Output(Loss) should be not null."));
@@ -135,7 +154,7 @@ class SoftmaxWithCrossEntropyOp : public framework::OperatorWithKernel {
                           "Attr(axis) value should be in range [-R, R-1], "
                           "R is the rank of Input(Logits)."));
 
-    axis = CanonicalAxis(axis, logits_rank);
+    axis = phi::funcs::CanonicalAxis(axis, logits_rank);
     for (int i = 0; i < logits_rank; i++) {
       if (i != axis) {
         if (ctx->IsRuntime() || (logits_dims[i] > 0 && labels_dims[i] > 0)) {
@@ -176,7 +195,10 @@ class SoftmaxWithCrossEntropyOp : public framework::OperatorWithKernel {
     }
 
     ctx->SetOutputDim("Softmax", logits_dims);
-
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    ctx->SetOutputDim("Backprop", logits_dims);
+    ctx->ShareLoD("Logits", /*->*/ "Backprop");
+#endif
     logits_dims[axis] = 1;
     ctx->SetOutputDim("Loss", logits_dims);
 
@@ -204,6 +226,11 @@ class SoftmaxWithCrossEntropyOpGrad : public framework::OperatorWithKernel {
     PADDLE_ENFORCE_EQ(ctx->HasInput("Softmax"), true,
                       platform::errors::InvalidArgument(
                           "Input(Softmax) should be not null."));
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    PADDLE_ENFORCE_EQ(ctx->HasInput("Backprop"), true,
+                      platform::errors::InvalidArgument(
+                          "Input(Backprop) should be not null."));
+#endif
     PADDLE_ENFORCE_EQ(
         ctx->HasInput("Label"), true,
         platform::errors::InvalidArgument("Input(Label) should be not null."));
@@ -224,7 +251,7 @@ class SoftmaxWithCrossEntropyOpGrad : public framework::OperatorWithKernel {
                           "Attr(axis) value should be in range [-R, R-1], "
                           "R is the rank of Input(Logits)."));
 
-    axis = CanonicalAxis(axis, softmax_rank);
+    axis = phi::funcs::CanonicalAxis(axis, softmax_rank);
     for (int i = 0; i < softmax_rank; i++) {
       if (i != axis) {
         if (ctx->IsRuntime() || (softmax_dims[i] > 0 && labels_dims[i] > 0)) {
@@ -280,6 +307,9 @@ class SoftmaxGradMaker : public framework::SingleGradOpMaker<T> {
     grad_op->SetType("softmax_with_cross_entropy_grad");
     grad_op->SetInput("Label", this->Input("Label"));
     grad_op->SetInput("Softmax", this->Output("Softmax"));
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    grad_op->SetInput("Backprop", this->Output("Backprop"));
+#endif
     grad_op->SetInput(framework::GradVarName("Loss"), this->OutputGrad("Loss"));
     grad_op->SetOutput(framework::GradVarName("Logits"),
                        this->InputGrad("Logits"));
@@ -306,9 +336,28 @@ REGISTER_OPERATOR(softmax_with_cross_entropy, ops::SoftmaxWithCrossEntropyOp,
 REGISTER_OPERATOR(softmax_with_cross_entropy_grad,
                   ops::SoftmaxWithCrossEntropyOpGrad,
                   ops::SoftmaxWithCrossEntropyGradInplaceInferer);
-REGISTER_OP_CPU_KERNEL(softmax_with_cross_entropy,
-                       ops::SoftmaxWithCrossEntropyKernel<float>,
-                       ops::SoftmaxWithCrossEntropyKernel<double>);
-REGISTER_OP_CPU_KERNEL(softmax_with_cross_entropy_grad,
-                       ops::SoftmaxWithCrossEntropyGradKernel<float>,
-                       ops::SoftmaxWithCrossEntropyGradKernel<double>);
+
+REGISTER_OP_VERSION(softmax_with_cross_entropy)
+#if defined(PADDLE_WITH_ASCEND_CL) || defined(PADDLE_WITH_MLU)
+    .AddCheckpoint(
+        R"ROC(
+              Add a new attribute [use_softmax] )ROC",
+        paddle::framework::compatible::OpVersionDesc().NewAttr(
+            "use_softmax", "A flag to indicate whether to do softmax", true))
+    .AddCheckpoint(
+        R"ROC(
+                Add a new dispensable/intermediate output [backprop] )ROC",
+        paddle::framework::compatible::OpVersionDesc().NewOutput(
+            "Backprop",
+            "The intermediate value used for backward calculation. The "
+            "calculation is :"
+            "exp(logits -max_logits) / sum(exp(logits - max_logits)) - labels, "
+            "where labels is ont-hot."
+            "Currently, the tensor is generated and used in npu/mlu kernel. "));
+#else
+    .AddCheckpoint(
+        R"ROC(
+              Add a new attribute [use_softmax] )ROC",
+        paddle::framework::compatible::OpVersionDesc().NewAttr(
+            "use_softmax", "A flag to indicate whether to do softmax", true));
+#endif

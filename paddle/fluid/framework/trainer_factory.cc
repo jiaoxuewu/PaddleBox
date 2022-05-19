@@ -13,14 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/trainer_factory.h"
+
+#include <stdlib.h>
 #include <memory>
 #include <string>
-#include <unordered_map>
 
-#include "paddle/fluid/framework/trainer.h"
+#include "glog/logging.h"
 
 namespace paddle {
 namespace framework {
+
+class TrainerBase;
 
 typedef std::shared_ptr<TrainerBase> (*CreatetrainerFunction)();
 typedef std::unordered_map<std::string, CreatetrainerFunction> trainerMap;
@@ -63,10 +66,23 @@ std::shared_ptr<TrainerBase> TrainerFactory::CreateTrainer(
 
 REGISTER_TRAINER_CLASS(MultiTrainer);
 REGISTER_TRAINER_CLASS(DistMultiTrainer);
-#if (defined PADDLE_WITH_CUDA) && (defined PADDLE_WITH_PSLIB)
+
+#if defined(PADDLE_WITH_PSCORE)
+REGISTER_TRAINER_CLASS(HeterPipelineTrainer);
+#endif
+
+#if (defined PADDLE_WITH_CUDA || defined PADDLE_WITH_HIP || \
+     defined PADDLE_WITH_XPU) &&                            \
+    (defined PADDLE_WITH_PSLIB) && (!defined(PADDLE_WITH_HETERPS))
 REGISTER_TRAINER_CLASS(HeterXpuTrainer);
 #endif
-#if defined(PADDLE_WITH_NCCL)
+#if (defined PADDLE_WITH_NCCL || defined PADDLE_WITH_RCCL || \
+     defined PADDLE_WITH_XPU_BKCL) &&                        \
+    (defined PADDLE_WITH_PSLIB)
+REGISTER_TRAINER_CLASS(PSGPUTrainer);
+#endif
+#if defined(PADDLE_WITH_NCCL) || defined(PADDLE_WITH_RCCL) || \
+    defined(PADDLE_WITH_ASCEND_CL)
 REGISTER_TRAINER_CLASS(PipelineTrainer);
 #endif
 }  // namespace framework

@@ -20,8 +20,11 @@ namespace paddle {
 namespace framework {
 namespace ir {
 
+class Graph;
+
 class DepthwiseConvMKLDNNPass : public FusePassBase {
  public:
+  DepthwiseConvMKLDNNPass();
   virtual ~DepthwiseConvMKLDNNPass() {}
 
  protected:

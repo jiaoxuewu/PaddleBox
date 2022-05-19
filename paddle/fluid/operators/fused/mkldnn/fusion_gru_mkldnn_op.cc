@@ -12,8 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#include "paddle/fluid/framework/convert_utils.h"
+#include "paddle/fluid/framework/expect.h"
 #include "paddle/fluid/operators/fused/fusion_gru_op.h"
-#include "paddle/fluid/platform/mkldnn_reuse.h"
+#include "paddle/fluid/operators/fused/mkldnn/fusion_rnn_mkldnn.h"
 
 namespace paddle {
 namespace operators {
@@ -25,34 +27,23 @@ using paddle::platform::MKLDNNGetDataType;
 using paddle::platform::MKLDNNMemDesc;
 using platform::to_void_cast;
 
-template <typename T>
-class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
+template <typename T, typename T_out = T>
+class GRUMKLDNNHandler : public RNNMKLDNNHandler<T, dnnl::gru_forward, T_out> {
  public:
   GRUMKLDNNHandler(const paddle::framework::ExecutionContext& ctx,
                    const platform::MKLDNNDeviceContext& dev_ctx,
-                   const mkldnn::engine mkldnn_engine,
-                   platform::Place cpu_place, const LoDTensor* input,
-                   const Tensor* weight_h, const Tensor* h0,
-                   const bool is_reverse, const int64_t N, const int64_t Ti,
-                   const int64_t IC, const int64_t OC,
+                   const dnnl::engine mkldnn_engine, platform::Place cpu_place,
+                   const LoDTensor* input, const Tensor* weight_h,
+                   const Tensor* h0, const bool is_reverse, const int64_t N,
+                   const int64_t Ti, const int64_t IC, const int64_t OC,
                    const std::string& unique_name)
-      : platform::MKLDNNHandlerT<T, dnnl::gru_forward>(
-            dev_ctx, dev_ctx.GetEngine(), cpu_place,
-            platform::CreateKey(unique_name, Ti)),
-        N(N),
-        Ti(Ti),
-        IC(IC),
-        OC(OC) {
-    // Create memory key without Ti because weights, bias and h0 memories
-    // do not depend on Ti size but primitive and input/output memory do
-    if (platform::MKLDNNDeviceContext::tls().get_cur_mkldnn_session_id() !=
-        platform::MKLDNNDeviceContextThreadLocals::kMKLDNNSessionID_Default) {
-      memory_key_ = unique_name;
-    } else {
-      memory_key_ = unique_name + "-t:" + platform::ThreadIDasStr();
-    }
+      : RNNMKLDNNHandler<T, dnnl::gru_forward, T_out>(
+            ctx, dev_ctx, mkldnn_engine, ctx.GetPlace(), input, weight_h, h0,
+            is_reverse, N, Ti, IC, OC, 3,
+            ctx.InputName("X") + ctx.InputName("WeightH")) {
+    const bool is_INT8 = std::is_same<T, uint8_t>::value;
 
-    if (!this->isCached()) {
+    if (unlikely(!this->isCached())) {
       // oneDNN kernel has hardcoded activation functions
       PADDLE_ENFORCE_EQ(
           ctx.Attr<std::string>("gate_activation"), "sigmoid",
@@ -63,6 +54,10 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
           platform::errors::Unimplemented(
               "oneDNN fusion_gru supports only tanh as an activation."));
 
+      // Weights for int8 kernel are of a type s8
+      const auto weights_dt =
+          is_INT8 ? dnnl::memory::data_type::s8 : MKLDNNGetDataType<T>();
+
       // oneDNN RNN dimensions
       const int64_t D = 1;  // Directions
       const int64_t L = 1;  // Layers (PP supports only 1 stacked layer)
@@ -70,20 +65,17 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
 
       // Create memory descriptors
       auto input_md = MKLDNNMemDesc({Ti, N, IC}, MKLDNNGetDataType<T>(),
-                                    MKLDNNMemoryFormat::any);
-      auto weight_x_md = MKLDNNMemDesc(
-          {L, D, IC, G, OC}, MKLDNNGetDataType<T>(), MKLDNNMemoryFormat::any);
-      auto weight_h_md = MKLDNNMemDesc(
-          {L, D, OC, G, OC}, MKLDNNGetDataType<T>(), MKLDNNMemoryFormat::any);
+                                    MKLDNNMemoryFormat::ntc);
+      auto weight_x_md =
+          MKLDNNMemDesc({L, D, IC, G, OC}, weights_dt, MKLDNNMemoryFormat::any);
+      auto weight_h_md =
+          MKLDNNMemDesc({L, D, OC, G, OC}, weights_dt, MKLDNNMemoryFormat::any);
       auto bias_md = MKLDNNMemDesc({L, D, G, OC}, MKLDNNGetDataType<float>(),
                                    MKLDNNMemoryFormat::ldgo);
-      auto hidden_md = MKLDNNMemDesc({Ti, N, OC}, MKLDNNGetDataType<T>(),
-                                     MKLDNNMemoryFormat::any);
-      auto h0_md = dnnl::memory::desc();
-      if (h0) {
-        h0_md = MKLDNNMemDesc({L, D, N, OC}, MKLDNNGetDataType<T>(),
-                              MKLDNNMemoryFormat::ldnc);
-      }
+      auto hidden_md = MKLDNNMemDesc({Ti, N, OC}, MKLDNNGetDataType<T_out>(),
+                                     MKLDNNMemoryFormat::ntc);
+      auto h0_md = MKLDNNMemDesc({L, D, N, OC}, MKLDNNGetDataType<T>(),
+                                 MKLDNNMemoryFormat::ldnc);
 
       // Create GRU oneDNN primitive
       const auto direction =
@@ -91,161 +83,44 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
                      : dnnl::rnn_direction::unidirectional_left2right;
 
       this->AcquireForwardPrimitiveDescriptor(
-          dnnl::prop_kind::forward_inference, direction, input_md, h0_md,
-          weight_x_md, weight_h_md, bias_md, hidden_md, dnnl::memory::desc());
+          this->attr_, dnnl::prop_kind::forward_inference, direction, input_md,
+          h0_md, weight_x_md, weight_h_md, bias_md, hidden_md,
+          dnnl::memory::desc());
     }
   }
 
-  bool is_NTC() {
-    return (platform::GetMKLDNNFormat(this->fwd_pd_->dst_desc()) ==
-            dnnl::memory::format_tag::ntc);
-  }
-
-  void reorderRNNdata(const T* input_data, T* output_data,
-                      std::vector<size_t> lod, const bool is_reverse,
-                      platform::RNNReorderType reorder_type) {
-    switch (reorder_type) {
-      // Reorder input memory [WORDS, C] + LoD -> [N, T, C]
-      case platform::RNNReorderType::PP_NTC: {
-        auto* input_data_iter = input_data;
-        for (int n = 0; n < N; ++n) {
-          const auto num_elements = (lod[n + 1] - lod[n]) * IC;
-          const auto offset = is_reverse ? (Ti * IC - num_elements) : 0;
-          memcpy(output_data + n * Ti * IC + offset, input_data_iter,
-                 sizeof(T) * num_elements);
-          input_data_iter += num_elements;
-        }
-      } break;
-      // Reorder input memory [WORDS, C] + LoD -> [T, N, C]
-      case platform::RNNReorderType::PP_TNC: {
-        auto* input_data_iter = input_data;
-        for (int n = 0; n < N; ++n) {
-          const auto num_elements = (lod[n + 1] - lod[n]);
-          const auto offset = is_reverse ? (Ti - num_elements) : 0;
-          for (size_t t = 0; t < num_elements; ++t) {
-            memcpy(output_data + (t + offset) * N * IC + n * IC,
-                   input_data_iter, sizeof(T) * IC);
-            input_data_iter += IC;
-          }
-        }
-      } break;
-      // Reorder output values to PP format [N, T, C] -> [WORDS, C]
-      case platform::RNNReorderType::NTC_PP: {
-        auto* output_data_iter = output_data;
-        for (int n = 0; n < N; ++n) {
-          const auto num_elements = (lod[n + 1] - lod[n]) * OC;
-          const auto offset = is_reverse ? (Ti * OC - num_elements) : 0;
-          memcpy(output_data_iter, input_data + n * Ti * OC + offset,
-                 sizeof(T) * num_elements);
-          output_data_iter += num_elements;
-        }
-      } break;
-      // Reorder output values to PP format [T, N, C] -> [WORDS, C]
-      case platform::RNNReorderType::TNC_PP: {
-        auto* output_data_iter = output_data;
-        for (int n = 0; n < N; ++n) {
-          const auto num_elements = lod[n + 1] - lod[n];
-          const auto offset = is_reverse ? (Ti - num_elements) : 0;
-          for (size_t t = 0; t < num_elements; ++t) {
-            memcpy(output_data_iter,
-                   input_data + (t + offset) * N * OC + n * OC, sizeof(T) * OC);
-            output_data_iter += OC;
-          }
-        }
-      } break;
-    }
-  }
-
-  std::shared_ptr<dnnl::memory> AcquireInputMemoryWithReorder(
-      const LoDTensor* input, const bool is_reverse) {
-    const auto name = this->key_ + "@input_mem";
-    auto memory_p =
-        std::static_pointer_cast<dnnl::memory>(this->dev_ctx_.GetBlob(name));
-
-    if (!memory_p) {
-      memory_p = std::make_shared<dnnl::memory>(this->fwd_pd_->src_desc(),
-                                                this->engine_);
-      this->dev_ctx_.SetBlob(name, memory_p);
-    }
-
-    const auto& input_lod = input->lod()[0];
-    auto* x_data = input->data<T>();
-
-    auto* x_onednn_data = reinterpret_cast<T*>(memory_p->get_data_handle());
-    memset(x_onednn_data, 0, sizeof(T) * N * Ti * IC);
-
-    if (platform::GetMKLDNNFormat(this->fwd_pd_->src_desc()) ==
-        dnnl::memory::format_tag::ntc) {
-      reorderRNNdata(x_data, x_onednn_data, input_lod, is_reverse,
-                     platform::RNNReorderType::PP_NTC);
-    } else {
-      reorderRNNdata(x_data, x_onednn_data, input_lod, is_reverse,
-                     platform::RNNReorderType::PP_TNC);
-    }
-    return memory_p;
-  }
-
-  std::shared_ptr<dnnl::memory> AcquireOutputMemory() {
-    const auto name = this->key_ + "@output_mem";
-    auto memory_p =
-        std::static_pointer_cast<dnnl::memory>(this->dev_ctx_.GetBlob(name));
-
-    if (!memory_p) {
-      memory_p = std::make_shared<dnnl::memory>(this->fwd_pd_->dst_desc(),
-                                                this->engine_);
-      this->dev_ctx_.SetBlob(name, memory_p);
-    }
-    return memory_p;
-  }
-
-  std::shared_ptr<dnnl::memory> AcquireH0Memory(const Tensor* h0) {
-    const std::string h0_key = memory_key_ + "@h0";
-    auto memory_p =
-        std::static_pointer_cast<dnnl::memory>(this->dev_ctx_.GetBlob(h0_key));
-
-    auto* h0_data = to_void_cast(h0->data<T>());
-
-    if (!memory_p) {
-      memory_p = std::make_shared<dnnl::memory>(
-          this->fwd_pd_->weights_layer_desc(), this->engine_, h0_data);
-      this->dev_ctx_.SetBlob(h0_key, memory_p);
-    } else {
-      memory_p->set_data_handle(h0_data);
-    }
-    return memory_p;
-  }
-
+  template <typename U>
   std::shared_ptr<dnnl::memory> AcquireWeightXMemory(const Tensor* weight_x,
                                                      const bool origin_mode) {
-    const std::string wx_key = memory_key_ + "@weight_x";
+    const std::string wx_key = this->memory_key_ + "@weight_x";
     auto memory_p =
         std::static_pointer_cast<dnnl::memory>(this->dev_ctx_.GetBlob(wx_key));
 
     if (!memory_p) {
       auto user_md =
-          MKLDNNMemDesc({1, 1, IC, 3, OC}, MKLDNNGetDataType<float>(),
-                        MKLDNNMemoryFormat::ldigo);
+          MKLDNNMemDesc({1, 1, this->IC, this->G, this->OC},
+                        MKLDNNGetDataType<U>(), MKLDNNMemoryFormat::ldigo);
       auto user_memory = dnnl::memory(user_md, this->engine_);
 
-      auto* weight_x_data =
-          reinterpret_cast<float*>(user_memory.get_data_handle());
-      memcpy(weight_x_data, weight_x->data<float>(),
-             sizeof(float) * IC * 3 * OC);
+      auto* weight_x_data = reinterpret_cast<U*>(user_memory.get_data_handle());
+      memcpy(weight_x_data, weight_x->data<U>(),
+             sizeof(U) * this->IC * this->G * this->OC);
 
       if (origin_mode == false) {
-        for (int64_t i = 0; i < IC; ++i) {
-          for (int64_t j = 0; j < OC; ++j) {
-            weight_x_data[j] *= -1;
+        for (int64_t i = 0; i < this->IC; ++i) {
+          for (int64_t j = 0; j < this->OC; ++j) {
+            U minus_one(-1.0f);
+            weight_x_data[j] = minus_one * weight_x_data[j];
           }
-          weight_x_data += 3 * OC;
+          weight_x_data += 3 * this->OC;
         }
       }
 
       memory_p = std::make_shared<dnnl::memory>(
           this->fwd_pd_->weights_layer_desc(), this->engine_);
 
-      dnnl::stream astream(this->engine_);
-      dnnl::reorder(user_memory, *memory_p)
+      auto& astream = paddle::platform::MKLDNNDeviceContext::tls().get_stream();
+      dnnl::reorder(user_memory, *memory_p, this->attr_)
           .execute(astream, user_memory, *memory_p);
 
       this->dev_ctx_.SetBlob(wx_key, memory_p);
@@ -253,52 +128,53 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
     return memory_p;
   }
 
+  template <typename U>
   std::shared_ptr<dnnl::memory> AcquireWeightHMemory(const Tensor* weight_h,
                                                      const bool origin_mode) {
-    const std::string wh_key = memory_key_ + "@weight_h";
+    const std::string wh_key = this->memory_key_ + "@weight_h";
     auto memory_p =
         std::static_pointer_cast<dnnl::memory>(this->dev_ctx_.GetBlob(wh_key));
 
     if (!memory_p) {
       auto user_md =
-          MKLDNNMemDesc({1, 1, OC, 3, OC}, MKLDNNGetDataType<float>(),
-                        MKLDNNMemoryFormat::ldigo);
+          MKLDNNMemDesc({1, 1, this->OC, this->G, this->OC},
+                        MKLDNNGetDataType<U>(), MKLDNNMemoryFormat::ldigo);
       auto user_memory = dnnl::memory(user_md, this->engine_);
 
       // Reorder weights_h from PP format [OC, 2OC] + [OC, OC] to
       // oneDNN format [OC, 3OC]
-      auto* weight_h_data =
-          reinterpret_cast<float*>(user_memory.get_data_handle());
-      auto* user_weight_h_data = weight_h->data<float>();
+      auto* weight_h_data = reinterpret_cast<U*>(user_memory.get_data_handle());
+      auto* user_weight_h_data = weight_h->data<U>();
 
       auto src1_iter = user_weight_h_data;
-      auto src2_iter = user_weight_h_data + 2 * OC * OC;
+      auto src2_iter = user_weight_h_data + 2 * this->OC * this->OC;
 
-      for (int64_t c = 0; c < OC; ++c) {
-        memcpy(weight_h_data, src1_iter, 2 * OC * sizeof(float));
-        memcpy(weight_h_data + 2 * OC, src2_iter, OC * sizeof(float));
+      for (int64_t c = 0; c < this->OC; ++c) {
+        memcpy(weight_h_data, src1_iter, 2 * this->OC * sizeof(U));
+        memcpy(weight_h_data + 2 * this->OC, src2_iter, this->OC * sizeof(U));
 
-        src1_iter += 2 * OC;
-        src2_iter += OC;
-        weight_h_data += 3 * OC;
+        src1_iter += 2 * this->OC;
+        src2_iter += this->OC;
+        weight_h_data += 3 * this->OC;
       }
 
-      weight_h_data = reinterpret_cast<float*>(user_memory.get_data_handle());
+      weight_h_data = reinterpret_cast<U*>(user_memory.get_data_handle());
 
       if (origin_mode == false) {
-        for (int64_t i = 0; i < OC; ++i) {
-          for (int64_t j = 0; j < OC; ++j) {
-            weight_h_data[j] *= -1;
+        for (int64_t i = 0; i < this->OC; ++i) {
+          for (int64_t j = 0; j < this->OC; ++j) {
+            U minus_one(-1.0f);
+            weight_h_data[j] = minus_one * weight_h_data[j];
           }
-          weight_h_data += 3 * OC;
+          weight_h_data += 3 * this->OC;
         }
       }
 
       memory_p = std::make_shared<dnnl::memory>(
           this->fwd_pd_->weights_iter_desc(), this->engine_);
 
-      dnnl::stream astream(this->engine_);
-      dnnl::reorder(user_memory, *memory_p)
+      auto& astream = paddle::platform::MKLDNNDeviceContext::tls().get_stream();
+      dnnl::reorder(user_memory, *memory_p, this->attr_)
           .execute(astream, user_memory, *memory_p);
 
       this->dev_ctx_.SetBlob(wh_key, memory_p);
@@ -308,7 +184,7 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
 
   std::shared_ptr<dnnl::memory> AcquireBiasMemory(const Tensor* bias,
                                                   const bool origin_mode) {
-    const std::string bias_key = memory_key_ + "@bias";
+    const std::string bias_key = this->memory_key_ + "@bias";
     auto memory_p = std::static_pointer_cast<dnnl::memory>(
         this->dev_ctx_.GetBlob(bias_key));
 
@@ -319,15 +195,15 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
       if (bias) {
         const float* user_bias_data =
             bias->data<float>();  // Bias in oneDNN is always float
-        memcpy(bias_data, user_bias_data, sizeof(float) * 3 * OC);
+        memcpy(bias_data, user_bias_data, sizeof(float) * this->G * this->OC);
       } else {
         // oneDNN always need bias memory, if it's not provided in PP, let
         // oneDNN allocate memory and set it to 0
-        memset(bias_data, 0, sizeof(float) * 3 * OC);
+        memset(bias_data, 0, sizeof(float) * this->G * this->OC);
       }
 
       if (origin_mode == false && bias) {
-        for (int64_t i = 0; i < OC; ++i) {
+        for (int64_t i = 0; i < this->OC; ++i) {
           bias_data[i] *= -1;
         }
       }
@@ -335,24 +211,25 @@ class GRUMKLDNNHandler : public platform::MKLDNNHandlerT<T, dnnl::gru_forward> {
     }
     return memory_p;
   }
-
- private:
-  // RNN dimensions
-  // N - Batch Size
-  // Ti - Max sentence length
-  // IC - Input Channels
-  // OC - Output Channels
-  const int64_t N, Ti, IC, OC;
-
-  // Memory size of weights, bias and h0 does not depend
-  // on Ti size, thus we need another key to cache them
-  std::string memory_key_;
 };
 
 template <typename T>
 class FusionGRUMKLDNNKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
+    const bool is_bf16 = std::is_same<T, paddle::platform::bfloat16>::value;
+    const bool force_fp32_output = ctx.Attr<bool>("force_fp32_output");
+
+    // BF16 does not support force output
+    if (!is_bf16 && force_fp32_output) {
+      RunKernel<float>(ctx);
+    } else {
+      RunKernel<T>(ctx);
+    }
+  }
+
+  template <typename Tout = T>
+  void RunKernel(const framework::ExecutionContext& ctx) const {
     auto& dev_ctx =
         ctx.template device_context<platform::MKLDNNDeviceContext>();
     const auto& mkldnn_engine = dev_ctx.GetEngine();
@@ -364,14 +241,17 @@ class FusionGRUMKLDNNKernel : public framework::OpKernel<T> {
     const auto* weight_h = ctx.Input<Tensor>("WeightH");
     const auto* bias = ctx.Input<Tensor>("Bias");
     auto* hidden = ctx.Output<LoDTensor>("Hidden");
-
+    auto x_dims = input->dims();
+    auto x_mat_dims = (x_dims.size() == 3 && x_dims[1] == 1)
+                          ? phi::flatten_to_2d(x_dims, 1)
+                          : x_dims;
     // Get attributes
     const bool is_reverse = ctx.Attr<bool>("is_reverse");
     const bool origin_mode = ctx.Attr<bool>("origin_mode");
 
     // Get tensor dimensions
-    const auto x_dims = framework::vectorize(input->dims());
-    const auto weight_h_dims = framework::vectorize(weight_h->dims());
+    const auto x_mat_dims_vec = phi::vectorize(x_mat_dims);
+    const auto weight_h_dims = phi::vectorize(weight_h->dims());
     const auto& input_lod = input->lod()[0];
 
     // Calculate RNN dimensions
@@ -384,43 +264,65 @@ class FusionGRUMKLDNNKernel : public framework::OpKernel<T> {
           }
           return res;
         }();
-    const int64_t IC = x_dims[1];         // Input channels
-    const int64_t OC = weight_h_dims[0];  // Output channels
+    const int64_t IC = x_mat_dims_vec[1];  // Input channels
+    const int64_t OC = weight_h_dims[0];   // Output channels
 
-    GRUMKLDNNHandler<T> handler(ctx, dev_ctx, mkldnn_engine, ctx.GetPlace(),
-                                input, weight_h, h0, is_reverse, N, Ti, IC, OC,
-                                ctx.InputName("X") + ctx.InputName("WeightH"));
+    GRUMKLDNNHandler<T, Tout> handler(
+        ctx, dev_ctx, mkldnn_engine, ctx.GetPlace(), input, weight_h, h0,
+        is_reverse, N, Ti, IC, OC,
+        ctx.InputName("X") + ctx.InputName("WeightH"));
 
     auto input_memory_p =
         handler.AcquireInputMemoryWithReorder(input, is_reverse);
-    auto weight_x_memory_p =
-        handler.AcquireWeightXMemory(weight_x, origin_mode);
-    auto weight_h_memory_p =
-        handler.AcquireWeightHMemory(weight_h, origin_mode);
+
+    std::shared_ptr<dnnl::memory> h0_memory_p, weight_h_memory_p,
+        weight_x_memory_p;
+
+    if (framework::TransToProtoVarType(weight_h->dtype()) ==
+        paddle::framework::proto::VarType_Type_FP32) {
+      h0_memory_p = handler.template AcquireH0Memory<float>(h0);
+      weight_x_memory_p =
+          handler.template AcquireWeightXMemory<float>(weight_x, origin_mode);
+      weight_h_memory_p =
+          handler.template AcquireWeightHMemory<float>(weight_h, origin_mode);
+    } else if (framework::TransToProtoVarType(weight_h->dtype()) ==
+               paddle::framework::proto::VarType_Type_BF16) {
+      h0_memory_p =
+          handler.template AcquireH0Memory<paddle::platform::bfloat16>(h0);
+      weight_x_memory_p =
+          handler.template AcquireWeightXMemory<paddle::platform::bfloat16>(
+              weight_x, origin_mode);
+      weight_h_memory_p =
+          handler.template AcquireWeightHMemory<paddle::platform::bfloat16>(
+              weight_h, origin_mode);
+    } else {
+      h0_memory_p = handler.template AcquireH0Memory<uint8_t>(h0);
+      weight_x_memory_p =
+          handler.template AcquireWeightXMemory<int8_t>(weight_x, origin_mode);
+      weight_h_memory_p =
+          handler.template AcquireWeightHMemory<int8_t>(weight_h, origin_mode);
+    }
+
     auto bias_memory_p = handler.AcquireBiasMemory(bias, origin_mode);
     auto hidden_onednn_memory_p = handler.AcquireOutputMemory();
 
     std::unordered_map<int, dnnl::memory> gru_args = {
         {DNNL_ARG_SRC_LAYER, *input_memory_p},
+        {DNNL_ARG_SRC_ITER, *h0_memory_p},
         {DNNL_ARG_WEIGHTS_LAYER, *weight_x_memory_p},
         {DNNL_ARG_WEIGHTS_ITER, *weight_h_memory_p},
         {DNNL_ARG_BIAS, *bias_memory_p},
         {DNNL_ARG_DST_LAYER, *hidden_onednn_memory_p}};
 
-    if (h0) {
-      auto h0_memory_p = handler.AcquireH0Memory(h0);
-      gru_args.insert({DNNL_ARG_SRC_ITER, *h0_memory_p});
-    }
-
     auto gru_forward_p = handler.AcquireForwardPrimitive();
 
-    dnnl::stream astream(mkldnn_engine);
+    auto& astream = platform::MKLDNNDeviceContext::tls().get_stream();
     gru_forward_p->execute(astream, gru_args);
     astream.wait();
 
-    auto* hidden_onednn_data =
-        reinterpret_cast<T*>(hidden_onednn_memory_p->get_data_handle());
-    auto* hidden_data = hidden->mutable_data<T>(ctx.GetPlace());
+    auto* hidden_onednn_data = hidden_onednn_memory_p->get_data_handle();
+    auto* hidden_data =
+        to_void_cast(hidden->mutable_data<Tout>(ctx.GetPlace()));
     if (handler.is_NTC()) {
       handler.reorderRNNdata(hidden_onednn_data, hidden_data, input_lod,
                              is_reverse, platform::RNNReorderType::NTC_PP);
@@ -436,4 +338,6 @@ class FusionGRUMKLDNNKernel : public framework::OpKernel<T> {
 
 namespace ops = paddle::operators;
 REGISTER_OP_KERNEL(fusion_gru, MKLDNN, paddle::platform::CPUPlace,
-                   ops::FusionGRUMKLDNNKernel<float>);
+                   ops::FusionGRUMKLDNNKernel<float>,
+                   ops::FusionGRUMKLDNNKernel<paddle::platform::bfloat16>,
+                   ops::FusionGRUMKLDNNKernel<uint8_t>);

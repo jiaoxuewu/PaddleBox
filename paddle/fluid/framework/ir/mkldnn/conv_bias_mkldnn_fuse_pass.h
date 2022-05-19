@@ -13,18 +13,23 @@
 // limitations under the License.
 #pragma once
 #include <string>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/framework/ir/graph.h"
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
 #include "paddle/fluid/framework/ir/pass.h"
+
 namespace paddle {
 namespace framework {
 namespace ir {
 /*
 * Fuse the Conv and Elementwise_add to a ConvBiasOp.
 */
+class Graph;
+
 class ConvBiasFusePass : public FusePassBase {
  public:
+  ConvBiasFusePass();
   virtual ~ConvBiasFusePass() {}
   virtual std::string type() const { return "conv2d"; }
 
@@ -37,11 +42,13 @@ class ConvBiasFusePass : public FusePassBase {
 */
 class Conv2DTransposeBiasFusePass : public ConvBiasFusePass {
  public:
+  Conv2DTransposeBiasFusePass();
   std::string type() const override { return "conv2d_transpose"; }
 };
 
 class Conv3DBiasFusePass : public ConvBiasFusePass {
  public:
+  Conv3DBiasFusePass();
   std::string type() const override { return "conv3d"; }
 };
 }  // namespace ir

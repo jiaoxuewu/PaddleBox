@@ -24,6 +24,10 @@ from paddle.fluid.layer_helper import LayerHelper
 from paddle.fluid.dygraph.nn import Conv2D, Pool2D, BatchNorm, Linear
 from paddle.fluid.dygraph.base import to_variable
 from test_imperative_base import new_program_scope
+from paddle.fluid.framework import _test_eager_guard
+
+if fluid.is_compiled_with_cuda():
+    fluid.set_flags({'FLAGS_cudnn_deterministic': True})
 
 batch_size = 8
 train_parameters = {
@@ -56,7 +60,7 @@ def optimizer_setting(params, parameter_list=None):
         #bd = [step * e for e in ls["epochs"]]
         #base_lr = params["lr"]
         #lr = [base_lr * (0.1**i) for i in range(len(bd) + 1)]
-        if fluid.in_dygraph_mode():
+        if fluid._non_static_mode():
             optimizer = fluid.optimizer.SGD(learning_rate=0.01,
                                             parameter_list=parameter_list)
         else:
@@ -307,8 +311,9 @@ class TestImperativeResneXt(unittest.TestCase):
         batch_size = train_parameters["batch_size"]
         batch_num = 1
         epoch_num = 1
-        with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+
+        def run_dygraph():
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
 
             se_resnext = SeResNeXt()
@@ -340,7 +345,9 @@ class TestImperativeResneXt(unittest.TestCase):
                     label.stop_gradient = True
 
                     out = se_resnext(img)
-                    loss = fluid.layers.cross_entropy(input=out, label=label)
+                    softmax_out = fluid.layers.softmax(out, use_cudnn=False)
+                    loss = fluid.layers.cross_entropy(
+                        input=softmax_out, label=label)
                     avg_loss = fluid.layers.mean(x=loss)
 
                     dy_out = avg_loss.numpy()
@@ -366,8 +373,19 @@ class TestImperativeResneXt(unittest.TestCase):
                     for param in se_resnext.parameters():
                         dy_param_value[param.name] = param.numpy()
 
+                    return dy_out, dy_param_init_value, dy_param_value, dy_grad_value
+
+        with fluid.dygraph.guard():
+            dy_out, dy_param_init_value, dy_param_value, dy_grad_value = run_dygraph(
+            )
+
+        with fluid.dygraph.guard():
+            with _test_eager_guard():
+                eager_out, eager_param_init_value, eager_param_value, eager_grad_value = run_dygraph(
+                )
+
         with new_program_scope():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
 
             exe = fluid.Executor(fluid.CPUPlace(
@@ -386,7 +404,8 @@ class TestImperativeResneXt(unittest.TestCase):
                 name='pixel', shape=[3, 224, 224], dtype='float32')
             label = fluid.layers.data(name='label', shape=[1], dtype='int64')
             out = se_resnext(img)
-            loss = fluid.layers.cross_entropy(input=out, label=label)
+            softmax_out = fluid.layers.softmax(out, use_cudnn=False)
+            loss = fluid.layers.cross_entropy(input=softmax_out, label=label)
             avg_loss = fluid.layers.mean(x=loss)
             optimizer.minimize(avg_loss)
 
@@ -443,7 +462,9 @@ class TestImperativeResneXt(unittest.TestCase):
                         static_grad_value[static_grad_name_list[
                             i - grad_start_pos]] = out[i]
 
-        self.assertTrue(np.allclose(static_out, dy_out))
+        self.assertTrue(
+            np.allclose(static_out, dy_out),
+            "\nstatic_out: {}\ndy_out: {}".format(static_out, dy_out))
 
         self.assertEqual(len(dy_param_init_value), len(static_param_init_value))
 
@@ -455,16 +476,49 @@ class TestImperativeResneXt(unittest.TestCase):
         self.assertEqual(len(dy_grad_value), len(static_grad_value))
 
         for key, value in six.iteritems(static_grad_value):
-            self.assertTrue(np.allclose(value, dy_grad_value[key]))
+            self.assertTrue(
+                np.allclose(value, dy_grad_value[key]),
+                "\nstatic_grad_value: {}\ndy_grad_value: {}".format(
+                    value, dy_grad_value[key]))
             self.assertTrue(np.isfinite(value.all()))
             self.assertFalse(np.isnan(value.any()))
 
         self.assertEqual(len(dy_param_value), len(static_param_value))
         for key, value in six.iteritems(static_param_value):
-            self.assertTrue(np.allclose(value, dy_param_value[key]))
+            self.assertTrue(
+                np.allclose(value, dy_param_value[key]),
+                "\nstatic_param_value: {}\ndy_param_value: {}".format(
+                    value, dy_param_value[key]))
             self.assertTrue(np.isfinite(value.all()))
             self.assertFalse(np.isnan(value.any()))
 
+        # check eager
+        self.assertTrue(
+            np.allclose(static_out, eager_out),
+            "\nstatic_out: {}\neager_out: {}".format(static_out, eager_out))
+
+        self.assertEqual(
+            len(eager_param_init_value), len(static_param_init_value))
+
+        for key, value in six.iteritems(static_param_init_value):
+            self.assertTrue(np.allclose(value, eager_param_init_value[key]))
+
+        self.assertEqual(len(eager_grad_value), len(static_grad_value))
+
+        for key, value in six.iteritems(static_grad_value):
+            self.assertTrue(
+                np.allclose(value, eager_grad_value[key]),
+                "\nstatic_grad_value: {}\neager_grad_value: {}".format(
+                    value, eager_grad_value[key]))
+
+        self.assertEqual(len(eager_param_value), len(static_param_value))
+        for key, value in six.iteritems(static_param_value):
+            self.assertTrue(
+                np.allclose(value, eager_param_value[key]),
+                "\nstatic_param_value: {}\neagear_param_value: {}".format(
+                    value, eager_param_value[key]))
+
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

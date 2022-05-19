@@ -9,10 +9,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/elementwise/elementwise_pow_op.h"
-#include <memory>
 #include <string>
+
 #include "paddle/fluid/operators/elementwise/elementwise_op.h"
+
+namespace paddle {
+namespace framework {
+class OpDesc;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+namespace platform {
+class CPUDeviceContext;
+}  // namespace platform
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -57,15 +68,11 @@ REGISTER_OPERATOR(elementwise_pow, ops::ElementwiseOp,
                   ops::ElementwisePowOpGradMaker<paddle::imperative::OpBase>);
 REGISTER_OPERATOR(elementwise_pow_grad, ops::ElementwiseOpGrad);
 
-REGISTER_OP_CPU_KERNEL(
-    elementwise_pow,
-    ops::ElementwisePowKernel<paddle::platform::CPUDeviceContext, float>,
-    ops::ElementwisePowKernel<paddle::platform::CPUDeviceContext, double>,
-    ops::ElementwisePowKernel<paddle::platform::CPUDeviceContext, int>,
-    ops::ElementwisePowKernel<paddle::platform::CPUDeviceContext, int64_t>);
-REGISTER_OP_CPU_KERNEL(
-    elementwise_pow_grad,
-    ops::ElementwisePowGradKernel<paddle::platform::CPUDeviceContext, float>,
-    ops::ElementwisePowGradKernel<paddle::platform::CPUDeviceContext, double>,
-    ops::ElementwisePowGradKernel<paddle::platform::CPUDeviceContext, int>,
-    ops::ElementwisePowGradKernel<paddle::platform::CPUDeviceContext, int64_t>);
+REGISTER_OP_VERSION(elementwise_pow)
+    .AddCheckpoint(
+        R"ROC(Register elementwise_pow for adding the attribute of Scale_y)ROC",
+        paddle::framework::compatible::OpVersionDesc().NewAttr(
+            "Scale_y",
+            "In order to support the function of scaling the input Y when "
+            "using the operator of elementwise_pow.",
+            1.0f));

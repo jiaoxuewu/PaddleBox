@@ -19,6 +19,7 @@ import numpy as np
 from op_test import OpTest
 import paddle
 import paddle.fluid.core as core
+from paddle.fluid.framework import _test_eager_guard
 
 
 def numpy_topk(x, k=1, axis=-1, largest=True):
@@ -45,6 +46,7 @@ class TestTopkOp(OpTest):
 
     def setUp(self):
         self.op_type = "top_k_v2"
+        self.python_api = paddle.topk
         self.dtype = np.float64
         self.input_data = np.random.rand(10, 20)
         self.init_args()
@@ -55,43 +57,46 @@ class TestTopkOp(OpTest):
         self.outputs = {'Out': output, 'Indices': indices}
 
     def test_check_output(self):
-        paddle.enable_static()
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        paddle.enable_static()
-        self.check_grad(set(['X']), 'Out')
+        self.check_grad(set(['X']), 'Out', check_eager=True)
 
 
-class TestTopOp1(TestTopkOp):
+class TestTopkOp1(TestTopkOp):
     def init_args(self):
         self.k = 3
         self.axis = 0
+        self.largest = False
+
+
+class TestTopkOp2(TestTopkOp):
+    def init_args(self):
+        self.k = 4
+        self.axis = 0
+        self.largest = False
+
+
+class TestTopkOp3(OpTest):
+    def init_args(self):
+        self.k = 6
+        self.axis = 1
         self.largest = True
 
-
-class TestTopOp2(TestTopkOp):
-    def init_args(self):
-        self.k = 3
-        self.axis = 0
-        self.largest = False
-
-
-class TestTopOp3(TestTopkOp):
-    def init_args(self):
-        self.k = 4
-        self.axis = 0
-        self.largest = False
+    def setUp(self):
+        self.op_type = "top_k_v2"
+        self.python_api = paddle.topk
+        self.dtype = np.float64
+        self.input_data = np.random.rand(16, 100)
+        self.init_args()
+        self.inputs = {'X': self.input_data}
+        self.attrs = {'k': self.k, 'axis': self.axis, 'largest': self.largest}
+        output, indices = numpy_topk(
+            self.input_data, axis=self.axis, k=self.k, largest=self.largest)
+        self.outputs = {'Out': output, 'Indices': indices}
 
 
-class TestTopOp4(TestTopkOp):
-    def init_args(self):
-        self.k = 4
-        self.axis = 0
-        self.largest = False
-
-
-class TestTopkOp5(TestTopkOp):
+class TestTopkOp4(TestTopkOp):
     def init_args(self):
         self.k = 3
         self.axis = 1
@@ -99,6 +104,7 @@ class TestTopkOp5(TestTopkOp):
 
     def setUp(self):
         self.op_type = "top_k_v2"
+        self.python_api = paddle.topk
         self.dtype = np.float64
         self.input_data = np.random.rand(10, 10, 5)
         self.init_args()
@@ -109,7 +115,7 @@ class TestTopkOp5(TestTopkOp):
         self.outputs = {'Out': output, 'Indices': indices}
 
 
-class TestTopkOp6(TestTopkOp):
+class TestTopkOp5(TestTopkOp):
     def init_args(self):
         self.k = 3
         self.axis = 1
@@ -117,8 +123,28 @@ class TestTopkOp6(TestTopkOp):
 
     def setUp(self):
         self.op_type = "top_k_v2"
+        self.python_api = paddle.topk
         self.dtype = np.float64
         self.input_data = np.random.rand(10, 10, 5)
+        self.init_args()
+        self.inputs = {'X': self.input_data}
+        self.attrs = {'k': self.k, 'axis': self.axis, 'largest': self.largest}
+        output, indices = numpy_topk(
+            self.input_data, axis=self.axis, k=self.k, largest=self.largest)
+        self.outputs = {'Out': output, 'Indices': indices}
+
+
+class TestTopkOp6(OpTest):
+    def init_args(self):
+        self.k = 100
+        self.axis = 1
+        self.largest = True
+
+    def setUp(self):
+        self.op_type = "top_k_v2"
+        self.python_api = paddle.topk
+        self.dtype = np.float64
+        self.input_data = np.random.rand(80, 16384)
         self.init_args()
         self.inputs = {'X': self.input_data}
         self.attrs = {'k': self.k, 'axis': self.axis, 'largest': self.largest}
@@ -134,48 +160,64 @@ class TestTopKAPI(unittest.TestCase):
         self.large_input_data = np.random.rand(2, 1030)
 
     def run_dygraph(self, place):
-        paddle.disable_static(place)
-        input_tensor = paddle.to_tensor(self.input_data)
-        large_input_tensor = paddle.to_tensor(self.large_input_data)
-        # test case for basic test case 1
-        paddle_result = paddle.topk(input_tensor, k=2)
-        numpy_result = numpy_topk(self.input_data, k=2)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 2 with axis
-        paddle_result = paddle.topk(input_tensor, k=2, axis=1)
-        numpy_result = numpy_topk(self.input_data, k=2, axis=1)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 3 with tensor K
-        k_tensor = paddle.to_tensor(np.array([2]))
-        paddle_result = paddle.topk(input_tensor, k=k_tensor, axis=1)
-        numpy_result = numpy_topk(self.input_data, k=2, axis=1)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 4 with tensor largest
-        k_tensor = paddle.to_tensor(np.array([2]))
-        paddle_result = paddle.topk(input_tensor, k=2, axis=1, largest=False)
-        numpy_result = numpy_topk(self.input_data, k=2, axis=1, largest=False)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 5 with axis -1
-        k_tensor = paddle.to_tensor(np.array([2]))
-        paddle_result = paddle.topk(input_tensor, k=2, axis=-1, largest=False)
-        numpy_result = numpy_topk(self.input_data, k=2, axis=-1, largest=False)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 6 for the partial sort 
-        paddle_result = paddle.topk(large_input_tensor, k=1, axis=-1)
-        numpy_result = numpy_topk(self.large_input_data, k=1, axis=-1)
-        self.assertTrue(np.allclose(paddle_result[0].numpy(), numpy_result[0]))
-        self.assertTrue(np.allclose(paddle_result[1].numpy(), numpy_result[1]))
-        # test case for basic test case 7 for the unsorted 
-        paddle_result = paddle.topk(input_tensor, k=2, axis=1, sorted=False)
-        sort_paddle = numpy_topk(
-            np.array(paddle_result[0].numpy()), axis=1, k=2)
-        numpy_result = numpy_topk(self.input_data, k=2, axis=1)
-        self.assertTrue(np.allclose(sort_paddle[0], numpy_result[0]))
+        with paddle.fluid.dygraph.guard(place):
+            input_tensor = paddle.to_tensor(self.input_data)
+            large_input_tensor = paddle.to_tensor(self.large_input_data)
+            # test case for basic test case 1
+            paddle_result = paddle.topk(input_tensor, k=2)
+            numpy_result = numpy_topk(self.input_data, k=2)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 2 with axis
+            paddle_result = paddle.topk(input_tensor, k=2, axis=1)
+            numpy_result = numpy_topk(self.input_data, k=2, axis=1)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 3 with tensor K
+            k_tensor = paddle.to_tensor(np.array([2]))
+            paddle_result = paddle.topk(input_tensor, k=k_tensor, axis=1)
+            numpy_result = numpy_topk(self.input_data, k=2, axis=1)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 4 with tensor largest
+            k_tensor = paddle.to_tensor(np.array([2]))
+            paddle_result = paddle.topk(
+                input_tensor, k=2, axis=1, largest=False)
+            numpy_result = numpy_topk(
+                self.input_data, k=2, axis=1, largest=False)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 5 with axis -1
+            k_tensor = paddle.to_tensor(np.array([2]))
+            paddle_result = paddle.topk(
+                input_tensor, k=2, axis=-1, largest=False)
+            numpy_result = numpy_topk(
+                self.input_data, k=2, axis=-1, largest=False)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 6 for the partial sort 
+            paddle_result = paddle.topk(large_input_tensor, k=1, axis=-1)
+            numpy_result = numpy_topk(self.large_input_data, k=1, axis=-1)
+            self.assertTrue(
+                np.allclose(paddle_result[0].numpy(), numpy_result[0]))
+            self.assertTrue(
+                np.allclose(paddle_result[1].numpy(), numpy_result[1]))
+            # test case for basic test case 7 for the unsorted 
+            paddle_result = paddle.topk(input_tensor, k=2, axis=1, sorted=False)
+            sort_paddle = numpy_topk(
+                np.array(paddle_result[0].numpy()), axis=1, k=2)
+            numpy_result = numpy_topk(self.input_data, k=2, axis=1)
+            self.assertTrue(np.allclose(sort_paddle[0], numpy_result[0]))
 
     def run_static(self, place):
         paddle.enable_static()
@@ -189,6 +231,8 @@ class TestTopKAPI(unittest.TestCase):
             result1 = paddle.topk(input_tensor, k=2)
             result2 = paddle.topk(input_tensor, k=2, axis=-1)
             result3 = paddle.topk(input_tensor, k=k_tensor, axis=1)
+            self.assertEqual(result3[0].shape, (6, -1, 8))
+            self.assertEqual(result3[1].shape, (6, -1, 8))
             result4 = paddle.topk(input_tensor, k=2, axis=1, largest=False)
             result5 = paddle.topk(input_tensor, k=2, axis=-1, largest=False)
             result6 = paddle.topk(large_input_tensor, k=1, axis=-1)
@@ -239,6 +283,16 @@ class TestTopKAPI(unittest.TestCase):
             self.run_dygraph(place)
             self.run_static(place)
 
+    def test_errors(self):
+        with paddle.fluid.dygraph.guard():
+            x = paddle.to_tensor([1, 2, 3])
+            with self.assertRaises(BaseException):
+                paddle.topk(x, k=-1)
+
+            with self.assertRaises(BaseException):
+                paddle.topk(x, k=0)
+
 
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

@@ -52,7 +52,7 @@ class CropTensorOp : public framework::OperatorWithKernel {
           }
         }
       }
-      ctx->SetOutputDim("Out", framework::make_ddim(out_dims));
+      ctx->SetOutputDim("Out", phi::make_ddim(out_dims));
 
       return;
     }
@@ -78,7 +78,7 @@ class CropTensorOp : public framework::OperatorWithKernel {
         ctx->ShareLoD("X", /*->*/ "Out");
       } else {
         auto out_dims = std::vector<int>(shape_dim[0], -1);
-        ctx->SetOutputDim("Out", framework::make_ddim(out_dims));
+        ctx->SetOutputDim("Out", phi::make_ddim(out_dims));
       }
       return;
     }
@@ -99,7 +99,7 @@ class CropTensorOp : public framework::OperatorWithKernel {
         }
       }
     }
-    ctx->SetOutputDim("Out", framework::make_ddim(out_shape));
+    ctx->SetOutputDim("Out", phi::make_ddim(out_shape));
   }
 
   framework::OpKernelType GetExpectedKernelType(
@@ -319,3 +319,16 @@ REGISTER_OP_CPU_KERNEL(
     ops::CropTensorGradKernel<paddle::platform::CPUDeviceContext, double>,
     ops::CropTensorGradKernel<paddle::platform::CPUDeviceContext, int>,
     ops::CropTensorGradKernel<paddle::platform::CPUDeviceContext, int64_t>);
+
+REGISTER_OP_CUDA_KERNEL(
+    crop_tensor,
+    ops::CropTensorKernel<paddle::platform::CUDADeviceContext, float>,
+    ops::CropTensorKernel<paddle::platform::CUDADeviceContext, double>,
+    ops::CropTensorKernel<paddle::platform::CUDADeviceContext, int>,
+    ops::CropTensorKernel<paddle::platform::CUDADeviceContext, int64_t>);
+REGISTER_OP_CUDA_KERNEL(
+    crop_tensor_grad,
+    ops::CropTensorGradKernel<paddle::platform::CUDADeviceContext, float>,
+    ops::CropTensorGradKernel<paddle::platform::CUDADeviceContext, double>,
+    ops::CropTensorGradKernel<paddle::platform::CUDADeviceContext, int>,
+    ops::CropTensorGradKernel<paddle::platform::CUDADeviceContext, int64_t>);

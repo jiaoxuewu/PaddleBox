@@ -66,9 +66,23 @@ class TestStrategyConfig(unittest.TestCase):
 
     def test_pipeline_configs(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
-        configs = {"micro_batch": 4}
+        configs = {"micro_batch_size": 4}
         strategy.pipeline_configs = configs
-        self.assertEqual(strategy.pipeline_configs["micro_batch"], 4)
+        self.assertEqual(strategy.pipeline_configs["micro_batch_size"], 4)
+        configs = {"accumulate_steps": 2}
+        strategy.pipeline_configs = configs
+        self.assertEqual(strategy.pipeline_configs["accumulate_steps"], 2)
+
+    def test_hybrid_parallel_configs(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 2,
+            "pp_degree": 4
+        }
+        self.assertEqual(strategy.hybrid_configs["dp_degree"], 1)
+        self.assertEqual(strategy.hybrid_configs["mp_degree"], 2)
+        self.assertEqual(strategy.hybrid_configs["pp_degree"], 4)
 
     def test_localsgd(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
@@ -81,9 +95,17 @@ class TestStrategyConfig(unittest.TestCase):
 
     def test_localsgd_configs(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
-        configs = {"k_steps": 4}
+        configs = {"k_steps": 4, "begin_step": 120}
         strategy.localsgd_configs = configs
         self.assertEqual(strategy.localsgd_configs["k_steps"], 4)
+        self.assertEqual(strategy.localsgd_configs["begin_step"], 120)
+
+    def test_adaptive_localsgd_configs(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {"init_k_steps": 1, "begin_step": 120}
+        strategy.adaptive_localsgd_configs = configs
+        self.assertEqual(strategy.adaptive_localsgd_configs["init_k_steps"], 1)
+        self.assertEqual(strategy.adaptive_localsgd_configs["begin_step"], 120)
 
     def test_dgc(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
@@ -93,6 +115,16 @@ class TestStrategyConfig(unittest.TestCase):
         self.assertEqual(strategy.dgc, False)
         strategy.dgc = "True"
         self.assertEqual(strategy.dgc, False)
+
+    def test_fp16_allreduce(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        strategy.fp16_allreduce = True
+        self.assertEqual(strategy.fp16_allreduce, True)
+        strategy.fp16_allreduce = False
+        self.assertEqual(strategy.fp16_allreduce, False)
+        with self.assertRaises(TypeError):
+            strategy.fp16_allreduce = "True"
+        self.assertEqual(strategy.fp16_allreduce, False)
 
     def test_sync_nccl_allreduce(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
@@ -151,6 +183,22 @@ class TestStrategyConfig(unittest.TestCase):
         strategy.fuse_grad_size_in_MB = "40"
         self.assertEqual(strategy.fuse_grad_size_in_MB, 50)
 
+    def test_last_comm_group_size_MB(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        strategy.last_comm_group_size_MB = 50
+        self.assertEqual(strategy.last_comm_group_size_MB, 50)
+        with self.assertRaises(ValueError):
+            strategy.last_comm_group_size_MB = -1
+
+    def test_find_unused_parameters(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        strategy.find_unused_parameters = True
+        self.assertEqual(strategy.find_unused_parameters, True)
+        strategy.find_unused_parameters = False
+        self.assertEqual(strategy.find_unused_parameters, False)
+        strategy.find_unused_parameters = "True"
+        self.assertEqual(strategy.find_unused_parameters, False)
+
     def test_fuse_grad_size_in_TFLOPS(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
         strategy._fuse_grad_size_in_TFLOPS = 0.1
@@ -207,6 +255,90 @@ class TestStrategyConfig(unittest.TestCase):
         strategy.a_sync_configs = configs
         self.assertEqual(strategy.a_sync_configs["k_steps"], 1000)
 
+    def test_sparse_table_configs(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {
+            "table_parameters.emb.accessor.embed_sgd_param.adagrad.learning_rate":
+            0.05,
+            "table_parameters.emb.accessor.table_accessor_save_param.num": 2,
+            "table_parameters.emb.accessor.table_accessor_save_param.param":
+            [1, 2]
+        }
+        strategy.sparse_table_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.adagrad.learning_rate, 0.05)
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.table_accessor_save_param[0].param, 1)
+
+        strategy.adam_d2sum = True
+        self.assertEqual(strategy.adam_d2sum, True)
+        strategy.fs_client_param = {
+            "uri": "123",
+            "user": "456",
+            "passwd": "789",
+            "hadoop_bin": "hadoop"
+        }
+        self.assertEqual(strategy.fs_client_param.user, "456")
+
+    def test_fleet_desc_configs(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {"sparse_optimizer": "adagrad"}
+        strategy.fleet_desc_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.adagrad.learning_rate, 0.05)
+
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {"sparse_optimizer": "naive"}
+        strategy.fleet_desc_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.naive.learning_rate, 0.05)
+
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {"sparse_optimizer": "adam"}
+        strategy.fleet_desc_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.adam.beta1_decay_rate, 0.9)
+
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {
+            "sparse_accessor_class": "DownpourUnitAccessor",
+            "embed_sparse_optimizer": "std_adagrad"
+        }
+        strategy.fleet_desc_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.ctr_accessor_param.show_scale, False)
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.adagrad.initial_range, 0)
+
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {}
+        configs['emb'] = {
+            "sparse_accessor_class": "DownpourCtrDoubleAccessor",
+            "embed_sparse_optimizer": "std_adagrad"
+        }
+        strategy.fleet_desc_configs = configs
+        self.assertEqual(strategy.sparse_table_configs[0]
+                         .accessor.embed_sgd_param.adagrad.initial_range,
+                         0.0001)
+
+    def test_trainer_desc_configs(self):
+        strategy = paddle.distributed.fleet.DistributedStrategy()
+        configs = {
+            "dump_fields_path": "dump_data",
+            "dump_fields": ["xxx", "yyy"],
+            "dump_param": ['zzz']
+        }
+        strategy.trainer_desc_configs = configs
+        self.assertEqual(strategy.trainer_desc_configs["dump_fields_path"],
+                         "dump_data")
+        self.assertEqual(len(strategy.trainer_desc_configs["dump_fields"]), 2)
+        self.assertEqual(len(strategy.trainer_desc_configs["dump_param"]), 1)
+
     def test_elastic(self):
         strategy = paddle.distributed.fleet.DistributedStrategy()
         strategy.elastic = True
@@ -230,7 +362,7 @@ class TestStrategyConfig(unittest.TestCase):
         strategy.a_sync = True
         strategy.localsgd = True
         strategy.dgc = True
-        localsgd_configs = {"k_steps": 5}
+        localsgd_configs = {"k_steps": 5, "begin_step": 1}
         strategy.localsgd_configs = localsgd_configs
         build_strategy = paddle.fluid.BuildStrategy()
         build_strategy.enable_sequential_execution = True

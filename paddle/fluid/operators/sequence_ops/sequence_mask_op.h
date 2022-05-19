@@ -14,7 +14,7 @@
 
 #pragma once
 
-#ifdef __NVCC__
+#if defined(__NVCC__) || defined(__HIPCC__)
 #include <thrust/device_ptr.h>
 #include <thrust/functional.h>
 #include <thrust/reduce.h>
@@ -86,15 +86,16 @@ class SequenceMaskKernel : public framework::OpKernel<Tx> {
                                   "But received Input(MaxLenTensor) is NULL"));
       if (platform::is_gpu_place(max_len_tensor->place())) {
         framework::Tensor temp;
-        TensorCopySync(*max_len_tensor, platform::CPUPlace(), &temp);
+        paddle::framework::TensorCopySync(*max_len_tensor, platform::CPUPlace(),
+                                          &temp);
         maxlen = *temp.data<int32_t>();
       } else {
         maxlen = *max_len_tensor->data<int32_t>();
       }
 
-      auto y_dim = framework::vectorize<int>(x->dims());
+      auto y_dim = phi::vectorize<int>(x->dims());
       y_dim.push_back(maxlen);
-      y->Resize(framework::make_ddim(y_dim));
+      y->Resize(phi::make_ddim(y_dim));
 
       PADDLE_ENFORCE_GT(
           maxlen, 0,
@@ -107,7 +108,7 @@ class SequenceMaskKernel : public framework::OpKernel<Tx> {
     auto *x_data = x->data<Tx>();
     auto x_numel = x->numel();
     if (maxlen < 0) {
-#ifdef __NVCC__
+#if defined(__NVCC__) || defined(__HIPCC__)
       VLOG(10)
           << "SequenceMaskOp on GPU may be slow when maxlen is not provided.";
       maxlen = static_cast<int>(
@@ -117,9 +118,9 @@ class SequenceMaskKernel : public framework::OpKernel<Tx> {
 #else
       maxlen = static_cast<int>(*std::max_element(x_data, x_data + x_numel));
 #endif
-      auto y_dim = framework::vectorize<int>(x->dims());
+      auto y_dim = phi::vectorize<int>(x->dims());
       y_dim.push_back(maxlen);
-      y->Resize(framework::make_ddim(y_dim));
+      y->Resize(phi::make_ddim(y_dim));
     }
 
     auto out_dtype = static_cast<framework::proto::VarType::Type>(

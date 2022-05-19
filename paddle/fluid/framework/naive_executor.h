@@ -14,12 +14,19 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
+
 #include "paddle/fluid/framework/operator.h"
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/platform/device_context.h"
+#include "paddle/fluid/platform/place.h"
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
 
 namespace paddle {
 namespace framework {
@@ -28,6 +35,9 @@ namespace framework {
  * Simple, intuitive and effective. Only single thread is supported, and
  * currently designed for inference.
  */
+class ProgramDesc;
+class Scope;
+
 class NaiveExecutor {
  public:
   explicit NaiveExecutor(const platform::Place& place) : place_(place) {}
@@ -55,6 +65,8 @@ class NaiveExecutor {
   Scope* scope() { return scope_; }
 
   void CleanFeedFetchOps();
+
+  void ResetTrtOps(int num);
 
  protected:
   void CreateOps(const ProgramDesc& desc, int block_id,

@@ -42,10 +42,20 @@ void AddTensorToBlockDesc(framework::proto::BlockDesc* block,
   desc.SetPersistable(persistable);
   *var = *desc.Proto();
 }
+
+void AddFetchListToBlockDesc(framework::proto::BlockDesc* block,
+                             const std::string& name) {
+  using framework::proto::VarType;
+  auto* var = block->add_vars();
+  framework::VarDesc desc(name);
+  desc.SetType(VarType::FETCH_LIST);
+  *var = *desc.Proto();
+}
+
 void serialize_params(std::string* str, framework::Scope* scope,
                       const std::vector<std::string>& params) {
   std::ostringstream os;
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   platform::CUDAPlace place;
   platform::CUDADeviceContext ctx(place);
 #else
@@ -85,18 +95,18 @@ void RandomizeTensor(framework::LoDTensor* tensor,
   for (size_t i = 0; i < num_elements; i++) {
     *(temp_data + i) = random(0., 1.);
   }
-  TensorCopySync(temp_tensor, place, tensor);
+  paddle::framework::TensorCopySync(temp_tensor, place, tensor);
 }
 
 void CreateTensor(framework::Scope* scope, const std::string& name,
                   const std::vector<int64_t>& shape, bool in_cuda = true) {
   auto* var = scope->Var(name);
   auto* tensor = var->GetMutable<framework::LoDTensor>();
-  auto dims = framework::make_ddim(shape);
+  auto dims = phi::make_ddim(shape);
   tensor->Resize(dims);
   platform::Place place;
   if (in_cuda) {
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     place = platform::CUDAPlace(0);
 #else
     PADDLE_THROW(platform::errors::PreconditionNotMet(

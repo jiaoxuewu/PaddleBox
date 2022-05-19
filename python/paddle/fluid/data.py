@@ -19,10 +19,12 @@ from paddle.fluid import core
 from paddle.fluid.layer_helper import LayerHelper
 from paddle.fluid.data_feeder import check_dtype, check_type
 from ..utils import deprecated
+from paddle.fluid.framework import static_only
 
 __all__ = ['data']
 
 
+@static_only
 @deprecated(since="2.0.0", update_to="paddle.static.data")
 def data(name, shape, dtype='float32', lod_level=0):
     """
@@ -71,8 +73,10 @@ def data(name, shape, dtype='float32', lod_level=0):
     Examples:
         .. code-block:: python
 
+          import paddle
           import paddle.fluid as fluid
           import numpy as np
+          paddle.enable_static()
 
           # Creates a variable with fixed size [3, 2, 1]
           # User can only feed data of the same shape to x

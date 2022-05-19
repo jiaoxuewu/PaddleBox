@@ -15,7 +15,12 @@
 #pragma once
 #include <memory>
 #include <vector>
+#ifdef PADDLE_WITH_BOX_PS
 #include "paddle/fluid/framework/fleet/box_wrapper.h"
+#endif
+#ifdef PADDLE_WITH_HETERPS
+#include "paddle/fluid/framework/fleet/ps_gpu_wrapper.h"
+#endif
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/tensor.h"
 
@@ -45,6 +50,12 @@ static void PullBoxSparseFunctor(const framework::ExecutionContext &ctx) {
   auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
   box_ptr->PullSparse(ctx.GetPlace(), all_keys, all_values, slot_lengths,
                       hidden_size, 0);
+#endif
+#ifdef PADDLE_WITH_HETERPS
+  auto hidden_size = ctx.Attr<int>("size");
+  auto gpu_ps_ptr = paddle::framework::PSGPUWrapper::GetInstance();
+  gpu_ps_ptr->PullSparse(ctx.GetPlace(), 0, all_keys, all_values, slot_lengths,
+                         hidden_size);
 #endif
 }
 
@@ -83,11 +94,17 @@ static void PushBoxSparseFunctor(const framework::ExecutionContext &ctx) {
   box_ptr->PushSparseGrad(ctx.GetPlace(), all_keys, all_grad_values,
                           slot_lengths, hidden_size, 0, batch_size);
 #endif
+#ifdef PADDLE_WITH_HETERPS
+  auto hidden_size = ctx.Attr<int>("size");
+  auto gpu_ps_ptr = paddle::framework::PSGPUWrapper::GetInstance();
+  gpu_ps_ptr->PushSparseGrad(ctx.GetPlace(), 0, all_keys, all_grad_values,
+                             slot_lengths, hidden_size, batch_size);
+#endif
 }
 
 using LoDTensor = framework::LoDTensor;
 template <typename T>
-class PullBoxSparseCPUKernel : public framework::OpKernel<T> {
+class PullBoxSparseKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &ctx) const override {
     PullBoxSparseFunctor<T>(ctx);
@@ -95,11 +112,12 @@ class PullBoxSparseCPUKernel : public framework::OpKernel<T> {
 };
 
 template <typename T>
-class PushBoxSparseCPUKernel : public framework::OpKernel<T> {
+class PushBoxSparseKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &ctx) const override {
     PushBoxSparseFunctor<T>(ctx);
   }
 };
+
 }  // namespace operators
 }  // namespace paddle

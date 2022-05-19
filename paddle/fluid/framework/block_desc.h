@@ -29,7 +29,9 @@ limitations under the License. */
 namespace paddle {
 namespace framework {
 
+class OpDesc;
 class ProgramDesc;
+class VarDesc;
 
 // Each Protobuf Message, we provide a XXXBind class. In that class, we optimize
 // read/write speed. Only when we want the protobuf message, the local changes
@@ -108,6 +110,8 @@ class BlockDesc {
   proto::BlockDesc *Proto();
 
   ProgramDesc *Program() const { return this->prog_; }
+
+  void MoveFrom(BlockDesc *block);
 
  private:
   ProgramDesc *prog_;       // not_own

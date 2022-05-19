@@ -27,6 +27,7 @@ class TestAddMMOp(OpTest):
     # test basic
     def setUp(self):
         self.op_type = "addmm"
+        self.python_api = paddle.addmm
         self.dtype = np.float64
         self.init_dtype_type()
         self.inputs = {
@@ -43,19 +44,19 @@ class TestAddMMOp(OpTest):
         pass
 
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=False)
 
     def test_check_grad_normal(self):
-        self.check_grad(['Input', 'X', 'Y'], 'Out')
+        self.check_grad(['Input', 'X', 'Y'], 'Out', check_eager=False)
 
     def test_check_grad_x(self):
-        self.check_grad(['X'], 'Out', no_grad_set=None)
+        self.check_grad(['X'], 'Out', no_grad_set=None, check_eager=False)
 
     def test_check_grad_y(self):
-        self.check_grad(['Y'], 'Out', no_grad_set=None)
+        self.check_grad(['Y'], 'Out', no_grad_set=None, check_eager=False)
 
     def test_check_grad_input(self):
-        self.check_grad(['Input'], 'Out', no_grad_set=None)
+        self.check_grad(['Input'], 'Out', no_grad_set=None, check_eager=False)
 
 
 class TestAddMMOpError(unittest.TestCase):
@@ -167,6 +168,7 @@ class TestAddMMOp2(TestAddMMOp):
     # test alpha and beta
     def setUp(self):
         self.op_type = "addmm"
+        self.python_api = paddle.addmm
         self.dtype = np.float64
         self.init_dtype_type()
         self.inputs = {
@@ -244,12 +246,13 @@ class TestAddMMAPI(unittest.TestCase):
 
         def test_error1():
             data_x_wrong = np.ones((2, 3)).astype(np.float32)
-            x = paddle.to_variable(data_x_wrong)
-            y = paddle.to_variable(data_y)
-            input = paddle.to_variable(data_input)
+            x = paddle.to_tensor(data_x_wrong)
+            y = paddle.to_tensor(data_y)
+            input = paddle.to_tensor(data_input)
             out = paddle.tensor.addmm( input=input, x=x, y=y, beta=0.5, alpha=5.0 )
         self.assertRaises(ValueError, test_error1)
 '''
 
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

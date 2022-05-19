@@ -32,8 +32,10 @@ def l2_norm(x, axis, epsilon):
 class TestNormOp(OpTest):
     def setUp(self):
         self.op_type = "norm"
+        self.python_api = paddle.fluid.layers.l2_normalize
         self.init_test_case()
-        x = np.random.random(self.shape).astype("float64")
+        self.init_dtype()
+        x = np.random.random(self.shape).astype(self.dtype)
         y, norm = l2_norm(x, self.axis, self.epsilon)
         self.inputs = {'X': x}
         self.attrs = {'epsilon': self.epsilon, 'axis': self.axis}
@@ -49,6 +51,9 @@ class TestNormOp(OpTest):
         self.shape = [2, 3, 4, 5]
         self.axis = 1
         self.epsilon = 1e-8
+
+    def init_dtype(self):
+        self.dtype = "float64"
 
 
 class TestNormOp2(TestNormOp):
@@ -89,6 +94,55 @@ class TestNormOp5(TestNormOp):
         pass
 
 
+class TestNormOp6(TestNormOp):
+    def init_dtype(self):
+        self.dtype = "float32"
+
+    def test_check_grad(self):
+        self.check_grad(['X'], 'Out', max_relative_error=0.008)
+
+
+@unittest.skipIf(not fluid.core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestNormOp7(TestNormOp):
+    def init_dtype(self):
+        self.dtype = "float16"
+
+    def test_check_output(self):
+        self.check_output_with_place(fluid.core.CUDAPlace(0), atol=5e-2)
+
+    def test_check_grad(self):
+        self.check_grad_with_place(
+            fluid.core.CUDAPlace(0), ['X'], 'Out', max_relative_error=0.05)
+
+
+@skip_check_grad_ci(reason="skip check grad for test mode.")
+class TestNormTestOp(OpTest):
+    def setUp(self):
+        self.op_type = "norm"
+        self.init_test_case()
+        x = np.random.random(self.shape).astype("float64")
+        y, norm = l2_norm(x, self.axis, self.epsilon)
+        self.inputs = {'X': x}
+        self.attrs = {
+            'epsilon': self.epsilon,
+            'axis': self.axis,
+            'is_test': True
+        }
+        self.outputs = {'Out': y}
+
+    def test_check_output(self):
+        self.check_output()
+
+    def test_check_grad(self):
+        pass
+
+    def init_test_case(self):
+        self.shape = [2, 3, 4, 5]
+        self.axis = 1
+        self.epsilon = 1e-8
+
+
 class API_NormTest(unittest.TestCase):
     def test_errors(self):
         with fluid.program_guard(fluid.Program()):
@@ -101,4 +155,6 @@ class API_NormTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    import paddle
+    paddle.enable_static()
     unittest.main()

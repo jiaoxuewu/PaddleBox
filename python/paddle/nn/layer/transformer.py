@@ -13,25 +13,22 @@
 # limitations under the License.
 
 # TODO: define the classes of Transformer neural network
-__all__ = [
-    'MultiHeadAttention',
-    'TransformerEncoderLayer',
-    'TransformerEncoder',
-    'TransformerDecoderLayer',
-    'TransformerDecoder',
-    'Transformer',
-]
 
 import copy
 import collections
+import numpy as np
 
+import paddle
 from .common import Linear, Dropout
 from .norm import LayerNorm
 from .. import functional as F
 from ... import tensor
 from ...fluid import layers
-from ...fluid.dygraph import Layer, LayerList
-from ...fluid.param_attr import ParamAttr
+from .. import Layer, LayerList
+from ...framework import ParamAttr
+from paddle.fluid.data_feeder import convert_dtype
+
+__all__ = []
 
 
 def _convert_param_attr_to_list(param_attr, n):
@@ -53,7 +50,22 @@ def _convert_param_attr_to_list(param_attr, n):
     if isinstance(param_attr, (list, tuple)):
         assert len(param_attr) == n, (
             "length of param_attr should be %d when it is a list/tuple" % n)
-        param_attrs = [ParamAttr._to_attr(attr) for attr in param_attr]
+        param_attrs = []
+        for attr in param_attr:
+            if isinstance(attr, bool):
+                if attr:
+                    param_attrs.append(ParamAttr._to_attr(None))
+                else:
+                    param_attrs.append(False)
+            else:
+                param_attrs.append(ParamAttr._to_attr(attr))
+        # param_attrs = [ParamAttr._to_attr(attr) for attr in param_attr]
+    elif isinstance(param_attr, bool):
+        param_attrs = []
+        if param_attr:
+            param_attrs = [ParamAttr._to_attr(None) for i in range(n)]
+        else:
+            param_attrs = [False] * n
     else:
         param_attrs = []
         attr = ParamAttr._to_attr(param_attr)
@@ -63,6 +75,35 @@ def _convert_param_attr_to_list(param_attr, n):
                 attr_i.name = attr_i.name + "_" + str(i)
             param_attrs.append(attr_i)
     return param_attrs
+
+
+def _convert_attention_mask(attn_mask, dtype):
+    """
+    Convert the attention mask to the target dtype we expect.
+
+    Parameters:
+        attn_mask (Tensor, optional): A tensor used in multi-head attention
+                to prevents attention to some unwanted positions, usually the
+                paddings or the subsequent positions. It is a tensor with shape
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
+        dtype (VarType): The target type of `attn_mask` we expect.
+
+    Returns:
+        Tensor: A Tensor with shape same as input `attn_mask`, with data type `dtype`.
+    """
+    if attn_mask is not None and attn_mask.dtype != dtype:
+        attn_mask_dtype = convert_dtype(attn_mask.dtype)
+        if attn_mask_dtype == 'bool' or 'int' in attn_mask_dtype:
+            attn_mask = (paddle.cast(attn_mask, dtype) - 1.0) * 1e9
+        else:
+            attn_mask = paddle.cast(attn_mask, dtype)
+    return attn_mask
 
 
 class MultiHeadAttention(Layer):
@@ -88,7 +129,7 @@ class MultiHeadAttention(Layer):
         weight_attr(ParamAttr, optional):  To specify the weight parameter property.
             Default: None, which means the default weight parameter property is used.
             See usage for details in :code:`ParamAttr` .
-        bias_attr (ParamAttr, optional): To specify the bias parameter property.
+        bias_attr (ParamAttr|bool, optional): To specify the bias parameter property.
             Default: None, which means the default bias parameter property is used.
             If it is set to False, this layer will not have trainable bias parameter.
             See usage for details in :code:`ParamAttr` .
@@ -103,7 +144,7 @@ class MultiHeadAttention(Layer):
             query = paddle.rand((2, 4, 128))
             # self attention mask: [batch_size, num_heads, query_len, query_len]
             attn_mask = paddle.rand((2, 2, 4, 4))
-            multi_head_attn = paddle.MultiHeadAttention(128, 2)
+            multi_head_attn = paddle.nn.MultiHeadAttention(128, 2)
             output = multi_head_attn(query, None, None, attn_mask=attn_mask)  # [2, 4, 128]
     """
 
@@ -120,6 +161,12 @@ class MultiHeadAttention(Layer):
                  weight_attr=None,
                  bias_attr=None):
         super(MultiHeadAttention, self).__init__()
+
+        assert embed_dim > 0, ("Expected embed_dim to be greater than 0, "
+                               "but received {}".format(embed_dim))
+        assert num_heads > 0, ("Expected num_heads to be greater than 0, "
+                               "but received {}".format(num_heads))
+
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
@@ -140,7 +187,7 @@ class MultiHeadAttention(Layer):
             embed_dim, embed_dim, weight_attr, bias_attr=bias_attr)
 
     def _prepare_qkv(self, query, key, value, cache=None):
-        """
+        r"""
         Prapares linear projected queries, keys and values for usage of subsequnt
         multiple parallel attention. If `cache` is not None, using cached results
         to reduce redundant calculations.
@@ -195,7 +242,7 @@ class MultiHeadAttention(Layer):
         return (q, k, v) if cache is None else (q, k, v, cache)
 
     def compute_kv(self, key, value):
-        """
+        r"""
         Applies linear projection on input keys and values, then splits heads
         (reshape and transpose) to get keys and values from different representation
         subspaces. The results are used as key-values pairs for subsequent multiple
@@ -294,8 +341,8 @@ class MultiHeadAttention(Layer):
             # incremental_state with initial value, mainly for usage like UniLM
             return self.Cache(key, value)
 
-    def forward(self, query, key, value, attn_mask=None, cache=None):
-        """
+    def forward(self, query, key=None, value=None, attn_mask=None, cache=None):
+        r"""
         Applies multi-head attention to map queries and a set of key-value pairs
         to outputs.
 
@@ -314,11 +361,13 @@ class MultiHeadAttention(Layer):
             attn_mask (Tensor, optional): A tensor used in multi-head attention
                 to prevents attention to some unwanted positions, usually the
                 paddings or the subsequent positions. It is a tensor with shape
-                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             cache (MultiHeadAttention.Cache|MultiHeadAttention.StaticCache, optional):
                 It is a namedtuple with `k` and `v` as fields, and stores tensors
                 shaped `[batch_size, num_heads, length, embed_dim]` which are results
@@ -353,11 +402,11 @@ class MultiHeadAttention(Layer):
             q, k, v, cache = self._prepare_qkv(query, key, value, cache)
 
         # scale dot product attention
-        # TODO(guosheng): use tensor.matmul, however it doesn't support `alpha`
-        product = layers.matmul(
-            x=q, y=k, transpose_y=True, alpha=self.head_dim**-0.5)
+        product = paddle.matmul(
+            x=q * (self.head_dim**-0.5), y=k, transpose_y=True)
         if attn_mask is not None:
-            # TODO(guosheng): support bool mask
+            # Support bool or int mask
+            attn_mask = _convert_attention_mask(attn_mask, product.dtype)
             product = product + attn_mask
         weights = F.softmax(product)
         if self.dropout:
@@ -411,14 +460,14 @@ class TransformerEncoderLayer(Layer):
             normalization and post-precess includes dropout, residual connection.
             Otherwise, no pre-process and post-precess includes dropout, residual
             connection, layer normalization. Default False
-        weight_attr(ParamAttr|tuple, optional): To specify the weight parameter property.
-            If it is a tuple, `weight_attr[0]` would be used as `weight_attr` for
+        weight_attr(ParamAttr|list|tuple, optional): To specify the weight parameter property.
+            If it is a list/tuple, `weight_attr[0]` would be used as `weight_attr` for
             MHA, and `weight_attr[1]` would be used as `weight_attr` for linear in FFN.
             Otherwise, MHA and FFN both use it as `weight_attr` to create parameters.
             Default: None, which means the default weight parameter property is used.
             See usage for details in :code:`ParamAttr` . 
-        bias_attr (ParamAttr|tuple, optional): To specify the bias parameter property.
-            If it is a tuple, `bias_attr[0]` would be used as `bias_attr` for
+        bias_attr (ParamAttr|list|tuple|bool, optional): To specify the bias parameter property.
+            If it is a list/tuple, `bias_attr[0]` would be used as `bias_attr` for
             MHA, and `bias_attr[1]` would be used as `bias_attr` for linear in FFN.
             Otherwise, MHA and FFN both use it as `bias_attr` to create parameters.
             The `False` value means the corresponding layer would not have trainable
@@ -457,6 +506,15 @@ class TransformerEncoderLayer(Layer):
         self._config.pop("__class__", None)  # py3
 
         super(TransformerEncoderLayer, self).__init__()
+
+        assert d_model > 0, ("Expected d_model to be greater than 0, "
+                             "but received {}".format(d_model))
+        assert nhead > 0, ("Expected nhead to be greater than 0, "
+                           "but received {}".format(nhead))
+        assert dim_feedforward > 0, (
+            "Expected dim_feedforward to be greater than 0, "
+            "but received {}".format(dim_feedforward))
+
         attn_dropout = dropout if attn_dropout is None else attn_dropout
         act_dropout = dropout if act_dropout is None else act_dropout
         self.normalize_before = normalize_before
@@ -481,8 +539,8 @@ class TransformerEncoderLayer(Layer):
         self.dropout2 = Dropout(dropout, mode="upscale_in_train")
         self.activation = getattr(F, activation)
 
-    def forward(self, src, src_mask=None):
-        """
+    def forward(self, src, src_mask=None, cache=None):
+        r"""
         Applies a Transformer encoder layer on the input.
 
         Parameters:
@@ -492,21 +550,39 @@ class TransformerEncoderLayer(Layer):
             src_mask (Tensor, optional): A tensor used in multi-head attention
                 to prevents attention to some unwanted positions, usually the
                 paddings or the subsequent positions. It is a tensor with shape
-                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
+            cache (Tensor, optional): It is an instance of `MultiHeadAttention.Cache`.
+                See `TransformerEncoderLayer.gen_cache` for more details. It is
+                only used for inference and should be None for training. Default
+                None.
 
         Returns:
-            Tensor: The output of Transformer encoder layer. It is a tensor that \
-                has the same shape and data type as `enc_input`.
+            Tensor|tuple: It is a tensor that has the same shape and data type \
+                as `enc_input`, representing the output of Transformer encoder \
+                layer. Or a tuple if `cache` is not None, except for encoder \
+                layer output, the tuple includes the new cache which is same \
+                as input `cache` argument but `incremental_cache` has an \
+                incremental length. See `MultiHeadAttention.gen_cache` and \
+                `MultiHeadAttention.forward` for more details.
         """
+        src_mask = _convert_attention_mask(src_mask, src.dtype)
+
         residual = src
         if self.normalize_before:
             src = self.norm1(src)
-        # TODO(guosheng): Add cache for encoder for the usage like UniLM
-        src = self.self_attn(src, src, src, src_mask)
+        # Add cache for encoder for the usage like UniLM
+        if cache is None:
+            src = self.self_attn(src, src, src, src_mask)
+        else:
+            src, incremental_cache = self.self_attn(src, src, src, src_mask,
+                                                    cache)
+
         src = residual + self.dropout1(src)
         if not self.normalize_before:
             src = self.norm1(src)
@@ -518,7 +594,28 @@ class TransformerEncoderLayer(Layer):
         src = residual + self.dropout2(src)
         if not self.normalize_before:
             src = self.norm2(src)
-        return src
+        return src if cache is None else (src, incremental_cache)
+
+    def gen_cache(self, src):
+        r"""
+        Generates cache for `forward` usage. The generated cache is an 
+        instance of `MultiHeadAttention.Cache`.
+
+        Parameters:
+            src (Tensor): The input of Transformer encoder. It is a tensor
+                with shape `[batch_size, source_length, d_model]`. The data 
+                type should be float32 or float64.
+
+        Returns:
+            incremental_cache: It is an instance of `MultiHeadAttention.Cache` \
+                produced by `self_attn.gen_cache`, it reserves two tensors 
+                shaped `[batch_size, nhead, 0, d_model // nhead]`. See \
+                `MultiHeadAttention.gen_cache` and `MultiHeadAttention.forward` \
+                for more details.
+        """
+        incremental_cache = self.self_attn.gen_cache(
+            src, type=self.self_attn.Cache)
+        return incremental_cache
 
 
 class TransformerEncoder(Layer):
@@ -557,8 +654,8 @@ class TransformerEncoder(Layer):
         self.num_layers = num_layers
         self.norm = norm
 
-    def forward(self, src, src_mask=None):
-        """
+    def forward(self, src, src_mask=None, cache=None):
+        r"""
         Applies a stack of N Transformer encoder layers on inputs. If `norm` is
         provided, also applies layer normalization on the output of last encoder
         layer.
@@ -570,25 +667,64 @@ class TransformerEncoder(Layer):
             src_mask (Tensor, optional): A tensor used in multi-head attention
                 to prevents attention to some unwanted positions, usually the
                 paddings or the subsequent positions. It is a tensor with shape
-                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
+            cache (list, optional): It is a list, and each element in the list
+                is `incremental_cache` produced by `TransformerEncoderLayer.gen_cache`. 
+                See `TransformerEncoder.gen_cache` for more details. It is only
+                used for inference and should be None for training. Default None.
 
         Returns:
-            Tensor: The output of Transformer encoder. It is a tensor that \
-                has the same shape and data type as `src`.
+            Tensor|tuple: It is a tensor that has the same shape and data type \
+                as `src`, representing the output of Transformer encoder. \
+                Or a tuple if `cache` is not None, except for encoder output, \
+                the tuple includes the new cache which is same as input `cache` \
+                argument but `incremental_cache` in it has an incremental length. \
+                See `MultiHeadAttention.gen_cache` and `MultiHeadAttention.forward` \
+                for more details.
         """
-        output = src
+        src_mask = _convert_attention_mask(src_mask, src.dtype)
 
-        for mod in self.layers:
-            output = mod(output, src_mask=src_mask)
+        output = src
+        new_caches = []
+        for i, mod in enumerate(self.layers):
+            if cache is None:
+                output = mod(output, src_mask=src_mask)
+            else:
+                output, new_cache = mod(output,
+                                        src_mask=src_mask,
+                                        cache=cache[i])
+                new_caches.append(new_cache)
 
         if self.norm is not None:
             output = self.norm(output)
 
-        return output
+        return output if cache is None else (output, new_caches)
+
+    def gen_cache(self, src):
+        r"""
+        Generates cache for `forward` usage. The generated cache is a list, and
+        each element in it is `incremental_cache` produced by 
+        `TransformerEncoderLayer.gen_cache`. See `TransformerEncoderLayer.gen_cache`
+        for more details.
+
+        Parameters:
+            src (Tensor): The input of Transformer encoder. It is a tensor
+                with shape `[batch_size, source_length, d_model]`. The data type
+                should be float32 or float64.
+
+        Returns:
+            list: It is a list, and each element in the list is `incremental_cache` 
+            produced by `TransformerEncoderLayer.gen_cache`. See 
+            `TransformerEncoderLayer.gen_cache` for more details.
+        """
+        cache = [layer.gen_cache(src) for layer in self.layers]
+        return cache
 
 
 class TransformerDecoderLayer(Layer):
@@ -619,16 +755,16 @@ class TransformerDecoderLayer(Layer):
             normalization and post-precess includes dropout, residual connection.
             Otherwise, no pre-process and post-precess includes dropout, residual
             connection, layer normalization. Default False
-        weight_attr(ParamAttr|tuple, optional): To specify the weight parameter property.
-            If it is a tuple, `weight_attr[0]` would be used as `weight_attr` for
+        weight_attr(ParamAttr|list|tuple, optional): To specify the weight parameter property.
+            If it is a list/tuple, `weight_attr[0]` would be used as `weight_attr` for
             self attention, `weight_attr[1]` would be used as `weight_attr` for
             cross attention, and `weight_attr[2]` would be used as `weight_attr`
             for linear in FFN. Otherwise, the three sub-layers all uses it as
             `weight_attr` to create parameters. Default: None, which means the
             default weight parameter property is used. See usage for details
-            in :ref:`api_fluid_ParamAttr` . 
-        bias_attr (ParamAttr|tuple, optional): To specify the bias parameter property.
-            If it is a tuple, `bias_attr[0]` would be used as `bias_attr` for
+            in :ref:`api_paddle_fluid_param_attr_ParamAttr` . 
+        bias_attr (ParamAttr|list|tuple|bool, optional): To specify the bias parameter property.
+            If it is a list/tuple, `bias_attr[0]` would be used as `bias_attr` for
             self attention, `bias_attr[1]` would be used as `bias_attr` for
             cross attention, and `bias_attr[2]` would be used as `bias_attr`
             for linear in FFN. Otherwise, the three sub-layers all uses it as
@@ -675,6 +811,15 @@ class TransformerDecoderLayer(Layer):
         self._config.pop("__class__", None)  # py3
 
         super(TransformerDecoderLayer, self).__init__()
+
+        assert d_model > 0, ("Expected d_model to be greater than 0, "
+                             "but received {}".format(d_model))
+        assert nhead > 0, ("Expected nhead to be greater than 0, "
+                           "but received {}".format(nhead))
+        assert dim_feedforward > 0, (
+            "Expected dim_feedforward to be greater than 0, "
+            "but received {}".format(dim_feedforward))
+
         attn_dropout = dropout if attn_dropout is None else attn_dropout
         act_dropout = dropout if act_dropout is None else act_dropout
         self.normalize_before = normalize_before
@@ -708,7 +853,7 @@ class TransformerDecoderLayer(Layer):
         self.activation = getattr(F, activation)
 
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, cache=None):
-        """
+        r"""
         Applies a Transformer decoder layer on the input.
 
         Parameters:
@@ -721,18 +866,23 @@ class TransformerDecoderLayer(Layer):
             tgt_mask (Tensor, optional): A tensor used in self attention
                 to prevents attention to some unwanted positions, usually the
                 the subsequent positions. It is a tensor with shape broadcasted
-                to `[batch_size, n_head, target_length, target_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                to `[batch_size, n_head, target_length, target_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             memory_mask (Tensor, optional): A tensor used in decoder-encoder
                 cross attention to prevents attention to some unwanted positions,
-                usually the paddings. It is a tensor with shape broadcasted to
-               `[batch_size, n_head, target_length, source_length]`, where the
-                unwanted positions have `-INF` values and the others have 0 values.
-                The data type should be float32 or float64. It can be None when
-                nothing wanted or needed to be prevented attention to. Default None
+                usually the paddings. It is a tensor with shape broadcasted to 
+                `[batch_size, n_head, target_length, source_length]`. When the 
+                data type is bool, the unwanted positions have `False` values 
+                and the others have `True` values. When the data type is int, 
+                the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             cache (tuple, optional): It is a tuple( :code:`(incremental_cache, static_cache)` ),
                 `incremental_cache` is an instance of `MultiHeadAttention.Cache`,
                 `static_cache` is an instance of `MultiHeadAttention.StaticCache.
@@ -749,6 +899,9 @@ class TransformerDecoderLayer(Layer):
                 See `MultiHeadAttention.gen_cache` and `MultiHeadAttention.forward` \
                 for more details.
         """
+        tgt_mask = _convert_attention_mask(tgt_mask, tgt.dtype)
+        memory_mask = _convert_attention_mask(memory_mask, memory.dtype)
+
         residual = tgt
         if self.normalize_before:
             tgt = self.norm1(tgt)
@@ -784,7 +937,7 @@ class TransformerDecoderLayer(Layer):
                                                 static_cache))
 
     def gen_cache(self, memory):
-        """
+        r"""
         Generates cache for `forward` usage. The generated cache is a tuple
         composed of an instance of `MultiHeadAttention.Cache` and an instance
         of `MultiHeadAttention.StaticCache`.
@@ -856,7 +1009,7 @@ class TransformerDecoder(Layer):
         self.norm = norm
 
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, cache=None):
-        """
+        r"""
         Applies a stack of N Transformer decoder layers on inputs. If `norm` is
         provided, also applies layer normalization on the output of last decoder
         layer.
@@ -871,18 +1024,23 @@ class TransformerDecoder(Layer):
             tgt_mask (Tensor, optional): A tensor used in self attention
                 to prevents attention to some unwanted positions, usually the
                 the subsequent positions. It is a tensor with shape broadcasted
-                to `[batch_size, n_head, target_length, target_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                to `[batch_size, n_head, target_length, target_length]`. When 
+                the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             memory_mask (Tensor, optional): A tensor used in decoder-encoder
                 cross attention to prevents attention to some unwanted positions,
                 usually the paddings. It is a tensor with shape broadcasted to
-               `[batch_size, n_head, target_length, source_length]`, where the
-                unwanted positions have `-INF` values and the others have 0 values.
-                The data type should be float32 or float64. It can be None when
-                nothing wanted or needed to be prevented attention to. Default None
+                `[batch_size, n_head, target_length, source_length]`. When the 
+                data type is bool, the unwanted positions have `False` values 
+                and the others have `True` values. When the data type is int, 
+                the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             cache (list, optional): It is a list, and each element in the list
                 is a tuple( :code:`(incremental_cache, static_cache)` ). See
                 `TransformerDecoder.gen_cache` for more details. It is only
@@ -897,6 +1055,9 @@ class TransformerDecoder(Layer):
                 See `MultiHeadAttention.gen_cache` and `MultiHeadAttention.forward` \
                 for more details.
         """
+        tgt_mask = _convert_attention_mask(tgt_mask, tgt.dtype)
+        memory_mask = _convert_attention_mask(memory_mask, memory.dtype)
+
         output = tgt
         new_caches = []
         for i, mod in enumerate(self.layers):
@@ -920,7 +1081,7 @@ class TransformerDecoder(Layer):
         return output if cache is None else (output, new_caches)
 
     def gen_cache(self, memory, do_zip=False):
-        """
+        r"""
         Generates cache for `forward` usage. The generated cache is a list, and
         each element in it is a tuple( :code:`(incremental_cache, static_cache)` )
         produced by `TransformerDecoderLayer.gen_cache`. See `TransformerDecoderLayer.gen_cache`
@@ -965,12 +1126,12 @@ class Transformer(Layer):
     applies another layer normalization on the output of last encoder/decoder layer.
 
     Parameters:
-        d_model (int): The expected feature size in the encoder/decoder input
-            and output.
-        nhead (int): The number of heads in multi-head attention(MHA).
-        num_encoder_layers (int): The number of layers in encoder.
-        num_encoder_layers (int): The number of layers in decoder.
-        dim_feedforward (int): The hidden layer size in the feedforward network(FFN).
+        d_model (int, optional): The expected feature size in the encoder/decoder input
+            and output. Default 512
+        nhead (int, optional): The number of heads in multi-head attention(MHA). Default 8
+        num_encoder_layers (int, optional): The number of layers in encoder. Default 6
+        num_decoder_layers (int, optional): The number of layers in decoder. Default 6
+        dim_feedforward (int, optional): The hidden layer size in the feedforward network(FFN). Default 2048
         dropout (float, optional): The dropout probability used in pre-process
             and post-precess of MHA and FFN sub-layer. Default 0.1
         activation (str, optional): The activation function in the feedforward
@@ -985,26 +1146,35 @@ class Transformer(Layer):
             normalization and post-precess includes dropout, residual connection.
             Otherwise, no pre-process and post-precess includes dropout, residual
             connection, layer normalization. Default False
-        weight_attr(ParamAttr|tuple, optional): To specify the weight parameter property.
-            If it is a tuple, `weight_attr[0]` would be used as `weight_attr` for
-            self attention, `weight_attr[1]` would be used as `weight_attr` for
-            cross attention, and `weight_attr[2]` would be used as `weight_attr`
-            for linear in FFN. Otherwise, the three sub-layers all uses it as
-            `weight_attr` to create parameters. Default: None, which means the
-            default weight parameter property is used. See usage for details
+        weight_attr(ParamAttr|list|tuple, optional): To specify the weight parameter property.
+            If it is a list/tuple, the length of `weight_attr` could be 1, 2 or 3. If it is 3, 
+            `weight_attr[0]` would be used as `weight_attr` for self attention, `weight_attr[1]` 
+            would be used as `weight_attr` for cross attention of `TransformerDecoder`, 
+            and `weight_attr[2]` would be used as `weight_attr` for linear in FFN. 
+            If it is 2, `weight_attr[0]` would be used as `weight_attr` both for self attention 
+            and cross attntion and `weight_attr[1]` would be used as `weight_attr` for 
+            linear in FFN. If it is 1, `weight_attr[0]` would be used as `weight_attr` 
+            for self attention, cross attention and linear in FFN. Otherwise, 
+            the three sub-layers all uses it as `weight_attr` to create parameters. 
+            Default: None, which means the default weight parameter property is used. 
+            See usage for details
             in :code:`ParamAttr` . 
-        bias_attr (ParamAttr|tuple, optional): To specify the bias parameter property.
-            If it is a tuple, `bias_attr[0]` would be used as `bias_attr` for
-            self attention, `bias_attr[1]` would be used as `bias_attr` for
-            cross attention, and `bias_attr[2]` would be used as `bias_attr`
-            for linear in FFN. Otherwise, the three sub-layers all uses it as
-            `bias_attr` to create parameters. The `False` value means the
-            corresponding layer would not have trainable bias parameter. See
-            usage for details in :code:`ParamAttr` . Default: None,which means
-            the default bias parameter property is used.
-        custom_encoder (Layer): If custom encoder is provided, use it as the encoder.
+        bias_attr (ParamAttr|list|tuple|bool, optional): To specify the bias parameter property.
+            If it is a list/tuple, the length of `bias_attr` could be 1, 2 or 3. If it is 3, 
+            `bias_attr[0]` would be used as `bias_attr` for self attention, `bias_attr[1]` 
+            would be used as `bias_attr` for cross attention of `TransformerDecoder`, 
+            and `bias_attr[2]` would be used as `bias_attr` for linear in FFN. 
+            If it is 2, `bias_attr[0]` would be used as `bias_attr` both for self attention 
+            and cross attntion and `bias_attr[1]` would be used as `bias_attr` for 
+            linear in FFN. If it is 1, `bias_attr[0]` would be used as `bias_attr` 
+            for self attention, cross attention and linear in FFN. Otherwise, 
+            the three sub-layers all uses it as `bias_attr` to create parameters. 
+            The `False` value means the corresponding layer would not have trainable 
+            bias parameter. See usage for details in :code:`ParamAttr` . 
+            Default: None,which means the default bias parameter property is used.
+        custom_encoder (Layer, optional): If custom encoder is provided, use it as the encoder.
             Default None
-        custom_decoder (Layer): If custom decoder is provided, use it as the decoder.
+        custom_decoder (Layer, optional): If custom decoder is provided, use it as the decoder.
             Default None
 
     Examples:
@@ -1049,13 +1219,59 @@ class Transformer(Layer):
                  custom_decoder=None):
         super(Transformer, self).__init__()
 
+        assert d_model > 0, ("Expected d_model to be greater than 0, "
+                             "but received {}".format(d_model))
+        assert nhead > 0, ("Expected nhead to be greater than 0, "
+                           "but received {}".format(nhead))
+        assert dim_feedforward > 0, (
+            "Expected dim_feedforward to be greater than 0, "
+            "but received {}".format(dim_feedforward))
+
+        if isinstance(bias_attr, (list, tuple)):
+            if len(bias_attr) == 1:
+                encoder_bias_attr = [bias_attr[0]] * 2
+                decoder_bias_attr = [bias_attr[0]] * 3
+            elif len(bias_attr) == 2:
+                encoder_bias_attr = bias_attr
+                decoder_bias_attr = [bias_attr[0], bias_attr[0], bias_attr[-1]]
+            elif len(bias_attr) == 3:
+                encoder_bias_attr = [bias_attr[0], bias_attr[-1]]
+                decoder_bias_attr = bias_attr
+            else:
+                assert False, (
+                    "length of bias_attr should be 1 or 2 or 3 when it is a list/tuple"
+                )
+        else:
+            encoder_bias_attr = bias_attr
+            decoder_bias_attr = bias_attr
+
+        if isinstance(weight_attr, (list, tuple)):
+            if len(weight_attr) == 1:
+                encoder_weight_attr = [weight_attr[0]] * 2
+                decoder_weight_attr = [weight_attr[0]] * 3
+            elif len(weight_attr) == 2:
+                encoder_weight_attr = weight_attr
+                decoder_weight_attr = [
+                    weight_attr[0], weight_attr[0], weight_attr[-1]
+                ]
+            elif len(weight_attr) == 3:
+                encoder_weight_attr = [weight_attr[0], weight_attr[-1]]
+                decoder_weight_attr = weight_attr
+            else:
+                assert False, (
+                    "length of weight_attr should be 1 or 2 or 3 when it is a list/tuple"
+                )
+        else:
+            encoder_weight_attr = weight_attr
+            decoder_weight_attr = weight_attr
+
         if custom_encoder is not None:
             self.encoder = custom_encoder
         else:
             encoder_layer = TransformerEncoderLayer(
                 d_model, nhead, dim_feedforward, dropout, activation,
-                attn_dropout, act_dropout, normalize_before, weight_attr,
-                bias_attr)
+                attn_dropout, act_dropout, normalize_before,
+                encoder_weight_attr, encoder_bias_attr)
             encoder_norm = LayerNorm(d_model)
             self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers,
                                               encoder_norm)
@@ -1065,8 +1281,8 @@ class Transformer(Layer):
         else:
             decoder_layer = TransformerDecoderLayer(
                 d_model, nhead, dim_feedforward, dropout, activation,
-                attn_dropout, act_dropout, normalize_before, weight_attr,
-                bias_attr)
+                attn_dropout, act_dropout, normalize_before,
+                decoder_weight_attr, decoder_bias_attr)
             decoder_norm = LayerNorm(d_model)
             self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers,
                                               decoder_norm)
@@ -1075,7 +1291,7 @@ class Transformer(Layer):
         self.nhead = nhead
 
     def forward(self, src, tgt, src_mask=None, tgt_mask=None, memory_mask=None):
-        """
+        r"""
         Applies a Transformer model on the inputs.
 
         Parameters:
@@ -1088,27 +1304,82 @@ class Transformer(Layer):
             memory (Tensor): The output of Transformer encoder. It is a tensor
                 with shape `[batch_size, source_length, d_model]`. The data type
                 should be float32 or float64.
+            src_mask (Tensor, optional): A tensor used in multi-head attention
+                to prevents attention to some unwanted positions, usually the
+                paddings or the subsequent positions. It is a tensor with shape
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             tgt_mask (Tensor, optional): A tensor used in self attention
                 to prevents attention to some unwanted positions, usually the
                 the subsequent positions. It is a tensor with shape broadcasted
-                to `[batch_size, n_head, target_length, target_length]`,
-                where the unwanted positions have `-INF` values and the others
-                have 0 values. The data type should be float32 or float64. It can
-                be None when nothing wanted or needed to be prevented attention to.
-                Default None
+                to `[batch_size, n_head, target_length, target_length]`. When 
+                the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
             memory_mask (Tensor, optional): A tensor used in decoder-encoder
                 cross attention to prevents attention to some unwanted positions,
                 usually the paddings. It is a tensor with shape broadcasted to
-               `[batch_size, n_head, target_length, source_length]`, where the
-                unwanted positions have `-INF` values and the others have 0 values.
-                The data type should be float32 or float64. It can be None when
-                nothing wanted or needed to be prevented attention to. Default None
+                `[batch_size, n_head, target_length, source_length]`. When the 
+                data type is bool, the unwanted positions have `False` values 
+                and the others have `True` values. When the data type is int, 
+                the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
 
         Returns:
             Tensor: It is a tensor that has the same shape and data type \
                 as `tgt`, representing the output of Transformer decoder.
         """
+        src_mask = _convert_attention_mask(src_mask, src.dtype)
         memory = self.encoder(src, src_mask=src_mask)
+
+        tgt_mask = _convert_attention_mask(tgt_mask, tgt.dtype)
+        memory_mask = _convert_attention_mask(memory_mask, memory.dtype)
         output = self.decoder(
             tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask)
         return output
+
+    def generate_square_subsequent_mask(self, length):
+        """
+        Generate a square mask for the sequence. The mask ensures that the
+        predictions for position i can depend only on the known outputs at
+        positions less than i.
+
+        Parameters:
+            length (int|Tensor): The length of sequence.
+
+        Returns:
+            Tensor: Generated square mask according to the given length.
+
+        Examples:
+            .. code-block:: python
+
+                import paddle
+                from paddle.nn.layer.transformer import Transformer
+                length = 5
+                d_model, n_head, dim_feedforward = 8, 4, 64
+                transformer_paddle = Transformer(
+                    d_model, n_head, dim_feedforward=dim_feedforward)
+                mask = transformer_paddle.generate_square_subsequent_mask(length)
+                print(mask)
+
+                # [[  0. -inf -inf -inf -inf]
+                # [  0.   0. -inf -inf -inf]
+                # [  0.   0.   0. -inf -inf]
+                # [  0.   0.   0.   0. -inf]
+                # [  0.   0.   0.   0.   0.]]
+
+        """
+        return paddle.tensor.triu(
+            (paddle.ones(
+                (length, length), dtype=paddle.get_default_dtype()) * -np.inf),
+            1)

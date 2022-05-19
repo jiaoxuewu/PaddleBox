@@ -29,9 +29,16 @@ def ref_logsumexp(x, axis=None, keepdim=False, reduce_all=False):
     return out
 
 
+def logsumexp_wrapper(x, axis=None, keepdim=False, allreduce=False):
+    if allreduce:
+        return paddle.logsumexp(x, None, keepdim)
+    return paddle.logsumexp(x, axis, keepdim)
+
+
 class TestLogsumexp(OpTest):
     def setUp(self):
         self.op_type = 'logsumexp'
+        self.python_api = logsumexp_wrapper
         self.shape = [2, 3, 4, 5]
         self.dtype = 'float64'
         self.axis = [-1]
@@ -46,19 +53,35 @@ class TestLogsumexp(OpTest):
         self.inputs = {'X': x}
         self.outputs = {'Out': out}
         self.attrs = {
-            'dim': self.axis,
-            'keep_dim': self.keepdim,
+            'axis': self.axis,
+            'keepdim': self.keepdim,
             'reduce_all': self.reduce_all
         }
+        self.user_defined_grads = None
+        self.user_defined_grad_outputs = None
+        self.set_attrs_addition()
 
     def set_attrs(self):
         pass
 
+    def set_attrs_addition(self):
+        pass
+
     def test_check_output(self):
-        self.check_output()
+        self.check_output(check_eager=True)
 
     def test_check_grad(self):
-        self.check_grad(['X'], ['Out'])
+        self.check_grad(
+            ['X'], ['Out'],
+            user_defined_grads=self.user_defined_grads,
+            user_defined_grad_outputs=self.user_defined_grad_outputs,
+            check_eager=True)
+
+    def calc_grad(self):
+        dy = np.ones(1, dtype=self.dtype)
+        x = self.inputs['X']
+        y = self.outputs['Out']
+        return dy * np.exp(x - y)
 
 
 class TestLogsumexp_shape(TestLogsumexp):
@@ -75,6 +98,11 @@ class TestLogsumexp_axis_all(TestLogsumexp):
     def set_attrs(self):
         self.axis = [0, 1, 2, 3]
 
+    def set_attrs_addition(self):
+        if paddle.fluid.core.is_compiled_with_rocm():
+            self.user_defined_grads = [self.calc_grad()]
+            self.user_defined_grad_outputs = [np.ones(1, dtype=self.dtype)]
+
 
 class TestLogsumexp_keepdim(TestLogsumexp):
     def set_attrs(self):
@@ -85,12 +113,17 @@ class TestLogsumexp_reduce_all(TestLogsumexp):
     def set_attrs(self):
         self.reduce_all = True
 
+    def set_attrs_addition(self):
+        if paddle.fluid.core.is_compiled_with_rocm():
+            self.user_defined_grads = [self.calc_grad()]
+            self.user_defined_grad_outputs = [np.ones(1, dtype=self.dtype)]
+
 
 class TestLogsumexpError(unittest.TestCase):
     def test_errors(self):
         with paddle.static.program_guard(paddle.static.Program()):
             self.assertRaises(TypeError, paddle.logsumexp, 1)
-            x1 = paddle.data(name='x1', shape=[120], dtype="int32")
+            x1 = paddle.fluid.data(name='x1', shape=[120], dtype="int32")
             self.assertRaises(TypeError, paddle.logsumexp, x1)
 
 
@@ -104,14 +137,14 @@ class TestLogsumexpAPI(unittest.TestCase):
     def api_case(self, axis=None, keepdim=False):
         out_ref = ref_logsumexp(self.x, axis, keepdim)
         with paddle.static.program_guard(paddle.static.Program()):
-            x = paddle.data('X', self.shape)
+            x = paddle.fluid.data('X', self.shape)
             out = paddle.logsumexp(x, axis, keepdim)
             exe = paddle.static.Executor(self.place)
             res = exe.run(feed={'X': self.x}, fetch_list=[out])
         self.assertTrue(np.allclose(res[0], out_ref))
 
         paddle.disable_static(self.place)
-        x = paddle.to_variable(self.x)
+        x = paddle.to_tensor(self.x)
         out = paddle.logsumexp(x, axis, keepdim)
         self.assertTrue(np.allclose(out.numpy(), out_ref))
         paddle.enable_static()
@@ -126,7 +159,7 @@ class TestLogsumexpAPI(unittest.TestCase):
 
     def test_alias(self):
         paddle.disable_static(self.place)
-        x = paddle.to_variable(self.x)
+        x = paddle.to_tensor(self.x)
         out1 = paddle.logsumexp(x)
         out2 = paddle.tensor.logsumexp(x)
         out3 = paddle.tensor.math.logsumexp(x)

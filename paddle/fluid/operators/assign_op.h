@@ -19,6 +19,16 @@ limitations under the License. */
 #include "paddle/fluid/framework/var_type.h"
 #include "paddle/fluid/platform/device_context.h"
 
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+namespace paddle {
+namespace framework {
+class Variable;
+}  // namespace framework
+}  // namespace paddle
+
 namespace paddle {
 namespace operators {
 class AssignFunctor {
@@ -40,19 +50,21 @@ class AssignFunctor {
     }
   }
 
-  void operator()(const framework::SelectedRows &rows) const {
-    framework::SelectedRows &out_rows =
-        *out_->GetMutable<framework::SelectedRows>();
+  void operator()(const phi::SelectedRows &rows) const {
+    phi::SelectedRows &out_rows = *out_->GetMutable<phi::SelectedRows>();
     out_rows.set_rows(rows.rows());
     out_rows.set_height(rows.height());
     auto &t = rows.value();
     auto *m = out_rows.mutable_value();
-    framework::TensorCopy(t, dev_ctx_.GetPlace(), dev_ctx_, m);
+    framework::TensorCopy(t, t.place(), m);
   }
 
   template <typename T>
   void operator()(const T &v) const {
-    PADDLE_THROW("Not support type for assign op %s", typeid(T).name());
+    PADDLE_ENFORCE_EQ(
+        true, false,
+        platform::errors::PermissionDenied(
+            "Not support type for assign op with type %s", typeid(T).name()));
   }
 
  private:
@@ -60,7 +72,7 @@ class AssignFunctor {
                    framework::LoDTensor *out) const {
     if (lod_tensor.numel() == 0) return;
     auto &out_tensor = *out;
-    TensorCopy(lod_tensor, dev_ctx_.GetPlace(), dev_ctx_, &out_tensor);
+    paddle::framework::TensorCopy(lod_tensor, lod_tensor.place(), &out_tensor);
     out_tensor.set_lod(lod_tensor.lod());
   }
 

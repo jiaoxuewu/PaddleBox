@@ -187,16 +187,16 @@ class LoDTensorArray2TensorOpInferShape : public framework::InferShapeBase {
     if (ctx->IsRuntime()) return;
     auto dims = ctx->GetInputDim("X");
     // if the shape is empty
-    if (dims == framework::make_ddim({0UL})) return;
+    if (dims == phi::make_ddim({0UL})) return;
     // otherwise, suppose the shape of array is the shape of tensor in the
     // array, which is consistent with what tensor_array_read_write dose
     auto axis = ctx->Attrs().Get<int>("axis");
     auto use_stack = ctx->Attrs().Get<bool>("use_stack");
     if (use_stack) {
-      auto dim_vec = framework::vectorize<int>(dims);
+      auto dim_vec = phi::vectorize<int>(dims);
       // use -1 for the stack dim size
       dim_vec.insert(dim_vec.begin() + axis, -1);
-      dims = framework::make_ddim(dim_vec);
+      dims = phi::make_ddim(dim_vec);
     } else {
       // use -1 for the concat dim size
       dims[axis] = -1;
@@ -250,8 +250,12 @@ class LoDTensorArray2TensorGradOp : public framework::OperatorBase {
     auto dout_name = Input(framework::GradVarName("Out"));
 
     std::vector<std::string> grad_names;
+    // NOTE(Aurelius84): Generating grad base name by Input("X") instead of
+    // fixed string to avoid incorrectly sharing same var's allocation in
+    // multi-thread that will cause wrong calculation result.
+    std::string grad_base_name = base_name + "_temp_grad_";
 
-    LodTensorVectorResizeFromLodTensorArray(scope, "grad_name", Input("X"),
+    LodTensorVectorResizeFromLodTensorArray(scope, grad_base_name, Input("X"),
                                             &grad_names);
 
     auto use_stack = Attr<bool>("use_stack");
@@ -295,7 +299,7 @@ class TensorArrayToTensorGradOpMaker : public framework::SingleGradOpMaker<T> {
 
 }  // namespace operators
 }  // namespace paddle
-USE_OP(concat);
+USE_OP_ITSELF(concat);
 
 namespace ops = paddle::operators;
 REGISTER_OPERATOR(

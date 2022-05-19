@@ -1,4 +1,5 @@
 # Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2021 NVIDIA Corporation. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,26 +19,32 @@ import os
 import pickle
 import warnings
 import functools
+from collections import OrderedDict
+import inspect
+import threading
 
 import six
 import paddle
-from paddle.fluid import core
+from paddle.fluid import core, dygraph
 from paddle.fluid.compiler import BuildStrategy, CompiledProgram, ExecutionStrategy
 from paddle.fluid.data_feeder import check_type
+from paddle.fluid.layers.utils import flatten, pack_sequence_as
 from paddle.fluid.dygraph.base import program_desc_tracing_guard, switch_to_static_graph
+from paddle.fluid.dygraph.dygraph_to_static import logging_utils
+from paddle.fluid.dygraph.dygraph_to_static.convert_call_func import ConversionOptions, CONVERSION_OPTIONS
 from paddle.fluid.dygraph.dygraph_to_static.logging_utils import set_code_level, set_verbosity
-from paddle.fluid.dygraph.dygraph_to_static.program_translator import ProgramTranslator, StaticLayer, unwrap_decorators
-from paddle.fluid.dygraph.io import EXTRA_VAR_INFO_FILENAME, VARIABLE_FILENAME, TranslatedLayer
+from paddle.fluid.dygraph.dygraph_to_static.program_translator import ProgramTranslator, StaticFunction, unwrap_decorators
+from paddle.fluid.dygraph.io import TranslatedLayer, INFER_MODEL_SUFFIX, INFER_PARAMS_SUFFIX, INFER_PARAMS_INFO_SUFFIX
 from paddle.fluid.dygraph.layers import Layer
 from paddle.fluid.executor import Executor, scope_guard
-from paddle.fluid.framework import Block, ParamBase, Program, Variable
+from paddle.fluid.framework import Block, ParamBase, Program, Variable, Parameter, EagerParamBase
 from paddle.fluid.framework import _current_expected_place, _dygraph_guard, _dygraph_tracer
-from paddle.fluid.framework import dygraph_only, in_dygraph_mode
+from paddle.fluid.framework import dygraph_only, _non_static_mode
 from paddle.fluid.wrapped_decorator import wrap_decorator
 
 __all__ = [
     'TracedLayer', 'declarative', 'dygraph_to_static_func', 'set_code_level',
-    'set_verbosity', 'save', 'load', 'SaveLoadConfig'
+    'set_verbosity', 'save', 'load', 'not_to_static'
 ]
 
 
@@ -49,21 +56,21 @@ def create_program_from_desc(program_desc):
     return program
 
 
-def _extract_vars(inputs, result_list):
+def _extract_vars(inputs, result_list, err_tag='inputs'):
     if isinstance(inputs, Variable):
         result_list.append(inputs)
     elif isinstance(inputs, (list, tuple)):
         for var in inputs:
-            _extract_vars(var, result_list)
+            _extract_vars(var, result_list, err_tag)
     else:
         raise TypeError(
-            "The type of 'each element of inputs' in fluid.dygraph.jit.TracedLayer.trace must be fluid.Variable, but received {}.".
-            format(type(inputs)))
+            "The type of 'each element of {}' in fluid.dygraph.jit.TracedLayer.trace must be fluid.Variable, but received {}.".
+            format(err_tag, type(inputs)))
 
 
-def extract_vars(inputs):
+def extract_vars(inputs, err_tag='inputs'):
     result_list = []
-    _extract_vars(inputs, result_list)
+    _extract_vars(inputs, result_list, err_tag)
     return result_list
 
 
@@ -118,8 +125,8 @@ def _dygraph_to_static_func_(dygraph_func):
     # TODO: remove this decorator after we finalize training API
     def __impl__(*args, **kwargs):
         program_translator = ProgramTranslator()
-        if in_dygraph_mode() or not program_translator.enable_declarative:
-            warnings.warn(
+        if _non_static_mode() or not program_translator.enable_to_static:
+            logging_utils.warn(
                 "The decorator 'dygraph_to_static_func' doesn't work in "
                 "dygraph mode or set ProgramTranslator.enable to False. "
                 "We will just return dygraph output.")
@@ -139,7 +146,7 @@ def copy_decorator_attrs(original_func, decorated_obj):
 
     Args:
         original_func(callable): the original decorated function.
-        decorated_obj(StaticLayer): the target decorated StaticLayer object.
+        decorated_obj(StaticFunction): the target decorated StaticFunction object.
     """
     decorator_name = "declarative"
 
@@ -153,7 +160,7 @@ def copy_decorator_attrs(original_func, decorated_obj):
     return decorated_obj
 
 
-def declarative(function=None, input_spec=None):
+def declarative(function=None, input_spec=None, build_strategy=None):
     """
     Converts imperative dygraph APIs into declarative function APIs. Decorator
     @declarative handles the Program and Executor of static mode and returns
@@ -164,8 +171,14 @@ def declarative(function=None, input_spec=None):
 
     Args:
         function (callable): callable imperative function.
-        input_spec(list[InputSpec]): list of InputSpec to specific the shape/dtype/name
+        input_spec(list[InputSpec]|tuple[InputSpec]): list/tuple of InputSpec to specific the shape/dtype/name
             information of each input Tensor.
+        build_strategy(BuildStrategy|None): This argument is used to compile the
+            converted program with the specified options, such as operators' fusion
+            in the computational graph and memory optimization during the execution
+            of the computational graph. For more information about build_strategy,
+            please refer to :code:`paddle.static.BuildStrategy`. The default is None.
+
 
     Returns:
         Tensor(s): containing the numerical result.
@@ -173,30 +186,26 @@ def declarative(function=None, input_spec=None):
     Examples:
         .. code-block:: python
 
-          import paddle.fluid as fluid
-          import numpy as np
-          from paddle.fluid.dygraph.jit import declarative
+            import paddle
+            from paddle.jit import to_static
 
-          fluid.enable_dygraph()
+            @to_static
+            def func(x):
+                if paddle.mean(x) < 0:
+                    x_v = x - 1
+                else:
+                    x_v = x + 1
+                return x_v
 
-          @declarative
-          def func(x):
-              x = fluid.dygraph.to_variable(x)
-              if fluid.layers.mean(x) < 0:
-                  x_v = x - 1
-              else:
-                  x_v = x + 1
-              return x_v
-
-          x = np.ones([1, 2])
-          x_v = func(x)
-          print(x_v.numpy()) # [[2. 2.]]
+            x = paddle.ones([1, 2], dtype='float32')
+            x_v = func(x)
+            print(x_v) # [[2. 2.]]
 
     """
 
     def decorated(python_func):
         """
-        Decorates a python function into a StaticLayer object.
+        Decorates a python function into a StaticFunction object.
         """
         # Step 1. unwrap the function if it is already decorated.
         _, python_func = unwrap_decorators(python_func)
@@ -204,88 +213,77 @@ def declarative(function=None, input_spec=None):
         # Step 2. copy some attributes from original python function.
         static_layer = copy_decorator_attrs(
             original_func=python_func,
-            decorated_obj=StaticLayer(
-                function=python_func, input_spec=input_spec))
+            decorated_obj=StaticFunction(
+                function=python_func,
+                input_spec=input_spec,
+                build_strategy=build_strategy))
 
         return static_layer
 
+    build_strategy = build_strategy or BuildStrategy()
+    if not isinstance(build_strategy, BuildStrategy):
+        raise TypeError(
+            "Required type(build_strategy) shall be `paddle.static.BuildStrategy`, but received {}".
+            format(type(build_strategy).__name__))
+
     # for usage: `declarative(foo, ...)`
     if function is not None:
-        return decorated(function)
+        if isinstance(function, Layer):
+            if isinstance(function.forward, StaticFunction):
+                class_name = function.__class__.__name__
+                logging_utils.warn(
+                    "`{}.forward` has already been decorated somewhere. It will be redecorated to replace previous one.".
+                    format(class_name))
+            function.forward = decorated(function.forward)
+            return function
+        else:
+            return decorated(function)
 
     # for usage: `@declarative`
     return decorated
 
 
-class SaveLoadConfig(object):
+def not_to_static(func=None):
     """
-    The additional configuration options may be used in function 
-    :ref:`api_imperative_jit_save` that save :ref:`api_imperative_TranslatedLayer` 
-    or used in function :ref:`api_imperative_jit_load` that 
-    load :ref:`api_imperative_TranslatedLayer` .
-    
+    A Decorator to suppresses the convertion of a function.
+
+    Args:
+        func(callable): The function to decorate.
+
+    Returns:
+        callable: A function which won't be converted in Dynamic-to-Static.
+
     Examples:
-        1. Using ``SaveLoadConfig`` when saving model
-
-        .. code-block:: python
-
-            import paddle
-            import paddle.nn as nn
-            import paddle.optimizer as opt
-
-            class SimpleNet(nn.Layer):
-                def __init__(self, in_size, out_size):
-                    super(SimpleNet, self).__init__()
-                    self._linear = nn.Linear(in_size, out_size)
-
-                @paddle.jit.to_static
-                def forward(self, x):
-                    y = self._linear(x)
-                    z = self._linear(y)
-                    return z
-
-            # enable dygraph mode
-            paddle.disable_static() 
-
-            # train model
-            net = SimpleNet(8, 8)
-            adam = opt.Adam(learning_rate=0.1, parameters=net.parameters())
-            x = paddle.randn([4, 8], 'float32')
-            for i in range(10):
-                out = net(x)
-                loss = paddle.tensor.mean(out)
-                loss.backward()
-                adam.step()
-                adam.clear_grad()
-
-            # use SaveLoadconfig when saving model
-            model_path = "simplenet.example.model"
-            config = paddle.SaveLoadConfig()
-            config.model_filename = "__simplenet__"
-            paddle.jit.save(
-                layer=net,
-                model_path=model_path,
-                config=config)
-
-        2. Using ``SaveLoadConfig`` when loading model
-
         .. code-block:: python
 
             import paddle
 
-            # enable dygraph mode
-            paddle.disable_static() 
+            @paddle.jit.not_to_static
+            def func_not_to_static(x):
+                res = x - 1
+                return res
 
-            # use SaveLoadconfig when loading model
-            model_path = "simplenet.example.model"
-            config = paddle.SaveLoadConfig()
-            config.model_filename = "__simplenet__"
-            infer_net = paddle.jit.load(model_path, config=config)
-            # inference
-            x = paddle.randn([4, 8], 'float32')
-            pred = infer_net(x)
+            @paddle.jit.to_static
+            def func(x):
+                if paddle.mean(x) < 0:
+                    out = func_not_to_static(x)
+                else:
+                    out = x + 1
+                return out
+
+            x = paddle.ones([1, 2], dtype='float32')
+            out = func(x)
+            print(out) # [[2. 2.]]
     """
+    if func is None:
+        return not_to_static
 
+    options = ConversionOptions(not_convert=True)
+    setattr(func, CONVERSION_OPTIONS, options)
+    return func
+
+
+class _SaveLoadConfig(object):
     def __init__(self):
         self._output_spec = None
         self._model_filename = None
@@ -297,389 +295,389 @@ class SaveLoadConfig(object):
         # NOTE: Users rarely use following configs, so these configs are not open to users,
         # reducing user learning costs, but we retain the configuration capabilities
 
-        # If True, programs are modified to only support direct inference deployment. 
-        # Otherwise,more information will be stored for flexible optimization and re-training. 
+        # If True, programs are modified to only support direct inference deployment.
+        # Otherwise,more information will be stored for flexible optimization and re-training.
         # Currently, only True is supported
         self._export_for_deployment = True
 
         # If True, It will save inference program only, and do not save params of Program
         self._program_only = False
+        self.with_hook = False
 
     @property
     def output_spec(self):
-        """
-        Selects the output targets of the saved model ( :ref:`api_imperative_TranslatedLayer` ).
-        By default, all return variables of original Layer's forward function
-        are kept as the output of the saved TranslatedLayer.
-
-        The ``output_spec`` type should be list[Variable]. If the provided ``output_spec``
-        list is not all output variables, the saved model will be pruned according to the
-        given ``output_spec`` list.
-
-        .. note::
-            The ``output_spec`` is only used when saving model.
-
-        Examples:
-            .. code-block:: python
-
-                import paddle
-                import paddle.nn as nn
-                import paddle.optimizer as opt
-
-                class SimpleNet(nn.Layer):
-                    def __init__(self, in_size, out_size):
-                        super(SimpleNet, self).__init__()
-                        self._linear = nn.Linear(in_size, out_size)
-
-                    @paddle.jit.to_static
-                    def forward(self, x):
-                        y = self._linear(x)
-                        z = self._linear(y)
-                        loss = paddle.tensor.mean(z)
-                        return z, loss
-
-                # enable dygraph mode
-                paddle.disable_static() 
-
-                # train model
-                net = SimpleNet(8, 8)
-                adam = opt.Adam(learning_rate=0.1, parameters=net.parameters())
-                x = paddle.randn([4, 8], 'float32')
-                for i in range(10):
-                    out, loss = net(x)
-                    loss.backward()
-                    adam.step()
-                    adam.clear_grad()
-
-                # use SaveLoadconfig.output_spec
-                model_path = "simplenet.example.model.output_spec"
-                config = paddle.SaveLoadConfig()
-                config.output_spec = [out]
-                paddle.jit.save(
-                    layer=net,
-                    model_path=model_path,
-                    config=config)
-
-                infer_net = paddle.jit.load(model_path)
-                x = paddle.randn([4, 8], 'float32')
-                pred = infer_net(x)
-        """
         return self._output_spec
 
     @output_spec.setter
     def output_spec(self, spec):
+        if spec is None:
+            return
         if not isinstance(spec, list):
             raise TypeError(
-                "The SaveLoadConfig.output_spec should be 'list', but received input type is %s."
+                "The config `output_spec` should be 'list', but received input type is %s."
                 % type(input))
             for var in spec:
                 if not isinstance(var, core.VarBase):
                     raise TypeError(
-                        "The element in SaveLoadConfig.output_spec list should be 'Variable', but received element's type is %s."
+                        "The element in config `output_spec` list should be 'Variable', but received element's type is %s."
                         % type(var))
         self._output_spec = spec
 
     @property
     def model_filename(self):
-        """
-        The name of file to save the translated program of target Layer.
-        Default filename is :code:`__model__` .
-
-        Examples:
-            .. code-block:: python
-
-                import paddle
-                import paddle.nn as nn
-                import paddle.optimizer as opt
-
-                class SimpleNet(nn.Layer):
-                    def __init__(self, in_size, out_size):
-                        super(SimpleNet, self).__init__()
-                        self._linear = nn.Linear(in_size, out_size)
-
-                    @paddle.jit.to_static
-                    def forward(self, x):
-                        y = self._linear(x)
-                        z = self._linear(y)
-                        return z
-
-                # enable dygraph mode
-                paddle.disable_static() 
-
-                # train model
-                net = SimpleNet(8, 8)
-                adam = opt.Adam(learning_rate=0.1, parameters=net.parameters())
-                x = paddle.randn([4, 8], 'float32')
-                for i in range(10):
-                    out = net(x)
-                    loss = paddle.tensor.mean(out)
-                    loss.backward()
-                    adam.step()
-                    adam.clear_grad()
-
-                # saving with configs.model_filename
-                model_path = "simplenet.example.model.model_filename"
-                config = paddle.SaveLoadConfig()
-                config.model_filename = "__simplenet__"
-                paddle.jit.save(
-                    layer=net,
-                    model_path=model_path,
-                    config=config)
-
-                # loading with configs.model_filename
-                infer_net = paddle.jit.load(model_path, config=config)
-                x = paddle.randn([4, 8], 'float32')
-                pred = infer_net(x)
-        """
         return self._model_filename
 
     @model_filename.setter
     def model_filename(self, filename):
+        if filename is None:
+            return
         if not isinstance(filename, six.string_types):
             raise TypeError(
-                "The SaveLoadConfig.model_filename should be str, but received input's type is %s."
+                "The config `model_filename` should be str, but received input's type is %s."
                 % type(filename))
         if len(filename) == 0:
-            raise ValueError(
-                "The SaveLoadConfig.model_filename is empty string.")
+            raise ValueError("The config `model_filename` is empty string.")
         self._model_filename = filename
 
     @property
     def params_filename(self):
-        """
-        The name of file to save all persistable variables in target Layer. 
-        Default file name is :code:`__variables__` .
-        
-        Examples:
-            .. code-block:: python
-
-                import paddle
-                import paddle.nn as nn
-                import paddle.optimizer as opt
-
-                class SimpleNet(nn.Layer):
-                    def __init__(self, in_size, out_size):
-                        super(SimpleNet, self).__init__()
-                        self._linear = nn.Linear(in_size, out_size)
-
-                    @paddle.jit.to_static
-                    def forward(self, x):
-                        y = self._linear(x)
-                        z = self._linear(y)
-                        return z
-
-                # enable dygraph mode
-                paddle.disable_static() 
-
-                # train model
-                net = SimpleNet(8, 8)
-                adam = opt.Adam(learning_rate=0.1, parameters=net.parameters())
-                x = paddle.randn([4, 8], 'float32')
-                for i in range(10):
-                    out = net(x)
-                    loss = paddle.tensor.mean(out)
-                    loss.backward()
-                    adam.step()
-                    adam.clear_grad()
-
-                model_path = "simplenet.example.model.params_filename"
-                config = paddle.SaveLoadConfig()
-                config.params_filename = "__params__"
-
-                # saving with configs.params_filename
-                paddle.jit.save(
-                    layer=net,
-                    model_path=model_path,
-                    config=config)
-
-                # loading with configs.params_filename
-                infer_net = paddle.jit.load(model_path, config=config)
-                x = paddle.randn([4, 8], 'float32')
-                pred = infer_net(x)
-        """
         return self._params_filename
 
     @params_filename.setter
     def params_filename(self, filename):
+        if filename is None:
+            return
         if not isinstance(filename, six.string_types):
             raise TypeError(
-                "The SaveLoadConfig.params_filename should be str, but received input's type is %s."
+                "The config `params_filename` should be str, but received input's type is %s."
                 % type(filename))
         if len(filename) == 0:
-            raise ValueError(
-                "The SaveLoadConfig.params_filename is empty string.")
+            raise ValueError("The config `params_filename` is empty string.")
         self._params_filename = filename
-
-    # NOTE: [why not use params_filename=None control params saved separately]
-    # The new save interface does not recommend parameters to be saved separately. 
-    # Here, the concept should be separated as clearly as possible. 
-    # Setting params_filename=None only means that the saved file name is set 
-    # and without any other meaning. New separate_params control for file saved
-    # separately can makes the concept clearer.
-    @property
-    def separate_params(self):
-        """
-        Configure whether to save the Layer parameters as separete files.
-        (In order to be compatible with the behavior of :ref:`api_fluid_io_save_inference_model` )
-
-        If True, each parameter will be saved to a file separately, the file name is the parameter name,
-        and the SaveLoadConfig.params_filename configuration will not take effect. Default False.
-
-        Examples:
-            .. code-block:: python
-
-                import paddle
-                import paddle.nn as nn
-                import paddle.optimizer as opt
-
-                class SimpleNet(nn.Layer):
-                    def __init__(self, in_size, out_size):
-                        super(SimpleNet, self).__init__()
-                        self._linear = nn.Linear(in_size, out_size)
-
-                    @paddle.jit.to_static
-                    def forward(self, x):
-                        y = self._linear(x)
-                        z = self._linear(y)
-                        return z
-
-                # enable dygraph mode
-                paddle.disable_static() 
-
-                # train model
-                net = SimpleNet(8, 8)
-                adam = opt.Adam(learning_rate=0.1, parameters=net.parameters())
-                x = paddle.randn([4, 8], 'float32')
-                for i in range(10):
-                    out = net(x)
-                    loss = paddle.tensor.mean(out)
-                    loss.backward()
-                    adam.step()
-                    adam.clear_grad()
-
-                model_path = "simplenet.example.model.separate_params"
-                config = paddle.jit.SaveLoadConfig()
-                config.separate_params = True
-
-                # saving with configs.separate_params
-                paddle.jit.save(
-                    layer=net,
-                    model_path=model_path,
-                    config=config)
-                # [result] the saved model directory contains:
-                # linear_0.b_0  linear_0.w_0  __model__  __variables.info__
-
-                # loading with configs.params_filename
-                infer_net = paddle.jit.load(model_path, config=config)
-                x = paddle.randn([4, 8], 'float32')
-                pred = infer_net(x)
-        """
-        return self._separate_params
-
-    @separate_params.setter
-    def separate_params(self, value):
-        if not isinstance(value, bool):
-            raise TypeError(
-                "The SaveLoadConfig.separate_params should be bool value, but received input's type is %s."
-                % type(value))
-        self._separate_params = value
 
     @property
     def keep_name_table(self):
-        """
-        Configures whether keep ``structured_name -> parameter_name`` dict in loaded state dict.
-        This dict is the debugging information saved when call `paddle.save`. 
-        It is generally only used for debugging and does not affect the actual training or inference. 
-        By default, it will not be retained in `paddle.load` result. Default: False.
-        
-        .. note::
-            Only used for ``paddle.load``.
-
-        Examples:
-            .. code-block:: python
-
-                import paddle
-            
-                paddle.disable_static()
-
-                linear = paddle.nn.Linear(5, 1)
-
-                state_dict = linear.state_dict()
-                paddle.save(state_dict, "paddle_dy")
-
-                configs = paddle.SaveLoadConfig()
-                configs.keep_name_table = True
-                para_state_dict, _ = paddle.load("paddle_dy", configs)
-
-                print(para_state_dict)
-                # the name_table is 'StructuredToParameterName@@'
-                # {'bias': array([0.], dtype=float32), 
-                #  'StructuredToParameterName@@': 
-                #     {'bias': u'linear_0.b_0', 'weight': u'linear_0.w_0'}, 
-                #  'weight': array([[ 0.04230034],
-                #     [-0.1222527 ],
-                #     [ 0.7392676 ],
-                #     [-0.8136974 ],
-                #     [ 0.01211023]], dtype=float32)}
-        """
         return self._keep_name_table
 
     @keep_name_table.setter
     def keep_name_table(self, value):
+        if value is None:
+            return
         if not isinstance(value, bool):
             raise TypeError(
-                "The SaveLoadConfig.keep_name_table should be bool value, but received input's type is %s."
+                "The config `keep_name_table` should be bool value, but received input's type is %s."
                 % type(value))
         self._keep_name_table = value
 
 
-# NOTE(chenweihang): change jit.save/load argument `configs` to `config`
-def deprecate_save_load_configs(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        if 'configs' in kwargs:
-            kwargs['config'] = kwargs['configs']
-            kwargs.pop('configs')
-        return func(*args, **kwargs)
+def _parse_save_configs(configs):
+    supported_configs = ['output_spec', "with_hook"]
+
+    # input check
+    for key in configs:
+        if key not in supported_configs:
+            raise ValueError(
+                "The additional config (%s) of `paddle.jit.save` is not supported."
+                % (key))
+
+    # construct inner config
+    inner_config = _SaveLoadConfig()
+    inner_config.output_spec = configs.get('output_spec', None)
+    inner_config.with_hook = configs.get('with_hook', False)
+
+    return inner_config
+
+
+def _parse_load_config(configs):
+    supported_configs = ['model_filename', 'params_filename']
+
+    # input check
+    for key in configs:
+        if key not in supported_configs:
+            raise ValueError(
+                "The additional config (%s) of `paddle.jit.load` is not supported."
+                % (key))
+
+    # construct inner config
+    inner_config = _SaveLoadConfig()
+    inner_config.model_filename = configs.get('model_filename', None)
+    inner_config.params_filename = configs.get('params_filename', None)
+
+    return inner_config
+
+
+def _get_input_var_names(inputs, input_spec):
+    name_none_error = "The %s's name is None. " \
+        "When using jit.save, please set InputSepc's name in " \
+        "to_static(input_spec=[]) and jit.save(input_spec=[]) " \
+        "and make sure they are consistent."
+    name_no_exists_error = "The tensor `%s` does not exists. " \
+        "Please make sure the name of InputSpec or example Tensor " \
+        "in input_spec is the same as the name of InputSpec in " \
+        "`to_static` decorated on the Layer.forward method."
+    result_list = []
+    input_var_names = [
+        var.name for var in flatten(inputs) if isinstance(var, Variable)
+    ]
+    if input_spec is None:
+        # no prune
+        return input_var_names
+    else:
+        # fileter out non-tensor type spec infos.
+        input_spec = [
+            spec for spec in input_spec
+            if isinstance(spec, paddle.static.InputSpec)
+        ]
+
+    if len(input_spec) == len(input_var_names):
+        # no prune
+        result_list = input_var_names
+        # if input spec name not in input_var_names, only raise warning
+        for spec in input_spec:
+            if spec.name is None:
+                warnings.warn(name_none_error % spec)
+            elif spec.name not in input_var_names:
+                warnings.warn(name_no_exists_error % spec.name)
+            else:
+                # do nothing
+                pass
+    else:
+        # prune
+        for spec in input_spec:
+            if spec.name is None:
+                # name is None, the input_spec only can be InputSpec
+                raise ValueError(name_none_error % spec)
+            elif spec.name not in input_var_names:
+                # the input_spec can be `InputSpec` or `VarBase`
+                raise ValueError(name_no_exists_error % spec.name)
+            else:
+                result_list.append(spec.name)
+
+    return result_list
+
+
+def _get_output_vars(outputs, output_spec, with_hook=False):
+    name_no_exists_error = "The tensor `%s` does not exists. " \
+        "Please make sure the name of example Tensor " \
+        "in configs.output_spec is the output tensor of " \
+        "Layer.forward method."
+    if output_spec and with_hook:
+        raise RuntimeError(
+            "Currently not support specify output_spec while founding pre/post hooks in your outermost layer."
+        )
+    result_list = []
+    output_vars_dict = OrderedDict()
+    for var in flatten(outputs):
+        if isinstance(var, Variable):
+            output_vars_dict[var.name] = var
+    if output_spec is None:
+        result_list = output_vars_dict.values()
+    elif output_spec is not None and len(output_spec) == len(output_vars_dict):
+        result_list = output_vars_dict.values()
+        for var in output_spec:
+            if var.name not in output_vars_dict:
+                warnings.warn(name_no_exists_error % var.name)
+    else:
+        for var in output_spec:
+            if var.name not in output_vars_dict:
+                raise ValueError(name_no_exists_error % var.name)
+            else:
+                result_list.append(output_vars_dict[var.name])
+    return result_list
+
+
+# NOTE(chenweihang): [ Handling of use cases of API paddle.jit.load ]
+# `paddle.jit.load` may be used to load saved results of:
+# 1. Expected cases:
+#   - paddle.jit.save
+#   - paddle.static.save_inference_model
+#   - paddle.fluid.io.save_inference_model
+# 2. Error cases:
+#   - paddle.save: no .pdmodel for prefix
+#   - paddle.static.save: no .pdiparams but .pdparams exists
+#   - paddle.fluid.io.save_params/save_persistables: no __model__
+# TODO(chenweihang): polish error message in above error cases
+def _build_load_path_and_config(path, config):
+    # NOTE(chenweihang): If both [prefix save format] and [directory save format] exist,
+    # raise error, avoid confusing behavior
+    prefix_format_path = path + INFER_MODEL_SUFFIX
+    prefix_format_exist = os.path.exists(prefix_format_path)
+    directory_format_exist = os.path.isdir(path)
+    if prefix_format_exist and directory_format_exist:
+        raise ValueError(
+            "The %s.pdmodel and %s directory exist at the same time, "
+            "don't know which one to load, please make sure that the specified target "
+            "of ``path`` is unique." % (path, path))
+    elif not prefix_format_exist and not directory_format_exist:
+        raise ValueError("The ``path`` (%s) to load model not exists." % path)
+    else:
+        if prefix_format_exist:
+            file_prefix = os.path.basename(path)
+            model_path = os.path.dirname(path)
+            if config.model_filename is not None:
+                warnings.warn(
+                    "When loading the result saved with the "
+                    "specified file prefix, the ``model_filename`` config does "
+                    "not take effect.")
+            config.model_filename = file_prefix + INFER_MODEL_SUFFIX
+            if config.params_filename is not None:
+                warnings.warn(
+                    "When loading the result saved with the "
+                    "specified file prefix, the ``params_filename`` config does "
+                    "not take effect.")
+            config.params_filename = file_prefix + INFER_PARAMS_SUFFIX
+        else:
+            # Compatible with the old save_inference_model format
+            model_path = path
+
+    return model_path, config
+
+
+_save_pre_hooks_lock = threading.Lock()
+_save_pre_hooks = []
+
+
+class HookRemoveHelper(object):
+    """ A HookRemoveHelper that can be used to remove hook. """
+
+    def __init__(self, hook):
+        self._hook = hook
+
+    def remove(self):
+        _remove_save_pre_hook(self._hook)
+
+
+def _register_save_pre_hook(hook):
+    """
+    Register a save pre-hook for `paddle.jit.save`.
+    This hook will be executed before `save` function has been invoked.
+
+    hook(layer, input_spec, configs) -> None
+    - layer (Layer|function): This argument is corresponding to `layer` in `paddle.jit.save`.
+    - input_spec (list or tuple[InputSpec|Tensor|Python built-in variable]): This argument is corresponding to `input_spec` in `paddle.jit.save`.
+    - configs (dict): This argument is corresponding to `configs` in `paddle.jit.save`.
+
+    Args:
+        hook(function): a function registered as a save pre-hook
+
+    Returns:
+        HookRemoveHelper: a HookRemoveHelper object that can be used to remove the added hook by calling `hook_remove_helper.remove()`.
+
+    Examples:
+        .. code-block:: python
+
+            import numpy as np
+            import paddle
+
+            IMAGE_SIZE = 256
+            CLASS_NUM = 10
+
+            class LinearNet(paddle.nn.Layer):
+                def __init__(self):
+                    super(LinearNet, self).__init__()
+                    self._linear = paddle.nn.Linear(IMAGE_SIZE, CLASS_NUM)
+
+                def forward(self, x):
+                    return self._linear(x)
+
+            saving_count = 0
+            def save_pre_hook(layer, input_spec, configs):
+                global saving_count
+                saving_count += 1
+
+            remove_handler = paddle.jit.register_save_pre_hook(save_pre_hook)
+
+            layer = LinearNet()
+            paddle.jit.save(layer, "/tmp", [paddle.static.InputSpec(shape=[-1, IMAGE_SIZE])])
+            # saving_count == 1
+
+            remove_handler.remove()
+            paddle.jit.save(layer, "/tmp", [paddle.static.InputSpec(shape=[-1, IMAGE_SIZE])])
+            # saving_count == 1
+    """
+    global _save_pre_hooks_lock
+    global _save_pre_hooks
+    _save_pre_hooks_lock.acquire()
+    if hook not in _save_pre_hooks:
+        _save_pre_hooks.append(hook)
+    _save_pre_hooks_lock.release()
+    return HookRemoveHelper(hook)
+
+
+def _clear_save_pre_hooks():
+    global _save_pre_hooks_lock
+    global _save_pre_hooks
+    _save_pre_hooks_lock.acquire()
+    _save_pre_hooks.clear()
+    _save_pre_hooks_lock.release()
+
+
+def _remove_save_pre_hook(hook):
+    global _save_pre_hooks_lock
+    global _save_pre_hooks
+    _save_pre_hooks_lock.acquire()
+    if hook in _save_pre_hooks:
+        _save_pre_hooks.remove(hook)
+    _save_pre_hooks_lock.release()
+
+
+def _run_save_pre_hooks(func):
+    def wrapper(layer, path, input_spec=None, **configs):
+        global _save_pre_hooks
+        for hook in _save_pre_hooks:
+            hook(layer, input_spec, configs)
+        func(layer, path, input_spec, **configs)
 
     return wrapper
 
 
-@deprecate_save_load_configs
+@_run_save_pre_hooks
 @switch_to_static_graph
-def save(layer, model_path, input_spec=None, config=None):
+def save(layer, path, input_spec=None, **configs):
     """
-    Saves input declarative Layer as :ref:`api_imperative_TranslatedLayer` 
+    Saves input Layer or function as ``paddle.jit.TranslatedLayer``
     format model, which can be used for inference or fine-tuning after loading.
 
-    It will save the translated program and all related persistable 
-    variables of input declarative Layer to given ``model_path``.
-    
-    The default saved translated program file name is ``__model__``,
-    and the default saved persistable variables file name is ``__variables__``,
-    and it also saved some additional variable description information to file 
-    ``__variables.info__``, these additional information is used in fine-tuning.
+    It will save the translated program and all related persistable
+    variables of input Layer to given ``path`` .
+
+    ``path`` is the prefix of saved objects, and the saved translated program file
+    suffix is ``.pdmodel`` , the saved persistable variables file suffix is ``.pdiparams`` ,
+    and here also saved some additional variable description information to a file,
+    its suffix is ``.pdiparams.info``, these additional information is used in fine-tuning.
 
     The saved model can be loaded by follow APIs:
-      - :ref:`api_imperative_jit_load`
-      - :ref:`api_fluid_io_load_inference_model` (need pass ``params_filename='__variables__'``)
+      - ``paddle.jit.load``
+      - ``paddle.static.load_inference_model``
       - Other C++ inference APIs
 
+    .. note::
+        When using ``paddle.jit.save`` to save a function, parameters will not be saved. If you have to 
+        save the parameter, please pass the Layer containing function and parameter to ``paddle.jit.save``.
+
     Args:
-        layer (Layer): the Layer to be saved. The Layer should be decorated by `@declarative`.
-        model_path (str): the directory to save the model.
-        input_spec (list[Variable], optional): Describes the input of the saved model. 
-            It is the example inputs that will be passed to saved TranslatedLayer's forward
-            function. If None, all input variables of the original Layer's forward function
-            would be the inputs of the saved model. Default None.
-        config (SaveLoadConfig, optional): :ref:`api_imperative_jit_saveLoadConfig` object
-            that specifies additional configuration options. Default None.
+        layer (Layer|function): The Layer or function to be saved.
+        path (str): The path prefix to save model. The format is ``dirname/file_prefix`` or ``file_prefix``.
+        input_spec (list or tuple[InputSpec|Tensor|Python built-in variable], optional): Describes the input of the saved model's forward
+            method, which can be described by InputSpec or example Tensor. Moreover, we support to specify non-tensor type argument,
+            such as int, float, string, or list/dict of them.If None, all input variables of
+            the original Layer's forward method would be the inputs of the saved model. Default None.
+        **configs (dict, optional): Other save configuration options for compatibility. We do not
+            recommend using these configurations, they may be removed in the future. If not necessary,
+            DO NOT use them. Default None.
+            The following options are currently supported:
+            (1) output_spec (list[Tensor]): Selects the output targets of the saved model.
+            By default, all return variables of original Layer's forward method are kept as the
+            output of the saved model. If the provided ``output_spec`` list is not all output variables,
+            the saved model will be pruned according to the given ``output_spec`` list.
+
     Returns:
         None
 
     Examples:
         .. code-block:: python
 
+            # example 1: save layer
             import numpy as np
             import paddle
             import paddle.nn as nn
@@ -725,10 +723,6 @@ def save(layer, model_path, input_spec=None, config=None):
                         print("Epoch {} batch {}: loss = {}".format(
                             epoch_id, batch_id, np.mean(loss.numpy())))
 
-            # enable dygraph mode
-            place = paddle.CPUPlace()
-            paddle.disable_static(place) 
-
             # 1. train & save model.
 
             # create network
@@ -739,7 +733,6 @@ def save(layer, model_path, input_spec=None, config=None):
             # create data loader
             dataset = RandomDataset(BATCH_NUM * BATCH_SIZE)
             loader = paddle.io.DataLoader(dataset,
-                places=place,
                 batch_size=BATCH_SIZE,
                 shuffle=True,
                 drop_last=True,
@@ -749,144 +742,292 @@ def save(layer, model_path, input_spec=None, config=None):
             train(layer, loader, loss_fn, adam)
 
             # save
-            model_path = "linear.example.model"
-            paddle.jit.save(layer, model_path)
+            path = "example_model/linear"
+            paddle.jit.save(layer, path)
+
+            # example 2: save function
+            import paddle
+            from paddle.static import InputSpec
+
+
+            def save_function():
+                @paddle.jit.to_static
+                def fun(inputs):
+                    return paddle.tanh(inputs)
+
+                path = 'test_jit_save_load_function_1/func'
+                inps = paddle.rand([3, 6])
+                origin = fun(inps)
+
+                paddle.jit.save(fun, path)
+                load_func = paddle.jit.load(path)
+
+                load_result = load_func(inps)
+                print((load_result - origin).abs().max() < 1e-10)
+                
+            save_function()
     """
 
-    def get_inout_spec(all_vars, target_vars, return_name=False):
-        result_list = []
-        valid_var_dict = {}
-        valid_vars = [var for var in all_vars if isinstance(var, Variable)]
-        for var in valid_vars:
-            valid_var_dict[var.name] = var
-        if target_vars:
-            for i, var in enumerate(target_vars):
-                # check target var whether exists
-                if var.name not in valid_var_dict:
-                    raise RuntimeError(
-                        "The variable to feed/fetch are not exist.")
-                result_list.append(valid_var_dict[var.name])
-        else:
-            result_list = valid_vars
-        if return_name:
-            result_list = [var.name for var in result_list]
-
-        return result_list
-
-    # 1. input check
+    # 1. input build & check
     prog_translator = ProgramTranslator()
-    if not prog_translator.enable:
+    if not prog_translator.enable_to_static:
         raise RuntimeError(
-            "The paddle.jit.save doesn't work when setting ProgramTranslator.enable=False."
+            "The paddle.jit.save doesn't work when setting ProgramTranslator.enable to False."
         )
-    if not isinstance(layer, Layer):
+
+    if not (isinstance(layer, Layer) or inspect.isfunction(layer) or isinstance(
+            layer, StaticFunction)):
         raise TypeError(
-            "The input layer of paddle.jit.save should be 'Layer', but received layer type is %s."
+            "The input of paddle.jit.save should be 'Layer' or 'Function', but received input type is %s."
             % type(layer))
+    elif inspect.isfunction(layer) or isinstance(layer, StaticFunction):
+        warnings.warn(
+            'What you save is a function, and `jit.save` will generate the name of the model file according to `path` you specify. When loading these files with `jit.load`, you get a `TranslatedLayer` whose inference result is the same as the inference result of the function you saved.'
+        )
 
-    configs = config
-    if configs is None:
-        configs = SaveLoadConfig()
+    # NOTE(chenweihang): If the input layer be wrapped by DataParallel,
+    # the args and kwargs of forward method will can't be parsed by
+    # function_spec, so here we save DataParallel._layers instead
+    # DataParallel it self
+    # NOTE(chenweihang): using inner_layer, do not change input layer
+    if isinstance(layer, paddle.DataParallel):
+        inner_layer = layer._layers
+    else:
+        inner_layer = layer
 
+    # path check
+    file_prefix = os.path.basename(path)
+    if file_prefix == "":
+        raise ValueError(
+            "The input path MUST be format of dirname/file_prefix "
+            "[dirname\\file_prefix in Windows system], but received "
+            "file_prefix is empty string.")
+
+    dirname = os.path.dirname(path)
+    if dirname and not os.path.exists(dirname):
+        os.makedirs(dirname)
+
+    # avoid change user given input_spec
+    inner_input_spec = None
     if input_spec is not None:
-        if not isinstance(input_spec, list):
+        if isinstance(layer, Layer):
+            for attr_func in dir(inner_layer):
+                static_func = getattr(inner_layer, attr_func, None)
+                if isinstance(static_func,
+                              StaticFunction) and 'forward' != attr_func:
+                    raise ValueError(
+                        "If there are static functions other than 'forward' that need to be saved, the input 'input_spec' should be None, but received the type of 'input_spec' is %s."
+                        % type(input_spec))
+
+        if not isinstance(input_spec, (list, tuple)):
             raise TypeError(
                 "The input input_spec should be 'list', but received input_spec's type is %s."
                 % type(input_spec))
-        for var in input_spec:
-            if not isinstance(var, (core.VarBase, Variable,
-                                    paddle.static.InputSpec)):
-                raise TypeError(
-                    "The element in input_spec list should be 'Variable' or `paddle.static.InputSpec`, but received element's type is %s."
-                    % type(var))
+        inner_input_spec = []
+        for var in flatten(input_spec):
+            if isinstance(var, paddle.static.InputSpec):
+                inner_input_spec.append(var)
+            elif isinstance(var, (core.VarBase, core.eager.Tensor, Variable)):
+                inner_input_spec.append(
+                    paddle.static.InputSpec.from_tensor(var))
+            else:
+                # NOTE(Aurelius84): Support non-Tensor type in `input_spec`.
+                inner_input_spec.append(var)
 
-    # 2. get program of declarative Layer.forward
-    if not isinstance(layer.forward, StaticLayer):
-        raise RuntimeError(
-            "layer.forward need to be decorated by `@declarative`.")
-    concrete_program = layer.forward.concrete_program
+    # parse configs
+    configs = _parse_save_configs(configs)
+    # whether outermost layer has pre/post hook, if does, we need also save
+    # these operators in program. 
+    with_hook = configs.with_hook
 
-    # NOTE: we maintain the mapping of variable name to
-    # structured name, the buffer variable (non-persistable)
-    # saved to inference program may not need by dygraph Layer, 
-    # we only record the state_dict variable's structured name
-    state_names_dict = dict()
-    for structured_name, var in six.iteritems(layer.state_dict()):
-        state_names_dict[var.name] = structured_name
-
-    # 3. share parameters from Layer to scope & record var info
     scope = core.Scope()
     extra_var_info = dict()
-    for param_or_buffer in concrete_program.parameters:
-        # share to scope
-        param_or_buffer_tensor = scope.var(param_or_buffer.name).get_tensor()
-        src_tensor = param_or_buffer.value().get_tensor()
-        param_or_buffer_tensor._share_data_with(src_tensor)
-        # record var info
-        extra_info_dict = dict()
-        if param_or_buffer.name in state_names_dict:
-            extra_info_dict['structured_name'] = state_names_dict[
-                param_or_buffer.name]
-        extra_info_dict['stop_gradient'] = param_or_buffer.stop_gradient
-        if isinstance(param_or_buffer, ParamBase):
-            extra_info_dict['trainable'] = param_or_buffer.trainable
-        extra_var_info[param_or_buffer.name] = extra_info_dict
+    if isinstance(layer, Layer):
+        functions = dir(inner_layer)
+        if inner_layer._forward_pre_hooks or inner_layer._forward_post_hooks:
+            with_hook = True
+    else:
+        # layer is function
+        functions = [layer, ]
+    for attr_func in functions:
+        if isinstance(layer, Layer):
+            static_func = getattr(inner_layer, attr_func, None)
+            if isinstance(static_func, StaticFunction):
+                concrete_program = static_func.concrete_program_specify_input_spec(
+                    inner_input_spec, with_hook=with_hook)
+            elif 'forward' == attr_func:
+                # transform in jit.save, if input_spec is incomplete, declarative will throw error
+                # inner_input_spec is list[InputSpec], it should be packed with same structure
+                # as original input_spec here.
+                if inner_input_spec:
+                    inner_input_spec = pack_sequence_as(input_spec,
+                                                        inner_input_spec)
+                static_forward = declarative(
+                    inner_layer.forward, input_spec=inner_input_spec)
+                concrete_program = static_forward.concrete_program_specify_input_spec(
+                    with_hook=with_hook)
+                # the input_spec has been used in declarative, which is equal to
+                # @declarative with input_spec and jit.save without input_spec,
+                # avoid needless warning
+                inner_input_spec = None
+            else:
+                continue
 
-    # 4. build input & output spec
-    input_var_names = get_inout_spec(concrete_program.inputs, input_spec, True)
-    output_vars = get_inout_spec(concrete_program.outputs, configs.output_spec)
+        else:
+            # When layer is a function
+            if isinstance(attr_func, StaticFunction):
+                concrete_program = attr_func.concrete_program_specify_input_spec(
+                    inner_input_spec)
+            else:
+                if inner_input_spec:
+                    inner_input_spec = pack_sequence_as(input_spec,
+                                                        inner_input_spec)
+                static_function = declarative(
+                    attr_func, input_spec=inner_input_spec)
+                concrete_program = static_function.concrete_program
 
-    # 5. save inference model
-    from paddle.fluid.io import save_inference_model
+                if static_function._class_instance is None:
+                    warnings.warn(
+                        '`jit.save` will only save the `Program`, not the parameters. If you have to save the parameters, please make sure that {} is a member function of `paddle.nn.Layer` and the saved parameters are in `state_dict`'.
+                        format(layer))
 
-    # VARIABLE_FILENAME keep nameing style consistent with '__model__'
-    if configs.params_filename is None:
-        configs.params_filename = VARIABLE_FILENAME
+        dygraph_state_dict = None
+        if isinstance(inner_layer, Layer):
+            dygraph_state_dict = inner_layer.to_static_state_dict()
+        elif isinstance(attr_func, StaticFunction):
+            if attr_func._class_instance:
+                dygraph_state_dict = attr_func._class_instance.to_static_state_dict(
+                )
 
-    with scope_guard(scope):
-        save_inference_model(
-            dirname=model_path,
-            feeded_var_names=input_var_names,
-            target_vars=output_vars,
-            executor=Executor(_current_expected_place()),
-            main_program=concrete_program.main_program.clone(),
-            model_filename=configs.model_filename,
-            params_filename=None
-            if configs.separate_params else configs.params_filename,
-            export_for_deployment=configs._export_for_deployment,
-            program_only=configs._program_only)
+        if dygraph_state_dict:
+            # NOTE(chenweihang): we maintain the mapping of variable name to
+            # structured name, the buffer variable (non-persistable)
+            # saved to inference program may not need by dygraph Layer,
+            # we only record the state_dict variable's structured name
+            state_names_dict = dict()
+            state_var_dict = dict()
+            for structured_name, var in six.iteritems(dygraph_state_dict):
+                state_names_dict[var.name] = structured_name
+                state_var_dict[var.name] = var
 
-        # NOTE: [ Save extra variable info ]
-        # save_inference_model will lose some important variable information, including:
-        #   - Variable name and correspondence (when saved variables as one file)
-        #   - Variable.stop_gradient information
-        #   - Which persistent variable are parameter and which are not
-        #   - Parameter.trainable information
-        #
-        # The lost information cannot be recovered when it is loaded again, 
-        # so if we want to perform fine-tune after loading, we may need to 
-        # configure redundant information to proceed.
-        #
-        # Due to compatibility issues, we cannot change the original storage structure, 
-        # but we can save these information in `jit.save` without changing the original 
-        # storage to improve user experience. So we save extra information into
-        # file `__variables.info__`
-        extra_var_info_path = os.path.join(model_path, EXTRA_VAR_INFO_FILENAME)
-        with open(extra_var_info_path, 'wb') as f:
-            pickle.dump(extra_var_info, f, protocol=2)
+            # 3. share parameters from Layer to scope & record var info
+            with dygraph.guard():
+                for param_or_buffer in concrete_program.parameters:
+                    # share to scope
+                    if param_or_buffer.type == core.VarDesc.VarType.VOCAB:
+                        scr_tensor = param_or_buffer.value().get_map_tensor()
+                        tgt_var = scope.var(param_or_buffer.name)
+                        tgt_var.set_vocab(scr_tensor)
+                    else:
+                        param_or_buffer_tensor = scope.var(
+                            param_or_buffer.name).get_tensor()
+                        #src_tensor = param_or_buffer.value().get_tensor()
+                        src_tensor = state_var_dict[param_or_buffer.name].value(
+                        ).get_tensor()
+                        param_or_buffer_tensor._share_data_with(src_tensor)
+                    # record var info
+                    if param_or_buffer.name not in extra_var_info:
+                        extra_info_dict = dict()
+                        if param_or_buffer.name in state_names_dict:
+                            extra_info_dict[
+                                'structured_name'] = state_names_dict[
+                                    param_or_buffer.name]
+                        extra_info_dict[
+                            'stop_gradient'] = param_or_buffer.stop_gradient
+                        if isinstance(param_or_buffer,
+                                      (ParamBase, EagerParamBase)):
+                            extra_info_dict[
+                                'trainable'] = param_or_buffer.trainable
+                        extra_var_info[param_or_buffer.name] = extra_info_dict
+
+        # 4. build input & output of save_infernece_model
+        # NOTE(chenweihang): [ Get input variables name ]
+        # There are two cases, whether to prune the inputs or not
+        # - not prune inputs (recommend):
+        #   - the len(input_spec) == len((concrete_program.inputs) - 1
+        #   - here can use concrete_program.inputs directly
+        # - prune inputs:
+        #   - the input_spec length < len((concrete_program.inputs) - 1
+        #   - the input_spec's name should be in concrete_program.inputs
+        input_var_names = _get_input_var_names(concrete_program.inputs,
+                                               inner_input_spec)
+
+        # NOTE(chenweihang): [ Get output variables ]
+        # the rule is like [ Get input variables name ]. For output var,
+        # we only support VarBase spec, and actually, we only need the
+        # var name of output, and we don't recommended to use output_spec
+        # print(concrete_program.main_program)
+        # print(concrete_program.outputs, configs.output_spec)
+        output_vars = _get_output_vars(concrete_program.outputs,
+                                       configs.output_spec, with_hook)
+
+        # 5. save inference model
+        from paddle.fluid.io import save_inference_model
+
+        # construct new save_inference_model arguments
+        model_path = dirname
+        # NOTE(chenweihang): because prefix contains model and params filename,
+        # so we don't support set model_filename & params_filename
+        if 'forward' == attr_func or not isinstance(layer, Layer):
+            model_filename = file_prefix + INFER_MODEL_SUFFIX
+            params_filename = file_prefix + INFER_PARAMS_SUFFIX
+        else:
+            model_filename = file_prefix + '.' + attr_func + INFER_MODEL_SUFFIX
+            params_filename = file_prefix + '.' + attr_func + INFER_PARAMS_SUFFIX
+
+        with scope_guard(scope):
+            save_inference_model(
+                dirname=model_path,
+                feeded_var_names=input_var_names,
+                target_vars=output_vars,
+                executor=Executor(_current_expected_place()),
+                main_program=concrete_program.main_program.clone(),
+                model_filename=model_filename,
+                params_filename=params_filename,
+                export_for_deployment=configs._export_for_deployment,
+                program_only=configs._program_only,
+                clip_extra=False)
+
+    # NOTE(chenweihang): [ Save extra variable info ]
+    # save_inference_model will lose some important variable information, including:
+    #   - Variable name and correspondence (when saved variables as one file)
+    #   - Variable.stop_gradient information
+    #   - Which persistent variable are parameter and which are not
+    #   - Parameter.trainable information
+    #
+    # The lost information cannot be recovered when it is loaded again,
+    # so if we want to perform fine-tune after loading, we may need to
+    # configure redundant information to proceed.
+    #
+    # Due to compatibility issues, we cannot change the original storage structure,
+    # but we can save these information in `jit.save` without changing the original
+    # storage to improve user experience. So we save extra information into
+    # file `***.pdiparams.info`
+
+    # "layer" can only be Layer or function or StaticFunction.
+
+    contain_parameter = False
+    for var in concrete_program.main_program.list_vars():
+        contain_parameter |= isinstance(var, Parameter)
+
+    if (isinstance(layer, Layer) or contain_parameter) and extra_var_info:
+        with scope_guard(scope):
+            extra_var_info_path = path + INFER_PARAMS_INFO_SUFFIX
+            with open(extra_var_info_path, 'wb') as f:
+                pickle.dump(extra_var_info, f, protocol=2)
 
 
-@deprecate_save_load_configs
 @dygraph_only
-def load(model_path, config=None):
+def load(path, **configs):
     """
     :api_attr: imperative
 
-    Load model saved by :ref:`api_imperative_jit_save` or :ref:`api_fluid_io_save_inference_model`
-    as :ref:`api_imperative_TranslatedLayer`, then performing inference or fine-tune training.
+    Load model saved by ``paddle.jit.save`` or ``paddle.static.save_inference_model`` or
+    paddle 1.x API ``paddle.fluid.io.save_inference_model`` as ``paddle.jit.TranslatedLayer``,
+    then performing inference or fine-tune training.
 
     .. note::
-        For some historical reasons, if you load model saved by :ref:`api_fluid_io_save_inference_model`,
+        If you load model saved by ``paddle.static.save_inference_model`` ,
         there will be the following limitations when using it in fine-tuning:
         1. Imperative mode do not support LoDTensor. All original model's feed targets or parametars that depend on LoD are temporarily unavailable.
         2. All saved model's feed targets need to be passed into TranslatedLayer's forward function.
@@ -894,15 +1035,23 @@ def load(model_path, config=None):
         4. The parameter's ``trainable`` information is lost and can not be recovered.
 
     Args:
-        model_path (str): The directory path where the model is saved.
-        config (SaveLoadConfig, optional): :ref:`api_imperative_jit_saveLoadConfig` object that specifies 
-            additional configuration options. Default None.
+        path (str): The path prefix to load model. The format is ``dirname/file_prefix`` or ``file_prefix`` .
+        **configs (dict, optional): Other load configuration options for compatibility. We do not
+            recommend using these configurations, they may be removed in the future. If not necessary,
+            DO NOT use them. Default None.
+            The following options are currently supported:
+            (1) model_filename (str): The inference model file name of the paddle 1.x
+            ``save_inference_model`` save format. Default file name is :code:`__model__` .
+            (2) params_filename (str): The persistable variables file name of the paddle 1.x
+            ``save_inference_model`` save format. No default file name, save variables separately
+            by default.
+
 
     Returns:
         TranslatedLayer: A Layer object can run saved translated model.
 
     Examples:
-        1. Load model saved by :ref:`api_imperative_jit_save` then performing inference and fine-tune training.
+        1. Load model saved by ``paddle.jit.save`` then performing inference and fine-tune training.
 
         .. code-block:: python
 
@@ -951,10 +1100,6 @@ def load(model_path, config=None):
                         print("Epoch {} batch {}: loss = {}".format(
                             epoch_id, batch_id, np.mean(loss.numpy())))
 
-            # enable dygraph mode
-            place = paddle.CPUPlace()
-            paddle.disable_static(place) 
-
             # 1. train & save model.
 
             # create network
@@ -965,7 +1110,6 @@ def load(model_path, config=None):
             # create data loader
             dataset = RandomDataset(BATCH_NUM * BATCH_SIZE)
             loader = paddle.io.DataLoader(dataset,
-                places=place,
                 batch_size=BATCH_SIZE,
                 shuffle=True,
                 drop_last=True,
@@ -975,13 +1119,13 @@ def load(model_path, config=None):
             train(layer, loader, loss_fn, adam)
 
             # save
-            model_path = "linear.example.model"
-            paddle.jit.save(layer, model_path)
+            path = "example_model/linear"
+            paddle.jit.save(layer, path)
 
             # 2. load model
 
             # load
-            loaded_layer = paddle.jit.load(model_path)
+            loaded_layer = paddle.jit.load(path)
 
             # inference
             loaded_layer.eval()
@@ -994,15 +1138,16 @@ def load(model_path, config=None):
             train(loaded_layer, loader, loss_fn, adam)
 
 
-        2. Load model saved by :ref:`api_fluid_io_save_inference_model` then performing and fine-tune training.
+        2. Load model saved by ``paddle.fluid.io.save_inference_model`` then performing and fine-tune training.
 
         .. code-block:: python
 
             import numpy as np
             import paddle
-            import paddle.fluid as fluid
+            import paddle.static as static
             import paddle.nn as nn
             import paddle.optimizer as opt
+            import paddle.nn.functional as F
 
             BATCH_SIZE = 16
             BATCH_NUM = 4
@@ -1024,38 +1169,41 @@ def load(model_path, config=None):
                 def __len__(self):
                     return self.num_samples
 
-            image = fluid.data(name='image', shape=[None, 784], dtype='float32')
-            label = fluid.data(name='label', shape=[None, 1], dtype='int64')
-            pred = fluid.layers.fc(input=image, size=10, act='softmax')
-            loss = fluid.layers.cross_entropy(input=pred, label=label)
-            avg_loss = fluid.layers.mean(loss)
+            paddle.enable_static()
 
-            optimizer = fluid.optimizer.SGD(learning_rate=0.001)
+            image = static.data(name='image', shape=[None, 784], dtype='float32')
+            label = static.data(name='label', shape=[None, 1], dtype='int64')
+            pred = static.nn.fc(x=image, size=10, activation='softmax')
+            loss = F.cross_entropy(input=pred, label=label)
+            avg_loss = paddle.mean(loss)
+
+            optimizer = paddle.optimizer.SGD(learning_rate=0.001)
             optimizer.minimize(avg_loss)
 
-            place = fluid.CPUPlace()
-            exe = fluid.Executor(place)
-            exe.run(fluid.default_startup_program())
+            place = paddle.CPUPlace()
+            exe = static.Executor(place)
+            exe.run(static.default_startup_program())
 
             # create data loader
             dataset = RandomDataset(BATCH_NUM * BATCH_SIZE)
             loader = paddle.io.DataLoader(dataset,
                 feed_list=[image, label],
                 places=place,
-                batch_size=BATCH_SIZE, 
+                batch_size=BATCH_SIZE,
                 shuffle=True,
                 drop_last=True,
+                return_list=False,
                 num_workers=2)
 
             # 1. train and save inference model
             for data in loader():
                 exe.run(
-                    fluid.default_main_program(),
-                    feed=data, 
+                    static.default_main_program(),
+                    feed=data,
                     fetch_list=[avg_loss])
 
             model_path = "fc.example.model"
-            fluid.io.save_inference_model(
+            paddle.fluid.io.save_inference_model(
                 model_path, ["image"], [pred], exe)
 
             # 2. load model
@@ -1091,6 +1239,10 @@ def load(model_path, config=None):
                     print("Epoch {} batch {}: loss = {}".format(
                         epoch_id, batch_id, np.mean(loss.numpy())))
     """
+    # 1. construct correct config
+    config = _parse_load_config(configs)
+    model_path, config = _build_load_path_and_config(path, config)
+
     return TranslatedLayer._construct(model_path, config)
 
 
@@ -1115,7 +1267,7 @@ def _trace(layer,
             outputs = [original_outputs]
         else:
             outputs = original_outputs
-        out_vars = [var for var in outputs]
+        out_vars = extract_vars(outputs, err_tag='outputs')
 
         program_desc, feed_names, fetch_names, parameters = tracer.create_program_desc(
             var_list, feed_prefix, out_vars, fetch_prefix, tmp_prefix)
@@ -1130,7 +1282,7 @@ def _trace(layer,
 class TracedLayer(object):
     """
     :api_attr: imperative
-    
+
     TracedLayer is used to convert a forward dygraph model to a static
     graph model. This is mainly used to save the dygraph model for online
     inference using C++. Besides, users can also do inference in Python
@@ -1188,7 +1340,7 @@ class TracedLayer(object):
         model and convert it into a static graph model.
 
         Args:
-            layer (dygraph.Layer): the layer object to be traced.
+            layer (paddle.nn.Layer): the layer object to be traced.
             inputs (list(Tensor)|tuple(Tensor)|Tensor): the input tensors of
                 the layer object.
 
@@ -1200,32 +1352,30 @@ class TracedLayer(object):
         Examples:
             .. code-block:: python:
 
-                import paddle.fluid as fluid
-                from paddle.fluid.dygraph import Linear, to_variable, TracedLayer
-                import numpy as np
+                import paddle
 
-                class ExampleLayer(fluid.dygraph.Layer):
+                class ExampleLayer(paddle.nn.Layer):
                     def __init__(self):
                         super(ExampleLayer, self).__init__()
-                        self._fc = Linear(3, 10)
+                        self._fc = paddle.nn.Linear(3, 10)
 
                     def forward(self, input):
                         return self._fc(input)
 
-                with fluid.dygraph.guard():
-                    layer = ExampleLayer()
-                    in_np = np.random.random([2, 3]).astype('float32')
-                    in_var = to_variable(in_np)
-                    out_dygraph, static_layer = TracedLayer.trace(layer, inputs=[in_var])
 
-                    # run the static graph model using Executor inside
-                    out_static_graph = static_layer([in_var])
+                layer = ExampleLayer()
+                in_var = paddle.uniform(shape=[2, 3], dtype='float32')
+                out_dygraph, static_layer = paddle.jit.TracedLayer.trace(layer, inputs=[in_var])
 
-                    print(len(out_static_graph)) # 1
-                    print(out_static_graph[0].shape) # (2, 10)
+                # run the static graph model using Executor inside
+                out_static_graph = static_layer([in_var])
 
-                    # save the static graph model for inference
-                    static_layer.save_inference_model(dirname='./saved_infer_model')
+                print(len(out_static_graph)) # 1
+                print(out_static_graph[0].shape) # (2, 10)
+
+                # save the static graph model for inference
+                static_layer.save_inference_model(dirname='./saved_infer_model')
+
         """
         assert isinstance(
             layer, Layer
@@ -1251,33 +1401,30 @@ class TracedLayer(object):
         Examples:
             .. code-block:: python:
 
-                import paddle.fluid as fluid
-                from paddle.fluid.dygraph import Linear, to_variable, TracedLayer
-                import numpy as np
+                import paddle
 
-                class ExampleLayer(fluid.dygraph.Layer):
+                class ExampleLayer(paddle.nn.Layer):
                     def __init__(self):
                         super(ExampleLayer, self).__init__()
-                        self._fc = Linear(3, 10)
+                        self._fc = paddle.nn.Linear(3, 10)
 
                     def forward(self, input):
                         return self._fc(input)
 
-                with fluid.dygraph.guard():
-                    layer = ExampleLayer()
-                    in_np = np.random.random([2, 3]).astype('float32')
-                    in_var = to_variable(in_np)
+                layer = ExampleLayer()
+                in_var = paddle.uniform(shape=[2, 3], dtype='float32')
 
-                    out_dygraph, static_layer = TracedLayer.trace(layer, inputs=[in_var])
+                out_dygraph, static_layer = paddle.jit.TracedLayer.trace(layer, inputs=[in_var])
 
-                    build_strategy = fluid.BuildStrategy()
-                    build_strategy.enable_inplace = True
+                build_strategy = paddle.static.BuildStrategy()
+                build_strategy.enable_inplace = True
 
-                    exec_strategy = fluid.ExecutionStrategy()
-                    exec_strategy.num_threads = 2
+                exec_strategy = paddle.static.ExecutionStrategy()
+                exec_strategy.num_threads = 2
 
-                    static_layer.set_strategy(build_strategy=build_strategy, exec_strategy=exec_strategy)
-                    out_static_graph = static_layer([in_var])
+                static_layer.set_strategy(build_strategy=build_strategy, exec_strategy=exec_strategy)
+                out_static_graph = static_layer([in_var])
+
         """
         assert self._compiled_program is None, "Cannot set strategy after run"
         assert isinstance(
@@ -1304,7 +1451,7 @@ class TracedLayer(object):
             "Inputs should be a list or tuple of variables"
         assert len(inputs) == len(self._feed_names)
         feed_dict = {}
-        if in_dygraph_mode():
+        if _non_static_mode():
             for x, name in zip(inputs, self._feed_names):
                 feed_dict[name] = x.value().get_tensor()
         else:
@@ -1327,13 +1474,16 @@ class TracedLayer(object):
             return self._run(self._build_feed(inputs))
 
     @switch_to_static_graph
-    def save_inference_model(self, dirname, feed=None, fetch=None):
+    def save_inference_model(self, path, feed=None, fetch=None, **kwargs):
         """
         Save the TracedLayer to a model for inference. The saved
         inference model can be loaded by C++ inference APIs.
 
+        ``path`` is the prefix of saved objects, and the saved translated program file
+        suffix is ``.pdmodel`` , the saved persistable variables file suffix is ``.pdiparams`` .
+
         Args:
-            dirname (str): the directory to save the inference model.
+            path(str): The path prefix to save model. The format is ``dirname/file_prefix`` or ``file_prefix``.
             feed (list[int], optional): the input variable indices of the saved
                 inference model. If None, all input variables of the
                 TracedLayer object would be the inputs of the saved inference
@@ -1342,6 +1492,7 @@ class TracedLayer(object):
                 saved inference model. If None, all output variables of the
                 TracedLayer object would be the outputs of the saved inference
                 model. Default None.
+            kwargs: Supported keys including 'clip_extra'.set to True if you want to clip extra information for every operator.
 
         Returns:
             None
@@ -1349,36 +1500,35 @@ class TracedLayer(object):
         Examples:
             .. code-block:: python:
 
-                import paddle.fluid as fluid
-                from paddle.fluid.dygraph import Linear, to_variable, TracedLayer
                 import numpy as np
+                import paddle
 
-                class ExampleLayer(fluid.dygraph.Layer):
+                class ExampleLayer(paddle.nn.Layer):
                     def __init__(self):
                         super(ExampleLayer, self).__init__()
-                        self._fc = Linear(3, 10)
+                        self._fc = paddle.nn.Linear(3, 10)
 
                     def forward(self, input):
                         return self._fc(input)
 
                 save_dirname = './saved_infer_model'
                 in_np = np.random.random([2, 3]).astype('float32')
+                in_var = paddle.to_tensor(in_np)
+                layer = ExampleLayer()
 
-                with fluid.dygraph.guard():
-                    layer = ExampleLayer()
-                    in_var = to_variable(in_np)
-                    out_dygraph, static_layer = TracedLayer.trace(layer, inputs=[in_var])
-                    static_layer.save_inference_model(save_dirname, feed=[0], fetch=[0])
+                out_dygraph, static_layer = paddle.jit.TracedLayer.trace(layer, inputs=[in_var])
+                static_layer.save_inference_model(save_dirname, feed=[0], fetch=[0])
 
-                place = fluid.CPUPlace()
-                exe = fluid.Executor(place)
-                program, feed_vars, fetch_vars = fluid.io.load_inference_model(save_dirname,
+                paddle.enable_static()
+                place = paddle.CPUPlace()
+                exe = paddle.static.Executor(place)
+                program, feed_vars, fetch_vars = paddle.static.load_inference_model(save_dirname,
                                                     exe)
 
                 fetch, = exe.run(program, feed={feed_vars[0]: in_np}, fetch_list=fetch_vars)
                 print(fetch.shape) # (2, 10)
         """
-        check_type(dirname, "dirname", str,
+        check_type(path, "path", str,
                    "fluid.dygraph.jit.TracedLayer.save_inference_model")
         check_type(feed, "feed", (type(None), list),
                    "fluid.dygraph.jit.TracedLayer.save_inference_model")
@@ -1392,6 +1542,18 @@ class TracedLayer(object):
             for f in fetch:
                 check_type(f, "each element of fetch", int,
                            "fluid.dygraph.jit.TracedLayer.save_inference_model")
+        clip_extra = kwargs.get('clip_extra', False)
+        # path check
+        file_prefix = os.path.basename(path)
+        if file_prefix == "":
+            raise ValueError(
+                "The input path MUST be format of dirname/file_prefix "
+                "[dirname\\file_prefix in Windows system], but received "
+                "file_prefix is empty string.")
+
+        dirname = os.path.dirname(path)
+        if dirname and not os.path.exists(dirname):
+            os.makedirs(dirname)
 
         from paddle.fluid.io import save_inference_model
 
@@ -1410,9 +1572,15 @@ class TracedLayer(object):
                 assert target_var is not None, "{} cannot be found".format(name)
                 target_vars.append(target_var)
 
+            model_filename = file_prefix + INFER_MODEL_SUFFIX
+            params_filename = file_prefix + INFER_PARAMS_SUFFIX
+
             save_inference_model(
                 dirname=dirname,
                 feeded_var_names=feeded_var_names,
                 target_vars=target_vars,
                 executor=self._exe,
-                main_program=self._program.clone())
+                main_program=self._program.clone(),
+                model_filename=model_filename,
+                params_filename=params_filename,
+                clip_extra=clip_extra)

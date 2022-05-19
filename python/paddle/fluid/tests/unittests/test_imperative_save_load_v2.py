@@ -27,6 +27,7 @@ from test_imperative_base import new_program_scope
 import numpy as np
 import six
 import paddle
+from paddle.fluid.framework import _test_eager_guard
 
 
 class SimpleLSTMRNN(fluid.Layer):
@@ -208,7 +209,7 @@ class PtbModel(fluid.Layer):
 
 
 class TestDygraphPtbRnn(unittest.TestCase):
-    def setUp(self):
+    def func_setUp(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -219,7 +220,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -239,7 +240,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             place = fluid.CPUPlace() if not core.is_compiled_with_cuda(
             ) else fluid.CUDAPlace(0)
-            scheduler = paddle.optimizer.PiecewiseLR(
+            scheduler = paddle.optimizer.lr.PiecewiseDecay(
                 boundaries=bd, values=lr_arr)
             adam = Adam(
                 learning_rate=scheduler, parameters=ptb_model.parameters())
@@ -279,13 +280,13 @@ class TestDygraphPtbRnn(unittest.TestCase):
             self.opti_dict = adam.state_dict()
             self.base_opti = {}
             for k, v in self.opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     self.base_opti[v.name] = v.numpy()
                     self.assertTrue(np.sum(np.abs(v.numpy())) != 0)
                 else:
                     self.base_opti[k] = v
 
-            fluid.save_dygraph(self.opti_dict, "./test_dy_v2")
+            paddle.save(self.opti_dict, "./test_dy_v2.pdopt")
 
             self.state_dict = ptb_model.state_dict()
 
@@ -294,9 +295,9 @@ class TestDygraphPtbRnn(unittest.TestCase):
                 np_t = v.numpy()
                 self.model_base[k] = np_t
 
-            paddle.save(self.state_dict, "./test_dy_v2")
+            paddle.save(self.state_dict, "./test_dy_v2.pdparams")
 
-    def testLoadAndSetVarBase(self):
+    def func_testLoadAndSetVarBase(self):
         self.setUp()
         seed = 90
         hidden_size = 10
@@ -308,7 +309,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -328,7 +329,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             place = fluid.CPUPlace() if not core.is_compiled_with_cuda(
             ) else fluid.CUDAPlace(0)
-            scheduler = paddle.optimizer.PiecewiseLR(
+            scheduler = paddle.optimizer.lr.PiecewiseDecay(
                 boundaries=bd, values=lr_arr)
             adam = Adam(
                 learning_rate=scheduler, parameters=ptb_model.parameters())
@@ -367,19 +368,20 @@ class TestDygraphPtbRnn(unittest.TestCase):
             opti_dict = adam.state_dict()
             # set to zero
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     np_t = v.numpy()
                     var = v.value().get_tensor()
                     var.set(np.zeros_like(np_t), place)
 
                     self.assertTrue(np.sum(np.abs(v.numpy())) == 0)
 
-            para_state_dict, opti_state_dict = paddle.load("./test_dy_v2")
+            para_state_dict = paddle.load("./test_dy_v2.pdparams")
+            opti_state_dict = paddle.load("./test_dy_v2.pdopt")
             adam.set_state_dict(opti_state_dict)
 
             opti_dict = adam.state_dict()
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     self.assertTrue(
                         np.array_equal(v.numpy(), self.base_opti[v.name]))
                 else:
@@ -404,7 +406,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testSetVariable(self):
+    def func_testSetVariable(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -415,7 +417,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -435,7 +437,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             place = fluid.CPUPlace() if not core.is_compiled_with_cuda(
             ) else fluid.CUDAPlace(0)
-            scheduler = paddle.optimizer.PiecewiseLR(
+            scheduler = paddle.optimizer.lr.PiecewiseDecay(
                 boundaries=bd, values=lr_arr)
             adam = Adam(
                 learning_rate=scheduler, parameters=ptb_model.parameters())
@@ -474,7 +476,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
             opti_dict = adam.state_dict()
             # set to zero
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     np_t = v.numpy()
                     var = v.value().get_tensor()
                     var.set(np.zeros_like(np_t), place)
@@ -487,7 +489,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
             adam.set_state_dict(self.opti_dict)
             opti_dict = adam.state_dict()
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     self.assertTrue(
                         np.array_equal(v.numpy(), self.base_opti[v.name]))
                 else:
@@ -512,7 +514,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testSetNumpy(self):
+    def func_testSetNumpy(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -523,7 +525,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -543,7 +545,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             place = fluid.CPUPlace() if not core.is_compiled_with_cuda(
             ) else fluid.CUDAPlace(0)
-            scheduler = paddle.optimizer.PiecewiseLR(
+            scheduler = paddle.optimizer.lr.PiecewiseDecay(
                 boundaries=bd, values=lr_arr)
             adam = Adam(
                 learning_rate=scheduler, parameters=ptb_model.parameters())
@@ -583,7 +585,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
             np_opti_dict = {}
             # set to zero
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     np_t = v.numpy()
                     np_opti_dict[v.name] = np_t
                     var = v.value().get_tensor()
@@ -599,7 +601,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             opti_dict = adam.state_dict()
             for k, v in opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     self.assertTrue(
                         np.array_equal(v.numpy(), self.base_opti[v.name]))
                 else:
@@ -626,7 +628,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testSetVariableBeforeTrain(self):
+    def func_testSetVariableBeforeTrain(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -637,7 +639,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -705,7 +707,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
                 base_t = self.model_base[k]
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testLoadAndSetVarBaseBeforeTrain(self):
+    def func_testLoadAndSetVarBaseBeforeTrain(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -716,7 +718,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -796,7 +798,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
                 base_t = self.model_base[k]
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testSetNumpyBeforeTrain(self):
+    def func_testSetNumpyBeforeTrain(self):
         seed = 90
         hidden_size = 10
         vocab_size = 1000
@@ -807,7 +809,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
         batch_num = 200
 
         with fluid.dygraph.guard():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
             # TODO: marsyang1993 Change seed to
             ptb_model = PtbModel(
@@ -828,7 +830,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
 
             place = fluid.CPUPlace() if not core.is_compiled_with_cuda(
             ) else fluid.CUDAPlace(0)
-            scheduler = paddle.optimizer.PiecewiseLR(
+            scheduler = paddle.optimizer.lr.PiecewiseDecay(
                 boundaries=bd, values=lr_arr)
             adam = Adam(
                 learning_rate=scheduler,
@@ -845,7 +847,7 @@ class TestDygraphPtbRnn(unittest.TestCase):
             np_state_dict = {}
 
             for k, v in self.opti_dict.items():
-                if isinstance(v, core.VarBase):
+                if isinstance(v, (core.VarBase, core.eager.Tensor)):
                     np_opti_dict[v.name] = v.numpy()
                 else:
                     np_opti_dict[k] = v
@@ -901,45 +903,62 @@ class TestDygraphPtbRnn(unittest.TestCase):
                 base_t = self.model_base[k]
                 self.assertTrue(np.array_equal(new_t, base_t))
 
-    def testOnlyLoadParams(self):
+    def func_testOnlyLoadParams(self):
         with fluid.dygraph.guard():
             emb = fluid.dygraph.Embedding([10, 10])
             state_dict = emb.state_dict()
-            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy'))
+            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy.pdparams'))
 
-            para_state_dict, opti_state_dict = paddle.load(
-                os.path.join('saved_dy', 'emb_dy'))
-
-            self.assertTrue(opti_state_dict == None)
-
-            para_state_dict, opti_state_dict = paddle.load(
+            para_state_dict = paddle.load(
                 os.path.join('saved_dy', 'emb_dy.pdparams'))
 
-            para_state_dict, opti_state_dict = paddle.load(
-                os.path.join('saved_dy', 'emb_dy.pdopt'))
-
-    def test_no_state_in_input_dict(self):
+    def func_test_no_state_in_input_dict(self):
         with fluid.dygraph.guard():
             emb = fluid.dygraph.Embedding([10, 10])
             state_dict = emb.state_dict()
-            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy'))
+            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy.pdparams'))
 
-            para_state_dict, _ = paddle.load(os.path.join('saved_dy', 'emb_dy'))
+            para_state_dict = paddle.load(
+                os.path.join('saved_dy', 'emb_dy.pdparams'))
             para_state_dict.pop('weight')
 
             emb.set_state_dict(para_state_dict)
 
-    def test_state_shape_mismatch(self):
+    def func_test_state_shape_mismatch(self):
         with fluid.dygraph.guard():
             emb = fluid.dygraph.Embedding([10, 10])
             state_dict = emb.state_dict()
-            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy'))
+            paddle.save(state_dict, os.path.join('saved_dy', 'emb_dy.pdparams'))
 
-            para_state_dict, _ = paddle.load(os.path.join('saved_dy', 'emb_dy'))
+            para_state_dict = paddle.load(
+                os.path.join('saved_dy', 'emb_dy.pdparams'), return_numpy=True)
             para_state_dict['weight'] = np.expand_dims(
                 para_state_dict['weight'], axis=-1)
 
             emb.set_state_dict(para_state_dict)
+
+    def test_main(self):
+        self.func_setUp()
+        self.func_testLoadAndSetVarBase()
+        self.func_testSetVariable()
+        self.func_testSetNumpy()
+        self.func_testSetVariableBeforeTrain()
+        self.func_testLoadAndSetVarBaseBeforeTrain()
+        self.func_testSetNumpyBeforeTrain()
+        self.func_testOnlyLoadParams()
+        self.func_test_no_state_in_input_dict()
+        self.func_test_state_shape_mismatch()
+        with _test_eager_guard():
+            self.func_setUp()
+            self.func_testLoadAndSetVarBase()
+            self.func_testSetVariable()
+            self.func_testSetNumpy()
+            self.func_testSetVariableBeforeTrain()
+            self.func_testLoadAndSetVarBaseBeforeTrain()
+            self.func_testSetNumpyBeforeTrain()
+            self.func_testOnlyLoadParams()
+            self.func_test_no_state_in_input_dict()
+            self.func_test_state_shape_mismatch()
 
 
 if __name__ == '__main__':

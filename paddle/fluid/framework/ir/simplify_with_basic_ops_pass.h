@@ -16,13 +16,20 @@ limitations under the License. */
 
 #include <string>
 #include <unordered_set>
-#include "paddle/fluid/framework/ir/pass.h"
+
+#include "paddle/fluid/framework/ir/op_compat_sensible_pass.h"
 
 namespace paddle {
 namespace framework {
 namespace ir {
 
-class SimplifyWithBasicOpsPass : public Pass {
+class Graph;
+class Node;
+
+class SimplifyWithBasicOpsPass : public OpCompatSensiblePass {
+ public:
+  SimplifyWithBasicOpsPass();
+
  protected:
   void ApplyImpl(Graph* graph) const override;
 

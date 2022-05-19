@@ -37,6 +37,13 @@ class GroupNormOp : public framework::OperatorWithKernel {
                    "GroupNorm");
 
     auto x_dim = ctx->GetInputDim("X");
+    PADDLE_ENFORCE_GE(
+        x_dim.size(), 2,
+        platform::errors::InvalidArgument(
+            "The Input(X)'s dimension of Op(group_norm) must be "
+            "greater than 1. But received: %u-D Tensor, which shape is [%s].",
+            x_dim.size(), x_dim));
+
     const std::string data_layout_str =
         ctx->Attrs().Get<std::string>("data_layout");
     const framework::DataLayout data_layout =
@@ -59,6 +66,12 @@ class GroupNormOp : public framework::OperatorWithKernel {
             "The Attr(groups) of Op(group_norm) must be "
             "greater than or equal to 1. But received: groups is [%s].",
             groups));
+    PADDLE_ENFORCE_EQ(
+        channel_num % groups, 0,
+        platform::errors::InvalidArgument(
+            "Expected number of channels in input to be divisible by "
+            "num_groups, but got input channel is %d and num_groups is %d",
+            channel_num, groups));
 
     if (ctx->HasInput("Scale")) {
       PADDLE_ENFORCE_EQ(
@@ -154,9 +167,11 @@ class GroupNormGradOp : public framework::OperatorWithKernel {
 
   void InferShape(framework::InferShapeContext *ctx) const override {
     // check input
+    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "GroupNormGrad");
     OP_INOUT_CHECK(ctx->HasInput("Y"), "Input", "Y", "GroupNormGrad");
     OP_INOUT_CHECK(ctx->HasInput("Variance"), "Input", "Variance",
                    "GroupNormGrad");
+    OP_INOUT_CHECK(ctx->HasInput("Mean"), "Input", "Mean", "GroupNormGrad");
     OP_INOUT_CHECK(ctx->HasInput(framework::GradVarName("Y")), "Input",
                    framework::GradVarName("Y"), "GroupNormGrad");
 
@@ -191,7 +206,8 @@ class GroupNormGradOp : public framework::OperatorWithKernel {
     PADDLE_ENFORCE_NOT_NULL(
         t, platform::errors::InvalidArgument(
                "Input(Y@GRAD) Tensor of GroupNormGradOp should not be null"));
-    return framework::OpKernelType(t->type(), ctx.GetPlace());
+    return framework::OpKernelType(framework::TransToProtoVarType(t->dtype()),
+                                   ctx.GetPlace());
   }
 };
 
@@ -202,10 +218,12 @@ class GroupNormGradMaker : public framework::SingleGradOpMaker<T> {
 
   void Apply(GradOpPtr<T> op) const override {
     op->SetType("group_norm_grad");
+    op->SetInput("X", this->Input("X"));
     op->SetInput("Scale", this->Input("Scale"));
     op->SetInput("Bias", this->Input("Bias"));
     op->SetInput(framework::GradVarName("Y"), this->OutputGrad("Y"));
     op->SetInput("Y", this->Output("Y"));
+    op->SetInput("Mean", this->Output("Mean"));
     op->SetInput("Variance", this->Output("Variance"));
 
     op->SetOutput(framework::GradVarName("X"), this->InputGrad("X"));

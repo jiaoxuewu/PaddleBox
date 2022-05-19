@@ -13,9 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #pragma once
-#include "paddle/fluid/framework/ddim.h"
 #include "paddle/fluid/memory/memcpy.h"
 #include "paddle/fluid/platform/device_context.h"
+#include "paddle/phi/core/ddim.h"
 
 namespace paddle {
 namespace operators {
@@ -31,17 +31,18 @@ struct StridedMemcpyFunctor<T, 0> {
                   const int64_t* dst_stride, T* dst) const {
     auto place = dev_ctx.GetPlace();
     if (platform::is_cpu_place(place)) {
-      auto& cpu_place = BOOST_GET_CONST(platform::CPUPlace, place);
+      auto& cpu_place = place;
       memory::Copy(cpu_place, dst, cpu_place, src, sizeof(T));
     } else {
-#ifdef PADDLE_WITH_CUDA
-      auto& gpu_place = BOOST_GET_CONST(platform::CUDAPlace, place);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+      auto& gpu_place = place;
       auto& cuda_ctx =
           reinterpret_cast<const platform::CUDADeviceContext&>(dev_ctx);
       memory::Copy(gpu_place, dst, gpu_place, src, sizeof(T),
                    cuda_ctx.stream());
 #else
-      PADDLE_THROW("Paddle is not compiled with GPU");
+      PADDLE_THROW(
+          platform::errors::Unavailable("Paddle is not compiled with GPU."));
 #endif
     }
   }
@@ -54,17 +55,18 @@ struct StridedMemcpyFunctor<T, 1> {
                   const int64_t* dst_stride, T* dst) const {
     auto place = dev_ctx.GetPlace();
     if (platform::is_cpu_place(place)) {
-      auto& cpu_place = BOOST_GET_CONST(platform::CPUPlace, place);
+      auto& cpu_place = place;
       memory::Copy(cpu_place, dst, cpu_place, src, sizeof(T) * dst_dim[0]);
     } else {
-#ifdef PADDLE_WITH_CUDA
-      auto& gpu_place = BOOST_GET_CONST(platform::CUDAPlace, place);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+      auto& gpu_place = place;
       auto& cuda_ctx =
           reinterpret_cast<const platform::CUDADeviceContext&>(dev_ctx);
       memory::Copy(gpu_place, dst, gpu_place, src, sizeof(T) * dst_dim[0],
                    cuda_ctx.stream());
 #else
-      PADDLE_THROW("Paddle is not compiled with GPU");
+      PADDLE_THROW(
+          platform::errors::Unavailable("Paddle is not compiled with GPU."));
 #endif
     }
   }

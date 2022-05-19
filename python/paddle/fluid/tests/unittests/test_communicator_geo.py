@@ -28,6 +28,10 @@ import paddle.fluid as fluid
 import paddle.distributed.fleet.base.role_maker as role_maker
 import paddle.distributed.fleet as fleet
 
+from paddle.distributed.utils import find_free_ports
+
+paddle.enable_static()
+
 
 class TestCommunicatorGeoEnd2End(unittest.TestCase):
     def net(self):
@@ -81,8 +85,8 @@ class TestCommunicatorGeoEnd2End(unittest.TestCase):
         optimizer = fleet.distributed_optimizer(optimizer, strategy)
         optimizer.minimize(avg_cost)
 
-        fleet.init_worker()
         exe.run(fluid.default_startup_program())
+        fleet.init_worker()
 
         train_reader = paddle.batch(self.fake_reader(), batch_size=24)
         feeder = fluid.DataFeeder(place=place, feed_list=[x, z, y])
@@ -99,18 +103,16 @@ class TestCommunicatorGeoEnd2End(unittest.TestCase):
 
         os.environ["PADDLE_PSERVER_NUMS"] = "1"
         os.environ["PADDLE_TRAINERS_NUM"] = "1"
-        os.environ["POD_IP"] = "127.0.0.1"
-        os.environ["PADDLE_PORT"] = "36001"
         os.environ["PADDLE_TRAINER_ID"] = "0"
         os.environ["PADDLE_TRAINERS_NUM"] = "1"
-        os.environ["PADDLE_PSERVERS_IP_PORT_LIST"] = \
-            "127.0.0.1:36001"
+        os.environ["POD_IP"] = "127.0.0.1"
 
         role = role_maker.PaddleCloudRoleMaker()
 
         strategy = paddle.distributed.fleet.DistributedStrategy()
         strategy.a_sync = True
         strategy.a_sync_configs = {"k_steps": 100}
+        strategy.a_sync_configs = {"launch_barrier": False}
 
         if training_role == "TRAINER":
             self.run_trainer(role, strategy)
@@ -140,14 +142,13 @@ import paddle.distributed.fleet as fleet
 
 from test_communicator_geo import TestCommunicatorGeoEnd2End
 
+paddle.enable_static()
 
 class RunServer(TestCommunicatorGeoEnd2End):
     def runTest(self):
         pass
 
 os.environ["TRAINING_ROLE"] = "PSERVER"
-os.environ["http_proxy"] = ""
-os.environ["https_proxy"] = ""
 
 half_run_server = RunServer()
 half_run_server.run_ut()
@@ -156,13 +157,17 @@ half_run_server.run_ut()
         server_file = "run_server_for_communicator_geo.py"
         with open(server_file, "w") as wb:
             wb.write(run_server_cmd)
+
+        port = find_free_ports(1).pop()
+
         os.environ["TRAINING_ROLE"] = "PSERVER"
-        os.environ["http_proxy"] = ""
-        os.environ["https_proxy"] = ""
+        os.environ["PADDLE_PORT"] = str(port)
+        os.environ["PADDLE_PSERVERS_IP_PORT_LIST"] = "127.0.0.1:{}".format(port)
 
         _python = sys.executable
 
         ps_cmd = "{} {}".format(_python, server_file)
+
         ps_proc = subprocess.Popen(
             ps_cmd.strip().split(" "),
             stdout=subprocess.PIPE,
@@ -171,11 +176,11 @@ half_run_server.run_ut()
         time.sleep(5)
 
         os.environ["TRAINING_ROLE"] = "TRAINER"
-        os.environ["http_proxy"] = ""
-        os.environ["https_proxy"] = ""
 
         self.run_ut()
         ps_proc.kill()
+        ps_proc.wait()
+        outs, errs = ps_proc.communicate()
 
         if os.path.exists(server_file):
             os.remove(server_file)

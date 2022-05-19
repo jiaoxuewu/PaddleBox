@@ -13,13 +13,17 @@
 # limitations under the License.
 
 from __future__ import print_function
+
 import unittest
+
 import numpy as np
-from op_test import OpTest, skip_check_grad_ci
-import paddle.fluid.core as core
-from paddle.fluid.op import Operator
+import paddle
 import paddle.fluid as fluid
-from paddle.fluid import compiler, Program, program_guard
+import paddle.fluid.core as core
+from paddle.fluid import Program, compiler, program_guard
+from paddle.fluid.op import Operator
+
+from paddle.fluid.tests.unittests.op_test import OpTest, skip_check_grad_ci, convert_float_to_uint16
 
 
 class ElementwiseMulOp(OpTest):
@@ -77,6 +81,39 @@ class ElementwiseMulOp(OpTest):
 
     def init_axis(self):
         pass
+
+
+class TestBF16ElementwiseMulOp(OpTest):
+    def setUp(self):
+        self.op_type = "elementwise_mul"
+        self.dtype = np.uint16
+
+        self.x = np.random.uniform(0.1, 1, [13, 17]).astype(np.float32)
+        self.y = np.random.uniform(0.1, 1, [13, 17]).astype(np.float32)
+        self.out = np.multiply(self.x, self.y)
+
+        self.axis = -1
+
+        self.inputs = {
+            'X':
+            OpTest.np_dtype_to_fluid_dtype(convert_float_to_uint16(self.x)),
+            'Y':
+            OpTest.np_dtype_to_fluid_dtype(convert_float_to_uint16(self.y))
+        }
+        self.outputs = {'Out': convert_float_to_uint16(self.out)}
+        self.attrs = {'axis': self.axis, 'use_mkldnn': False}
+
+    def test_check_output(self):
+        self.check_output()
+
+    def test_check_grad_normal(self):
+        self.check_grad(['X', 'Y'], 'Out')
+
+    def test_check_grad_ingore_x(self):
+        self.check_grad(['Y'], 'Out', no_grad_set=set("X"))
+
+    def test_check_grad_ingore_y(self):
+        self.check_grad(['X'], 'Out', no_grad_set=set('Y'))
 
 
 @skip_check_grad_ci(
@@ -241,5 +278,80 @@ class TestElementwiseMulOpError(unittest.TestCase):
             self.assertRaises(TypeError, fluid.layers.elementwise_mul, x2, y2)
 
 
+class TestComplexElementwiseMulOp(OpTest):
+    def setUp(self):
+        self.op_type = "elementwise_mul"
+        self.init_base_dtype()
+        self.init_input_output()
+        self.init_grad_input_output()
+
+        self.inputs = {
+            'X': OpTest.np_dtype_to_fluid_dtype(self.x),
+            'Y': OpTest.np_dtype_to_fluid_dtype(self.y)
+        }
+        self.attrs = {'axis': -1, 'use_mkldnn': False}
+        self.outputs = {'Out': self.out}
+
+    def init_base_dtype(self):
+        self.dtype = np.float64
+
+    def init_input_output(self):
+        self.x = np.random.random(
+            (2, 3, 4, 5)).astype(self.dtype) + 1J * np.random.random(
+                (2, 3, 4, 5)).astype(self.dtype)
+        self.y = np.random.random(
+            (2, 3, 4, 5)).astype(self.dtype) + 1J * np.random.random(
+                (2, 3, 4, 5)).astype(self.dtype)
+        self.out = self.x * self.y
+
+    def init_grad_input_output(self):
+        self.grad_out = np.ones((2, 3, 4, 5), self.dtype) + 1J * np.ones(
+            (2, 3, 4, 5), self.dtype)
+        self.grad_x = self.grad_out * np.conj(self.y)
+        self.grad_y = self.grad_out * np.conj(self.x)
+
+    def test_check_output(self):
+        self.check_output()
+
+    def test_check_grad_normal(self):
+        self.check_grad(
+            ['X', 'Y'],
+            'Out',
+            user_defined_grads=[self.grad_x, self.grad_y],
+            user_defined_grad_outputs=[self.grad_out])
+
+    def test_check_grad_ingore_x(self):
+        self.check_grad(
+            ['Y'],
+            'Out',
+            no_grad_set=set("X"),
+            user_defined_grads=[self.grad_y],
+            user_defined_grad_outputs=[self.grad_out])
+
+    def test_check_grad_ingore_y(self):
+        self.check_grad(
+            ['X'],
+            'Out',
+            no_grad_set=set('Y'),
+            user_defined_grads=[self.grad_x],
+            user_defined_grad_outputs=[self.grad_out])
+
+
+class TestRealComplexElementwiseMulOp(TestComplexElementwiseMulOp):
+    def init_input_output(self):
+        self.x = np.random.random((2, 3, 4, 5)).astype(self.dtype)
+        self.y = np.random.random(
+            (2, 3, 4, 5)).astype(self.dtype) + 1J * np.random.random(
+                (2, 3, 4, 5)).astype(self.dtype)
+        self.out = self.x * self.y
+
+    def init_grad_input_output(self):
+        self.grad_out = np.ones((2, 3, 4, 5), self.dtype) + 1J * np.ones(
+            (2, 3, 4, 5), self.dtype)
+        self.grad_x = np.real(self.grad_out * np.conj(self.y))
+        self.grad_y = self.grad_out * np.conj(self.x)
+
+
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

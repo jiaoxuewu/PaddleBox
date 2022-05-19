@@ -44,7 +44,7 @@ class ShuffleBatchOp : public framework::OperatorWithKernel {
     ctx->ShareLoD("X", "Out");
     ctx->ShareDim("Seed", "SeedOut");
     ctx->ShareLoD("Seed", "SeedOut");
-    ctx->SetOutputDim("ShuffleIdx", framework::make_ddim({-1}));
+    ctx->SetOutputDim("ShuffleIdx", phi::make_ddim({-1}));
   }
 
  protected:
@@ -52,6 +52,16 @@ class ShuffleBatchOp : public framework::OperatorWithKernel {
       const framework::ExecutionContext &ctx) const override {
     auto data_type = OperatorWithKernel::IndicateVarDataType(ctx, "X");
     return framework::OpKernelType(data_type, ctx.device_context());
+  }
+
+  framework::OpKernelType GetKernelTypeForVar(
+      const std::string &var_name, const framework::Tensor &tensor,
+      const framework::OpKernelType &expected_kernel_type) const override {
+    if (var_name == "Seed") {
+      return expected_kernel_type;
+    }
+    return framework::OperatorWithKernel::GetKernelTypeForVar(
+        var_name, tensor, expected_kernel_type);
   }
 };
 

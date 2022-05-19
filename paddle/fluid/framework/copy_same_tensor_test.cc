@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cstring>
+#include <sys/types.h>
 #include <random>
+
 #include "gflags/gflags.h"
 #include "gtest/gtest.h"
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/fluid/framework/tensor_util.h"
+#include "paddle/fluid/platform/device_context.h"
+#include "paddle/fluid/platform/place.h"
+#include "paddle/phi/core/ddim.h"
 
 DECLARE_bool(use_system_allocator);
 
@@ -27,7 +31,7 @@ namespace framework {
 static std::vector<platform::Place> CreatePlaceList() {
   std::vector<platform::Place> places;
   places.emplace_back(platform::CPUPlace());
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   places.emplace_back(platform::CUDAPlace(0));
 #endif
   return places;
@@ -64,7 +68,7 @@ static bool CopySameTensorTestMain(const DDim &dims,
     if (sync_copy) {
       TensorCopySync(src_tensor, dst_place, &src_tensor);
     } else {
-      TensorCopy(src_tensor, dst_place, &src_tensor);
+      paddle::framework::TensorCopy(src_tensor, dst_place, &src_tensor);
       platform::DeviceContextPool::Instance().Get(src_place)->Wait();
       platform::DeviceContextPool::Instance().Get(dst_place)->Wait();
     }
@@ -73,15 +77,15 @@ static bool CopySameTensorTestMain(const DDim &dims,
     TensorCopySync(src_tensor, platform::CPUPlace(), &dst_cpu_tensor);
   }
 
-  const void *ground_truth_ptr = src_cpu_tensor.data<void>();
-  const void *result_ptr = dst_cpu_tensor.data<void>();
-  size_t byte_num = product(dims) * sizeof(T);
+  const void *ground_truth_ptr = src_cpu_tensor.data();
+  const void *result_ptr = dst_cpu_tensor.data();
+  size_t byte_num = phi::product(dims) * sizeof(T);
   return std::memcmp(ground_truth_ptr, result_ptr, byte_num) == 0;
 }
 
 TEST(test_tensor_copy, test_copy_same_tensor) {
   using DataType = float;
-  auto dims = make_ddim({3, 4, 5});
+  auto dims = phi::make_ddim({3, 4, 5});
 
   auto places = CreatePlaceList();
   for (auto &src_p : places) {

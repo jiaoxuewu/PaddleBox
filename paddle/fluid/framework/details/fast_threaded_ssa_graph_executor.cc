@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "paddle/fluid/framework/details/fast_threaded_ssa_graph_executor.h"
+
 #include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 #include "paddle/fluid/framework/details/computation_op_handle.h"
 #include "paddle/fluid/framework/details/fetch_async_op_handle.h"
 #include "paddle/fluid/framework/details/multi_devices_helper.h"
 #include "paddle/fluid/framework/ir/graph_helper.h"
-#include "paddle/fluid/platform/profiler.h"
+#include "paddle/fluid/platform/profiler/event_tracing.h"
 
 namespace paddle {
 namespace framework {
@@ -38,9 +40,14 @@ FastThreadedSSAGraphExecutor::FastThreadedSSAGraphExecutor(
       places_(places),
       graph_(graph),
       fetch_ctxs_(places),
-      pool_(strategy.num_threads_),
       // add one more thread for generate op_deps
       prepare_pool_(1) {
+  if (ir::IsTopologySortOperationsUnique(*graph_)) {
+    VLOG(10)
+        << "Change thread number to 1 because the toposort order is unique";
+    strategy_.num_threads_ = 1;
+  }
+  pool_.reset(new ::ThreadPool(strategy.num_threads_));
   for (auto &op : ir::FilterByNodeWrapper<OpHandleBase>(*graph_)) {
     int dep = static_cast<int>(op->NotReadyInputSize());
     op_deps_.emplace(op, dep);
@@ -48,7 +55,9 @@ FastThreadedSSAGraphExecutor::FastThreadedSSAGraphExecutor(
       bootstrap_ops_.emplace_back(op);
     }
   }
-  PADDLE_ENFORCE_GT(op_deps_.size(), 0, "The graph doesn't have operators.");
+  PADDLE_ENFORCE_GT(op_deps_.size(), 0,
+                    platform::errors::PreconditionNotMet(
+                        "The graph doesn't have operators."));
   PrepareAtomicOpDeps();
 }
 
@@ -56,7 +65,8 @@ FetchResultType FastThreadedSSAGraphExecutor::Run(
     const std::vector<std::string> &fetch_tensors, bool return_merged) {
   VLOG(3) << "enter FastThreadedSSAGraphExecutor Run";
   std::unique_ptr<platform::RecordEvent> event(
-      new platform::RecordEvent("FastThreadedSSAGraphExecutorPrepare"));
+      new platform::RecordEvent("FastThreadedSSAGraphExecutorPrepare",
+                                platform::TracerEventType::UserDefined, 2));
   std::unique_ptr<std::unordered_map<OpHandleBase *, std::atomic<int>>>
       op_deps = atomic_op_deps_.get();
   PrepareAtomicOpDeps();
@@ -72,7 +82,6 @@ FetchResultType FastThreadedSSAGraphExecutor::Run(
   std::vector<OpHandleBase *> fetch_ops;
   std::vector<OpHandleBase *> ready_fetch_ops;
   exception_.Clear();
-
   InsertFetchOps(fetch_tensors, &fetches, &fetched_vars, op_deps.get(),
                  &fetch_ops, &ready_fetch_ops, return_merged);
   event.reset(nullptr);
@@ -91,6 +100,8 @@ FetchResultType FastThreadedSSAGraphExecutor::Run(
     traced_ops_.clear();
     remaining_ = 0;
     auto complete_q = std::make_shared<BlockingQueue<size_t>>();
+    VLOG(3) << "number of bootstrap_ops_: " << bootstrap_ops_.size();
+    VLOG(3) << "number of ready_fetch_ops: " << ready_fetch_ops.size();
     for (auto op : bootstrap_ops_) {
       RunOpAsync(op_deps.get(), op, complete_q);
     }
@@ -120,10 +131,15 @@ FetchResultType FastThreadedSSAGraphExecutor::Run(
     }
   }
   // Wait FetchOps.
-  ClearFetchOp(graph_, &fetch_ops);
+  if (!fetch_ops.empty()) {
+    platform::RecordEvent record_wait(
+        "FastThreadedSSAGraphExecutor::WaitFetchOps",
+        platform::TracerEventType::Operator, 1);
+    ClearFetchOp(graph_, &fetch_ops);
 
-  for (auto &place : places_) {
-    fetch_ctxs_.Get(place)->Wait();
+    for (auto &place : places_) {
+      fetch_ctxs_.Get(place)->Wait();
+    }
   }
 
   return fetches;
@@ -218,7 +234,10 @@ void FastThreadedSSAGraphExecutor::RunOpAsync(
     OpHandleBase *op,
     const std::shared_ptr<BlockingQueue<size_t>> &complete_q) {
   ++remaining_;
-  this->pool_.enqueue([=] {
+  platform::RecordEvent record("WorkQueue::AddTask",
+                               platform::TracerEventType::UserDefined,
+                               10 /*level*/);
+  this->pool_->enqueue([=] {
     std::deque<OpHandleBase *> op_queue;
     op_queue.push_front(op);
 
@@ -227,10 +246,26 @@ void FastThreadedSSAGraphExecutor::RunOpAsync(
       OpHandleBase *op_to_run = op_queue.back();
       op_queue.pop_back();
 
+      // The Op involves data transfer of multiple devices may block other
+      // computations emit. For example:
+      // 1 step, queue=[Share, Allreduce], which Share is high priority
+      // 2 step, Share exec, pending_op=Grad, queue=[Allreduce, Grad]
+      // 3 step, Allreduce run with sync. Although Allreduce and Grad do not
+      // have topo dependency, but Grad must wait for Allreduce to complete
+      // before scheduling.
+      // In this scenario, calculation and communication may not overlap.
+      // Therefore, emit the op in the queue before running multi device op.
+      if (op_to_run->IsMultiDeviceTransfer()) {
+        while (!op_queue.empty()) {
+          OpHandleBase *post_op = op_queue.back();
+          op_queue.pop_back();
+          RunOpAsync(op_deps, post_op, complete_q);
+        }
+      }
+      VLOG(3) << "start to run op: " << op_to_run->Name();
       if (!RunOp(op_to_run, complete_q, &complete)) {
         return;
       }
-
       auto &outputs = op_to_run->Outputs();
       op_to_run = nullptr;
       for (auto &output : outputs) {
@@ -242,6 +277,9 @@ void FastThreadedSSAGraphExecutor::RunOpAsync(
           // first without switching to another thread.
           if (pending_op->GetPriority() == OpHandleBase::Priority::kHighest) {
             op_queue.push_back(pending_op);
+          } else if (pending_op->IsMultiDeviceTransfer()) {
+            // multi device ops should be scheduled prior to computing ops
+            op_queue.push_front(pending_op);
           } else {
             if (op_to_run == nullptr) {
               op_to_run = pending_op;
@@ -306,7 +344,7 @@ bool FastThreadedSSAGraphExecutor::RunOpSync(OpHandleBase *op) {
   try {
     VLOG(10) << op << " " << op->Name() << " : " << op->DebugString();
     if (LIKELY(!strategy_.dry_run_)) {
-      op->Run(strategy_.use_cuda_);
+      op->Run(strategy_.use_device_);
     }
     VLOG(10) << op << " " << op->Name() << " Done ";
     return true;

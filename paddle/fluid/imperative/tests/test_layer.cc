@@ -39,14 +39,18 @@ using vb_vector = std::vector<std::shared_ptr<imperative::VarBase>>;
 
 using var_pair = std::pair<std::string, vb_vector>;
 
+extern void TestSetForwardDataTypeOfGradVarsEager(
+    const NameVarMap<egr::EagerVariable>& outs);
 template <typename VarType>
 class TestRuntimeInferVarTypeContext
     : public RuntimeInferVarTypeContext<VarType> {
  public:
-  TestRuntimeInferVarTypeContext(const NameVarMap<VarType>& inputs,
-                                 const NameVarMap<VarType>& outputs,
-                                 const framework::AttributeMap& attrs_map)
-      : RuntimeInferVarTypeContext<VarType>(inputs, outputs, attrs_map) {}
+  TestRuntimeInferVarTypeContext(
+      const NameVarMap<VarType>& inputs, const NameVarMap<VarType>& outputs,
+      const framework::AttributeMap& attrs_map,
+      const framework::AttributeMap& default_attrs_map)
+      : RuntimeInferVarTypeContext<VarType>(inputs, outputs, attrs_map,
+                                            default_attrs_map) {}
 
   bool HasVar(const std::string& name) const {
     return RuntimeInferVarTypeContext<VarType>::HasVar(name);
@@ -125,7 +129,7 @@ TEST(test_layer, test_runtime_context) {
 
   auto* ctx =
       new imperative::TestRuntimeInferVarTypeContext<imperative::VarBase>(
-          ins, outs, attrs);
+          ins, outs, attrs, {});
 
   ASSERT_TRUE(ctx->HasInput("X"));
   ASSERT_TRUE(ctx->HasOutput("Out"));
@@ -141,7 +145,8 @@ TEST(test_layer, test_runtime_context) {
 
   ctx->SyncTypeAndDataType("X", "Out");
 
-  ASSERT_EQ(framework::proto::VarType::FP32, vout->DataType());
+  // Remove DataType check, because it doesn't make sense of set dtype in
+  // dygraph
 
   ASSERT_EQ(framework::proto::VarType::LOD_TENSOR, ctx->GetOutputType("Out"));
 
@@ -155,8 +160,8 @@ TEST(test_layer, test_runtime_context) {
                          framework::ALL_ELEMENTS);
   ctx->SetOutputDataType("Out", framework::proto::VarType::INT8);
 
-  ASSERT_EQ(framework::proto::VarType::INT8, vout->DataType());
-  ASSERT_EQ(framework::proto::VarType::FP64, vout_b->DataType());
+  // Remove DataType check, because it doesn't make sense of set dtype in
+  // dygraph
 
   // no throw, but do nothing
   ASSERT_NO_THROW(
@@ -235,7 +240,7 @@ TEST(test_layer, test_debug_string) {
   std::shared_ptr<imperative::VarBase> selected_rows(
       new imperative::VarBase(false, "selected_rows"));
   auto tensor_sr = selected_rows->MutableVar()
-                       ->GetMutable<framework::SelectedRows>()
+                       ->GetMutable<phi::SelectedRows>()
                        ->mutable_value();
   std::string res_ui_sr = test_func(selected_rows);
   ASSERT_TRUE(res_ui_sr.find("NOT_INITED") != std::string::npos);
@@ -358,7 +363,7 @@ TEST(test_layer, test_dygraph_execution_context) {
   framework::Scope scope;
 
   DygraphExecutionContext<imperative::VarBase> dy_exe_context(
-      *(op.get()), scope, *dev_ctx, ctx, ins, outs, concat_att_map);
+      *(op.get()), scope, *dev_ctx, ctx, ins, outs, concat_att_map, {});
 
   ASSERT_EQ(dy_exe_context.InputSize("X"), 1u);
   ASSERT_EQ(dy_exe_context.InputName("X"), "vin");
@@ -386,7 +391,7 @@ TEST(test_layer, test_dygraph_infershape_context) {
   concat_att_map["axis"] = 1;
 
   DygraphInferShapeContext<imperative::VarBase> infer_shape_ctx(
-      &ins, &outs, &concat_att_map, "dummy");
+      &ins, &outs, &concat_att_map, {}, "dummy");
 
   bool have_x = infer_shape_ctx.HasOutputs("Out");
   ASSERT_EQ(have_x, true);
@@ -403,7 +408,12 @@ TEST(test_layer, test_inner_op_not_inited) {
   ASSERT_THROW(op.CheckAttrs(), platform::EnforceNotMet);
 }
 
+TEST(test_layer, test_eager) {
+  imperative::NameTensorMap ins = {};
+  TestSetForwardDataTypeOfGradVarsEager(ins);
+}
+
 }  // namespace imperative
 }  // namespace paddle
 
-USE_OP(mul);
+USE_OP_ITSELF(mul);

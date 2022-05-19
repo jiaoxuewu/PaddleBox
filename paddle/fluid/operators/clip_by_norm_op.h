@@ -16,7 +16,7 @@ limitations under the License. */
 
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/framework/selected_rows.h"
+#include "paddle/fluid/framework/selected_rows_utils.h"
 #include "paddle/fluid/operators/math/selected_rows_functor.h"
 #include "paddle/fluid/platform/transform.h"
 
@@ -24,7 +24,7 @@ namespace paddle {
 namespace operators {
 
 using Tensor = framework::Tensor;
-using SelectedRows = framework::SelectedRows;
+// using SelectedRows = phi::SelectedRows;
 template <typename T, int MajorType = Eigen::RowMajor,
           typename IndexType = Eigen::DenseIndex>
 using EigenVector = framework::EigenVector<T, MajorType, IndexType>;
@@ -43,28 +43,31 @@ class ClipByNormKernel : public framework::OpKernel<T> {
 
       output = context.Output<Tensor>("Out");
       output->mutable_data<T>(context.GetPlace());
-    } else if (in_var->IsType<SelectedRows>()) {
-      auto* x = context.Input<SelectedRows>("X");
+    } else if (in_var->IsType<phi::SelectedRows>()) {
+      auto* x = context.Input<phi::SelectedRows>("X");
 
       // merge ids in selected rows first
       math::scatter::MergeAdd<DeviceContext, T> merge_func;
-      SelectedRows* merged_input =
+      phi::SelectedRows* merged_input =
           const_cast<framework::Scope&>(context.scope())
               .Var()
-              ->GetMutable<SelectedRows>();
+              ->GetMutable<phi::SelectedRows>();
       merge_func(context.template device_context<DeviceContext>(), *x,
                  merged_input);
       input = &(merged_input->value());
 
-      SelectedRows* output_selected_rows = context.Output<SelectedRows>("Out");
+      phi::SelectedRows* output_selected_rows =
+          context.Output<phi::SelectedRows>("Out");
       output_selected_rows->set_rows(merged_input->rows());
       output_selected_rows->set_height(merged_input->height());
       output = output_selected_rows->mutable_value();
       output->Resize(merged_input->value().dims());
       output->mutable_data<T>(context.GetPlace());
     } else {
-      PADDLE_THROW("Unexpected branch, input variable type is %s",
-                   framework::ToTypeName(in_var->Type()));
+      PADDLE_THROW(platform::errors::InvalidArgument(
+          "Invalid input variable type, only support LodTensor and "
+          "SelectedRows types, but got type is %s.",
+          framework::ToTypeName(in_var->Type())));
     }
 
     PADDLE_ENFORCE_NOT_NULL(input,
@@ -79,7 +82,12 @@ class ClipByNormKernel : public framework::OpKernel<T> {
         *context.template device_context<DeviceContext>().eigen_device();
 
     auto temp = (x_norm <= max_norm).template cast<T>();
-    auto scaling = temp + (static_cast<T>(1) - temp) * max_norm / x_norm;
+    auto epsilon =
+        ((x_norm <= static_cast<T>(1e-30)).all().template cast<T>()) *
+        static_cast<T>(1e-6);
+
+    auto scaling =
+        temp + (static_cast<T>(1) - temp) * max_norm / (x_norm + epsilon);
     Eigen::array<int, 1> one_dim{{1}};
     Eigen::DSizes<int, 1> m_dsize(input->numel());
     if (context.GetPlace() == platform::CPUPlace()) {

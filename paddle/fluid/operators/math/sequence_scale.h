@@ -40,6 +40,7 @@ namespace math {
  *                      total_sequence_length is the sum of all sequences'
  *                      length.
  * \param scales        Array<T>. The i-th sequence will be scaled by scales[i].
+
  * \param num_seq       Number of sequence
  *
  */

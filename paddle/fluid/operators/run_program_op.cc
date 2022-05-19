@@ -27,9 +27,6 @@ class RunProgramOp : public framework::OperatorWithKernel {
     PADDLE_ENFORCE_EQ(ctx->HasInputs("X"), true,
                       platform::errors::NotFound(
                           "Input(X) of RunProgramOp should not be null."));
-    PADDLE_ENFORCE_EQ(ctx->HasInputs("Params"), true,
-                      platform::errors::NotFound(
-                          "Input(Params) of RunProgramOp should not be null."));
     PADDLE_ENFORCE_EQ(ctx->HasOutputs("Out"), true,
                       platform::errors::NotFound(
                           "Output(Out) of RunProgramOp should not be null."));
@@ -73,7 +70,8 @@ class RunProgramOpMaker : public framework::OpProtoAndCheckerMaker {
              "(vector<LoDTensor or SelecetedRows>)"
              "The input parameter of RunProgram operator, also the parameters "
              "of the loaded program.")
-        .AsDuplicable();
+        .AsDuplicable()
+        .AsDispensable();
     AddOutput("Out",
               "(vector<LoDTensor>)"
               "The output tensors of RunProgram operator, also the fetch "
@@ -85,6 +83,13 @@ class RunProgramOpMaker : public framework::OpProtoAndCheckerMaker {
               "contains at most one scope."
               "NOTE: Do not use Scope directly because Scope output is not "
               "currently supported.");
+    AddOutput("DOut",
+              "(vector<LoDTensor>)"
+              "The output tensors for GRAD Tensors in RunProgram forward "
+              "operator, the forward operator contains GRAD Tensors when it "
+              "computes double grad.")
+        .AsDuplicable()
+        .AsDispensable();
     AddAttr<BlockDesc*>("global_block",
                         "(BlockDesc *)"
                         "The global block of executed program desc.");
@@ -98,6 +103,10 @@ class RunProgramOpMaker : public framework::OpProtoAndCheckerMaker {
                   "(bool, default false) Set to true for inference only, false "
                   "for training.")
         .SetDefault(false);
+    AddAttr<int64_t>(
+        "program_id",
+        "(int64_t)"
+        "The unique hash id used as cache key for ExecutorInfoCache.");
     AddComment(R"DOC(
 RunProgram operator.
 
@@ -122,10 +131,6 @@ class RunProgramGradOp : public framework::OperatorWithKernel {
                       platform::errors::NotFound(
                           "Input(X) of RunProgramGradOp should not be null."));
     PADDLE_ENFORCE_EQ(
-        ctx->HasInputs("Params"), true,
-        platform::errors::NotFound(
-            "Input(Params) of RunProgramGradOp should not be null."));
-    PADDLE_ENFORCE_EQ(
         ctx->HasInputs(framework::GradVarName("Out")), true,
         platform::errors::NotFound(
             "Input(Out@GRAD) of RunProgramGradOp should not be null."));
@@ -149,6 +154,31 @@ class RunProgramGradOp : public framework::OperatorWithKernel {
 };
 
 template <typename T>
+struct FilterHelper {};
+
+template <>
+struct FilterHelper<imperative::OpBase> {
+  static void filter(const BlockDesc* desc,
+                     imperative::TracedVarList<imperative::VarBase,
+                                               imperative::kBackward>* vec) {
+    auto f = [desc](std::shared_ptr<imperative::VarBase> ptr) {
+      return !desc->HasVar(ptr->Name());
+    };
+    auto new_end = std::remove_if(vec->begin(), vec->end(), f);
+    vec->resize(new_end - vec->begin());
+  }
+};
+
+template <>
+struct FilterHelper<framework::OpDesc> {
+  static void filter(const BlockDesc* desc, std::vector<std::string>* vec) {
+    auto f = [desc](const std::string& name) { return !desc->HasVar(name); };
+    auto new_end = std::remove_if(vec->begin(), vec->end(), f);
+    vec->resize(new_end - vec->begin());
+  }
+};
+
+template <typename T>
 class RunProgramGradOpMaker : public framework::SingleGradOpMaker<T> {
  public:
   using framework::SingleGradOpMaker<T>::SingleGradOpMaker;
@@ -160,9 +190,14 @@ class RunProgramGradOpMaker : public framework::SingleGradOpMaker<T> {
     grad_op->SetInput("Params", this->Input("Params"));
     grad_op->SetInput(framework::GradVarName("Out"), this->OutputGrad("Out"));
     grad_op->SetInput("OutScope", this->Output("OutScope"));
+    grad_op->SetInput("DOut", this->Output("DOut"));
     grad_op->SetOutput(framework::GradVarName("X"), this->InputGrad("X"));
-    grad_op->SetOutput(framework::GradVarName("Params"),
-                       this->InputGrad("Params"));
+
+    auto block_desc =
+        BOOST_GET_CONST(BlockDesc*, this->GetAttr("global_block"));
+    auto params_grad = this->InputGrad("Params");
+    FilterHelper<T>::filter(block_desc, &params_grad);  // filter the vector.
+    grad_op->SetOutput(framework::GradVarName("Params"), params_grad);
     grad_op->SetAttrMap(this->Attrs());
   }
 };

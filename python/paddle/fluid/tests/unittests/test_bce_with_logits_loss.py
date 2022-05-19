@@ -17,6 +17,7 @@ import paddle.fluid as fluid
 import numpy as np
 import unittest
 from op_test import OpTest
+from paddle.fluid.framework import _test_eager_guard
 
 
 def call_bce_layer(logit, label, weight=None, reduction='mean',
@@ -48,18 +49,20 @@ def test_static(place,
     prog = paddle.static.Program()
     startup_prog = paddle.static.Program()
     with paddle.static.program_guard(prog, startup_prog):
-        logit = paddle.data(name='logit', shape=logit_np.shape, dtype='float64')
-        label = paddle.data(name='label', shape=label_np.shape, dtype='float64')
+        logit = paddle.fluid.data(
+            name='logit', shape=logit_np.shape, dtype='float64')
+        label = paddle.fluid.data(
+            name='label', shape=label_np.shape, dtype='float64')
         feed_dict = {"logit": logit_np, "label": label_np}
 
         pos_weight = None
         weight = None
         if pos_weight_np is not None:
-            pos_weight = paddle.data(
+            pos_weight = paddle.fluid.data(
                 name='pos_weight', shape=pos_weight_np.shape, dtype='float64')
             feed_dict["pos_weight"] = pos_weight_np
         if weight_np is not None:
-            weight = paddle.data(
+            weight = paddle.fluid.data(
                 name='weight', shape=weight_np.shape, dtype='float64')
             feed_dict["weight"] = weight_np
         if functional:
@@ -79,23 +82,22 @@ def test_dygraph(place,
                  reduction='mean',
                  pos_weight_np=None,
                  functional=False):
-    paddle.disable_static()
-    logit = paddle.to_tensor(logit_np)
-    label = paddle.to_tensor(label_np)
-    weight = None
-    pos_weight = None
-    if weight_np is not None:
-        weight = paddle.to_tensor(weight_np)
-    if pos_weight_np is not None:
-        pos_weight = paddle.to_tensor(pos_weight_np)
-    if functional:
-        dy_res = call_bce_functional(logit, label, weight, reduction,
-                                     pos_weight)
-    else:
-        dy_res = call_bce_layer(logit, label, weight, reduction, pos_weight)
-    dy_result = dy_res.numpy()
-    paddle.enable_static()
-    return dy_result
+    with paddle.fluid.dygraph.base.guard():
+        logit = paddle.to_tensor(logit_np)
+        label = paddle.to_tensor(label_np)
+        weight = None
+        pos_weight = None
+        if weight_np is not None:
+            weight = paddle.to_tensor(weight_np)
+        if pos_weight_np is not None:
+            pos_weight = paddle.to_tensor(pos_weight_np)
+        if functional:
+            dy_res = call_bce_functional(logit, label, weight, reduction,
+                                         pos_weight)
+        else:
+            dy_res = call_bce_layer(logit, label, weight, reduction, pos_weight)
+        dy_result = dy_res.numpy()
+        return dy_result
 
 
 def calc_bce_with_logits_loss(logit_np,
@@ -152,9 +154,19 @@ class TestBCEWithLogitsLoss(unittest.TestCase):
                     label_np,
                     reduction=reduction,
                     functional=True)
+
+                with _test_eager_guard():
+                    eager_functional = test_dygraph(
+                        place,
+                        logit_np,
+                        label_np,
+                        reduction=reduction,
+                        functional=True)
+
                 self.assertTrue(np.allclose(static_functional, expected))
                 self.assertTrue(np.allclose(static_functional, dy_functional))
                 self.assertTrue(np.allclose(dy_functional, expected))
+                self.assertTrue(np.allclose(eager_functional, expected))
 
     def test_BCEWithLogitsLoss_weight(self):
         logit_np = np.random.uniform(

@@ -14,8 +14,6 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
-
 #include <map>
 #include <memory>
 #include <utility>
@@ -43,8 +41,9 @@ namespace allocation {
  */
 class CUDADeviceContextAllocation : public Allocation {
  public:
-  explicit CUDADeviceContextAllocation(AllocationPtr allocation)
-      : Allocation(allocation->ptr(), allocation->size(), allocation->place()),
+  explicit CUDADeviceContextAllocation(DecoratedAllocationPtr allocation)
+      : Allocation(allocation->ptr(), allocation->base_ptr(),
+                   allocation->size(), allocation->place()),
         underlying_allocation_(std::move(allocation)) {}
 
   ~CUDADeviceContextAllocation() {
@@ -57,7 +56,7 @@ class CUDADeviceContextAllocation : public Allocation {
             << p_allocation;
     dev_ctx_->AddStreamCallback([p_allocation] {
       VLOG(4) << "Delete CUDADeviceContextAllocation at " << p_allocation;
-      AllocationDeleter()(p_allocation);
+      Allocator::AllocationDeleter(p_allocation);
     });
   }
 
@@ -66,7 +65,7 @@ class CUDADeviceContextAllocation : public Allocation {
   }
 
  private:
-  AllocationPtr underlying_allocation_;
+  DecoratedAllocationPtr underlying_allocation_;
   const platform::CUDADeviceContext *dev_ctx_{nullptr};
 };
 
@@ -79,42 +78,55 @@ class CUDADeviceContextAllocation : public Allocation {
 class CUDADeviceContextAllocator : public Allocator {
  public:
   explicit CUDADeviceContextAllocator(platform::CUDAPlace place,
-                                      cudaStream_t default_stream)
+                                      gpuStream_t default_stream)
       : place_(place), default_stream_(default_stream) {
     platform::CUDADeviceGuard guard(place_.device);
-    PADDLE_ENFORCE_CUDA_SUCCESS(
+#ifdef PADDLE_WITH_HIP
+    PADDLE_ENFORCE_GPU_SUCCESS(
+        hipEventCreateWithFlags(&event_, hipEventDisableTiming));
+#else
+    PADDLE_ENFORCE_GPU_SUCCESS(
         cudaEventCreate(&event_, cudaEventDisableTiming));
+#endif
   }
 
   ~CUDADeviceContextAllocator() {
     if (event_) {
       platform::CUDADeviceGuard guard(place_.device);
-      PADDLE_ENFORCE_CUDA_SUCCESS(cudaEventDestroy(event_));
+#ifdef PADDLE_WITH_HIP
+      PADDLE_ENFORCE_GPU_SUCCESS(hipEventDestroy(event_));
+#else
+      PADDLE_ENFORCE_GPU_SUCCESS(cudaEventDestroy(event_));
+#endif
     }
   }
 
  protected:
-  Allocation *AllocateImpl(size_t size) override {
+  phi::Allocation *AllocateImpl(size_t size) override {
     PADDLE_ENFORCE_NOT_NULL(
         default_stream_,
         platform::errors::PreconditionNotMet(
             "Default stream is not set for CUDADeviceContextAllocator"));
     platform::CUDADeviceGuard guard(place_.device);
-    auto allocation =
-        new CUDADeviceContextAllocation(memory::Alloc(place_, size));
-    // Wait for the event on stream
-    PADDLE_ENFORCE_CUDA_SUCCESS(cudaEventRecord(event_, default_stream_));
-    PADDLE_ENFORCE_CUDA_SUCCESS(
-        cudaStreamWaitEvent(default_stream_, event_, 0));
+    auto allocation = new CUDADeviceContextAllocation(
+        static_unique_ptr_cast<Allocation>(memory::Alloc(place_, size)));
+// Wait for the event on stream
+#ifdef PADDLE_WITH_HIP
+    PADDLE_ENFORCE_GPU_SUCCESS(hipEventRecord(event_, default_stream_));
+    PADDLE_ENFORCE_GPU_SUCCESS(hipStreamWaitEvent(default_stream_, event_, 0));
+#else
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event_, default_stream_));
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaStreamWaitEvent(default_stream_, event_, 0));
+#endif
     return allocation;
   }
 
-  void FreeImpl(Allocation *allocation) override { delete allocation; }
+  void FreeImpl(phi::Allocation *allocation) override { delete allocation; }
 
  private:
   platform::CUDAPlace place_;
-  cudaEvent_t event_{nullptr};
-  cudaStream_t default_stream_{nullptr};
+  gpuEvent_t event_{nullptr};
+  gpuStream_t default_stream_{nullptr};
 };
 
 /**
@@ -132,8 +144,8 @@ class CUDADeviceContextAllocatorPool {
   }
 
   AllocationPtr Alloc(const platform::CUDADeviceContext &dev_ctx, size_t size) {
-    auto iter = allocators_.find(
-        BOOST_GET_CONST(platform::CUDAPlace, dev_ctx.GetPlace()));
+    auto iter =
+        allocators_.find(platform::CUDAPlace(dev_ctx.GetPlace().GetDeviceId()));
     PADDLE_ENFORCE_NE(
         iter, allocators_.end(),
         platform::errors::NotFound("No allocator found for CUDAPlace."));

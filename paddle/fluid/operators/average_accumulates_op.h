@@ -16,16 +16,12 @@ limitations under the License. */
 #include <algorithm>
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
 
 using Tensor = framework::Tensor;
-
-template <typename T, int MajorType = Eigen::RowMajor,
-          typename IndexType = Eigen::DenseIndex>
-using EigenVector = framework::EigenVector<T, MajorType, IndexType>;
 
 template <typename DeviceContext>
 void GetAccumulators(const framework::ExecutionContext& ctx,
@@ -54,31 +50,35 @@ class AverageAccumulatesKernel : public framework::OpKernel<T> {
     float average_window = ctx.Attr<float>("average_window");
     int64_t max_average_window = ctx.Attr<int64_t>("max_average_window");
     int64_t min_average_window = ctx.Attr<int64_t>("min_average_window");
-    PADDLE_ENFORCE_LE(min_average_window, max_average_window,
-                      "min_average_window shouldn't be larger than "
-                      "max_average_window");
+    PADDLE_ENFORCE_LE(
+        min_average_window, max_average_window,
+        platform::errors::InvalidArgument(
+            "The min_average_window > "
+            "max_average_window is not right, min_average_window is %ld, "
+            "max_average_window is %ld.",
+            min_average_window, max_average_window));
 
     // Get inputs
     auto* param = ctx.Input<Tensor>("param");
     auto* in_sum_1 = ctx.Input<Tensor>("in_sum_1");
     auto* in_sum_2 = ctx.Input<Tensor>("in_sum_2");
     auto* in_sum_3 = ctx.Input<Tensor>("in_sum_3");
-    auto param_tensor = EigenVector<T>::Flatten(*param);
-    auto in_sum_1_tensor = EigenVector<T>::Flatten(*in_sum_1);
-    auto in_sum_2_tensor = EigenVector<T>::Flatten(*in_sum_2);
-    auto in_sum_3_tensor = EigenVector<T>::Flatten(*in_sum_3);
+    auto param_tensor = framework::EigenVector<T>::Flatten(*param);
+    auto in_sum_1_tensor = framework::EigenVector<T>::Flatten(*in_sum_1);
+    auto in_sum_2_tensor = framework::EigenVector<T>::Flatten(*in_sum_2);
+    auto in_sum_3_tensor = framework::EigenVector<T>::Flatten(*in_sum_3);
 
     // Get outputs
     auto* out_sum_1 = ctx.Output<Tensor>("out_sum_1");
     auto* out_sum_2 = ctx.Output<Tensor>("out_sum_2");
     auto* out_sum_3 = ctx.Output<Tensor>("out_sum_3");
-    auto out_sum_1_tensor = EigenVector<T>::Flatten(*out_sum_1);
-    auto out_sum_2_tensor = EigenVector<T>::Flatten(*out_sum_2);
-    auto out_sum_3_tensor = EigenVector<T>::Flatten(*out_sum_3);
+    auto out_sum_1_tensor = framework::EigenVector<T>::Flatten(*out_sum_1);
+    auto out_sum_2_tensor = framework::EigenVector<T>::Flatten(*out_sum_2);
+    auto out_sum_3_tensor = framework::EigenVector<T>::Flatten(*out_sum_3);
 
     // Compute
     auto& place = *ctx.template device_context<DeviceContext>().eigen_device();
-    math::SetConstant<DeviceContext, T> constant_functor;
+    phi::funcs::SetConstant<DeviceContext, T> constant_functor;
     ++num_updates;
     ++num_accumulates;
     out_sum_1_tensor.device(place) = in_sum_1_tensor + param_tensor;

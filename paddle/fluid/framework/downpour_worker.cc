@@ -13,10 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/device_worker.h"
-#include "paddle/fluid/framework/device_worker_factory.h"
-#include "paddle/fluid/framework/fleet/fleet_wrapper.h"
+#include "paddle/fluid/framework/fleet/metrics.h"
 #include "paddle/fluid/platform/cpu_helper.h"
-#include "paddle/fluid/string/string_helper.h"
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+namespace paddle {
+namespace framework {
+class Variable;
+}  // namespace framework
+}  // namespace paddle
 
 #if defined _WIN32 || defined __APPLE__
 #else
@@ -25,7 +33,6 @@ limitations under the License. */
 
 namespace paddle {
 namespace framework {
-
 void DownpourWorker::Initialize(const TrainerDesc& desc) {
   param_ = desc.downpour_param();
   for (int i = 0; i < param_.sparse_table_size(); ++i) {
@@ -61,6 +68,13 @@ void DownpourWorker::Initialize(const TrainerDesc& desc) {
     }
   }
 
+  flag_partial_push_ = false;
+  for (auto& m : param_.program_config(0).partial_pushdense_condtable_map()) {
+    cond2table_map_[m.key()] = m.value();
+    condvalue_set_.insert(m.value());
+    flag_partial_push_ = true;
+  }
+
   skip_ops_.resize(param_.skip_ops_size());
   for (int i = 0; i < param_.skip_ops_size(); ++i) {
     skip_ops_[i] = param_.skip_ops(i);
@@ -78,6 +92,8 @@ void DownpourWorker::Initialize(const TrainerDesc& desc) {
   use_cvm_ = desc.use_cvm();
   // for sparse value accessor, embedding only
   no_cvm_ = desc.no_cvm();
+  scale_sparse_gradient_with_batch_size_ =
+      desc.scale_sparse_gradient_with_batch_size();
   scale_datanorm_ = desc.scale_datanorm();
   dump_slot_ = desc.dump_slot();
   adjust_ins_weight_config_ = desc.adjust_ins_weight_config();
@@ -580,7 +596,8 @@ void DownpourWorker::TrainFilesWithProfiler() {
             *thread_scope_, tid, features_[tid], feature_labels_[tid],
             sparse_key_names_[tid], sparse_grad_names_[tid], table.emb_dim(),
             &feature_grads_[tid], &push_sparse_status_, cur_batch, use_cvm_,
-            dump_slot_, &sparse_push_keys_[tid], no_cvm_);
+            dump_slot_, &sparse_push_keys_[tid], no_cvm_,
+            scale_sparse_gradient_with_batch_size_);
         timeline.Pause();
         push_sparse_time += timeline.ElapsedSec();
         total_time += timeline.ElapsedSec();
@@ -723,6 +740,23 @@ void DownpourWorker::TrainFilesWithProfiler() {
   }
 }
 
+#ifdef PADDLE_WITH_PSLIB
+/**
+ * @brief add auc monitor
+ */
+inline void AddAucMonitor(const Scope* scope, const platform::Place& place) {
+  auto metric_ptr = Metric::GetInstance();
+  auto& metric_list = metric_ptr->GetMetricList();
+  for (auto iter = metric_list.begin(); iter != metric_list.end(); iter++) {
+    auto* metric_msg = iter->second;
+    if (metric_ptr->Phase() != metric_msg->MetricPhase()) {
+      continue;
+    }
+    metric_msg->add_data(scope, place);
+  }
+}
+#endif
+
 void DownpourWorker::TrainFiles() {
   VLOG(3) << "Begin to train files";
   platform::SetNumThreads(1);
@@ -798,8 +832,8 @@ void DownpourWorker::TrainFiles() {
             if (var->IsType<framework::LoDTensor>()) {
               tensor = var->GetMutable<LoDTensor>();
               len = tensor->numel();
-            } else if (var->IsType<SelectedRows>()) {
-              auto selected_rows = var->GetMutable<SelectedRows>();
+            } else if (var->IsType<phi::SelectedRows>()) {
+              auto selected_rows = var->GetMutable<phi::SelectedRows>();
               tensor = selected_rows->mutable_value();
               len = tensor->numel();
             }
@@ -819,6 +853,13 @@ void DownpourWorker::TrainFiles() {
 #endif
       }
     }
+
+#ifdef PADDLE_WITH_PSLIB
+    // add data for MetricMsg
+    if (Metric::GetInstance() != nullptr) {
+      AddAucMonitor(thread_scope_, place_);
+    }
+#endif
 
     // check inf and nan
     for (std::string& var_name : check_nan_var_names_) {
@@ -855,7 +896,8 @@ void DownpourWorker::TrainFiles() {
             *thread_scope_, tid, features_[tid], feature_labels_[tid],
             sparse_key_names_[tid], sparse_grad_names_[tid], table.emb_dim(),
             &feature_grads_[tid], &push_sparse_status_, cur_batch, use_cvm_,
-            dump_slot_, &sparse_push_keys_[tid], no_cvm_);
+            dump_slot_, &sparse_push_keys_[tid], no_cvm_,
+            scale_sparse_gradient_with_batch_size_);
       }
     }
 
@@ -872,14 +914,42 @@ void DownpourWorker::TrainFiles() {
 #endif
 
     if (need_to_push_dense_) {
-      for (int i = 0; i < param_.program_config(0).push_dense_table_id_size();
-           ++i) {
-        uint64_t tid = static_cast<uint64_t>(
-            param_.program_config(0).push_dense_table_id(i));
-        fleet_ptr_->PushDenseVarsAsync(
-            *thread_scope_, tid, dense_grad_names_[tid], &push_sparse_status_,
-            scale_datanorm_, cur_batch);
+      if (flag_partial_push_) {
+        Variable* var = (*thread_scope_).FindVar("cond_tag");
+        LoDTensor* tensor = var->GetMutable<LoDTensor>();
+        // check type in python code
+        int64_t* cond_value_batch = tensor->data<int64_t>();
+
+        for (int i = 0; i < param_.program_config(0).push_dense_table_id_size();
+             ++i) {
+          uint64_t tid = static_cast<uint64_t>(
+              param_.program_config(0).push_dense_table_id(i));
+          if (condvalue_set_.find(tid) != condvalue_set_.end()) {
+            // common dense table must push dense
+            if (cond2table_map_[cond_value_batch[0]] != tid) {
+              // can't push dense
+              continue;
+            }
+          }
+
+          VLOG(3) << "push multitask dense gradient " << tid;
+          fleet_ptr_->PushDenseVarsAsync(
+              *thread_scope_, tid, dense_grad_names_[tid], &push_sparse_status_,
+              scale_datanorm_, cur_batch);
+        }
+
+      } else {
+        for (int i = 0; i < param_.program_config(0).push_dense_table_id_size();
+             ++i) {
+          uint64_t tid = static_cast<uint64_t>(
+              param_.program_config(0).push_dense_table_id(i));
+
+          fleet_ptr_->PushDenseVarsAsync(
+              *thread_scope_, tid, dense_grad_names_[tid], &push_sparse_status_,
+              scale_datanorm_, cur_batch);
+        }
       }
+
       VLOG(3) << "push dense gradient done.";
 
       // the following code should be more precise and clean

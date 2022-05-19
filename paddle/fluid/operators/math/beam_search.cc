@@ -13,8 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/math/beam_search.h"
-#include <algorithm>
-#include <map>
+
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+namespace paddle {
+namespace framework {}  // namespace framework
+namespace platform {
+class CPUDeviceContext;
+}  // namespace platform
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -54,7 +63,7 @@ class BeamSearchFunctor<platform::CPUDeviceContext, T> {
         std::begin(selected_items), std::end(selected_items), 0,
         [](size_t a, std::vector<Item> &b) { return a + b.size(); });
     // the output tensor shape should be [num_instances, 1]
-    auto dims = framework::make_ddim(
+    auto dims = phi::make_ddim(
         std::vector<int64_t>({static_cast<int>(num_instances), 1}));
     auto *selected_ids_data =
         selected_ids->mutable_data<int64_t>(dims, platform::CPUPlace());
@@ -87,7 +96,10 @@ class BeamSearchFunctor<platform::CPUDeviceContext, T> {
     lod[0].assign(high_level.begin(), high_level.end());
     lod[1].assign(low_level.begin(), low_level.end());
     if (!framework::CheckLoD(lod)) {
-      PADDLE_THROW("lod %s is not right", framework::LoDToString(lod));
+      PADDLE_THROW(platform::errors::InvalidArgument(
+          "lod %s is not right in"
+          " beam_search, please check your code.",
+          framework::LoDToString(lod)));
     }
     selected_ids->set_lod(lod);
     selected_scores->set_lod(lod);

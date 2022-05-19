@@ -47,7 +47,7 @@ class TestSimpleRNNCell(unittest.TestCase):
         prev_h = np.random.randn(4, 32)
 
         y1, h1 = rnn1(x, prev_h)
-        y2, h2 = rnn2(paddle.to_variable(x), paddle.to_variable(prev_h))
+        y2, h2 = rnn2(paddle.to_tensor(x), paddle.to_tensor(prev_h))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
 
     def test_with_zero_state(self):
@@ -57,12 +57,19 @@ class TestSimpleRNNCell(unittest.TestCase):
         x = np.random.randn(4, 16)
 
         y1, h1 = rnn1(x)
-        y2, h2 = rnn2(paddle.to_variable(x))
+        y2, h2 = rnn2(paddle.to_tensor(x))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
+
+    def test_errors(self):
+        def test_zero_hidden_size():
+            cell = paddle.nn.SimpleRNNCell(-1, 0)
+
+        self.assertRaises(ValueError, test_zero_hidden_size)
 
     def runTest(self):
         self.test_with_initial_state()
         self.test_with_zero_state()
+        self.test_errors()
 
 
 class TestGRUCell(unittest.TestCase):
@@ -90,7 +97,7 @@ class TestGRUCell(unittest.TestCase):
         prev_h = np.random.randn(4, 32)
 
         y1, h1 = rnn1(x, prev_h)
-        y2, h2 = rnn2(paddle.to_variable(x), paddle.to_variable(prev_h))
+        y2, h2 = rnn2(paddle.to_tensor(x), paddle.to_tensor(prev_h))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
 
     def test_with_zero_state(self):
@@ -100,12 +107,19 @@ class TestGRUCell(unittest.TestCase):
         x = np.random.randn(4, 16)
 
         y1, h1 = rnn1(x)
-        y2, h2 = rnn2(paddle.to_variable(x))
+        y2, h2 = rnn2(paddle.to_tensor(x))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
+
+    def test_errors(self):
+        def test_zero_hidden_size():
+            cell = paddle.nn.GRUCell(-1, 0)
+
+        self.assertRaises(ValueError, test_zero_hidden_size)
 
     def runTest(self):
         self.test_with_initial_state()
         self.test_with_zero_state()
+        self.test_errors()
 
 
 class TestLSTMCell(unittest.TestCase):
@@ -134,8 +148,8 @@ class TestLSTMCell(unittest.TestCase):
 
         y1, (h1, c1) = rnn1(x, (prev_h, prev_c))
         y2, (h2, c2) = rnn2(
-            paddle.to_variable(x),
-            (paddle.to_variable(prev_h), paddle.to_variable(prev_c)))
+            paddle.to_tensor(x),
+            (paddle.to_tensor(prev_h), paddle.to_tensor(prev_c)))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
         np.testing.assert_allclose(c1, c2.numpy(), atol=1e-8, rtol=1e-5)
 
@@ -146,13 +160,20 @@ class TestLSTMCell(unittest.TestCase):
         x = np.random.randn(4, 16)
 
         y1, (h1, c1) = rnn1(x)
-        y2, (h2, c2) = rnn2(paddle.to_variable(x))
+        y2, (h2, c2) = rnn2(paddle.to_tensor(x))
         np.testing.assert_allclose(h1, h2.numpy(), atol=1e-8, rtol=1e-5)
         np.testing.assert_allclose(c1, c2.numpy(), atol=1e-8, rtol=1e-5)
+
+    def test_errors(self):
+        def test_zero_hidden_size():
+            cell = paddle.nn.LSTMCell(-1, 0)
+
+        self.assertRaises(ValueError, test_zero_hidden_size)
 
     def runTest(self):
         self.test_with_initial_state()
         self.test_with_zero_state()
+        self.test_errors()
 
 
 def load_tests(loader, tests, pattern):

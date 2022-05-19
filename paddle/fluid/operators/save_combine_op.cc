@@ -38,7 +38,8 @@ class SaveCombineOp : public framework::OperatorWithKernel {
   framework::OpKernelType GetKernelTypeForVar(
       const std::string& var_name, const Tensor& tensor,
       const framework::OpKernelType& expected_kernel_type) const override {
-    return expected_kernel_type;
+    return framework::OpKernelType(expected_kernel_type.data_type_,
+                                   tensor.place());
   }
 };
 
@@ -102,5 +103,7 @@ REGISTER_OP_CPU_KERNEL(
     save_combine,
     ops::SaveCombineOpKernel<paddle::platform::CPUDeviceContext, float>,
     ops::SaveCombineOpKernel<paddle::platform::CPUDeviceContext, double>,
+    ops::SaveCombineOpKernel<paddle::platform::CPUDeviceContext,
+                             paddle::platform::bfloat16>,
     ops::SaveCombineOpKernel<paddle::platform::CPUDeviceContext, int>,
     ops::SaveCombineOpKernel<paddle::platform::CPUDeviceContext, int64_t>);

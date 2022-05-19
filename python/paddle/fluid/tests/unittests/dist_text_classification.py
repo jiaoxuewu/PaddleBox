@@ -44,14 +44,9 @@ DATA_MD5 = '29ebfc94f11aea9362bbb7f5e9d86b8a'
 # Load dictionary.
 def load_vocab(filename):
     vocab = {}
-    if six.PY2:
-        with open(filename, 'r') as f:
-            for idx, line in enumerate(f):
-                vocab[line.strip()] = idx
-    else:
-        with open(filename, 'r', encoding="utf-8") as f:
-            for idx, line in enumerate(f):
-                vocab[line.strip()] = idx
+    with open(filename, 'r', encoding="utf-8") as f:
+        for idx, line in enumerate(f):
+            vocab[line.strip()] = idx
     return vocab
 
 
@@ -204,8 +199,8 @@ def train(word_idx):
     :rtype: callable
     """
     return reader_creator(
-        re.compile("train/pos/.*\.txt$"),
-        re.compile("train/neg/.*\.txt$"), word_idx)
+        re.compile(r"train/pos/.*\.txt$"),
+        re.compile(r"train/neg/.*\.txt$"), word_idx)
 
 
 def test(word_idx):
@@ -221,8 +216,8 @@ def test(word_idx):
     :rtype: callable
     """
     return reader_creator(
-        re.compile("test/pos/.*\.txt$"),
-        re.compile("test/neg/.*\.txt$"), word_idx)
+        re.compile(r"test/pos/.*\.txt$"),
+        re.compile(r"test/neg/.*\.txt$"), word_idx)
 
 
 if __name__ == "__main__":

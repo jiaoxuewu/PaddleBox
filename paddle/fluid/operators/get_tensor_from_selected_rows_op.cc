@@ -57,7 +57,7 @@ class GetTensorFromSelectedRowsOp : public framework::OperatorWithKernel {
 class GetTensorFromSelectedRowsKernel {
  public:
   void operator()(const framework::ExecutionContext &ctx) const {
-    auto *x = ctx.Input<framework::SelectedRows>("X");
+    auto *x = ctx.Input<phi::SelectedRows>("X");
     auto *out = ctx.Output<framework::LoDTensor>("Out");
 
     out->Resize(x->value().dims());
@@ -107,7 +107,7 @@ REGISTER_OP_CPU_KERNEL_FUNCTOR(get_tensor_from_selected_rows, float,
                                ops::GetTensorFromSelectedRowsKernel, int64_t,
                                ops::GetTensorFromSelectedRowsKernel);
 
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 REGISTER_OP_CUDA_KERNEL_FUNCTOR(get_tensor_from_selected_rows, float,
                                 ops::GetTensorFromSelectedRowsKernel, double,
                                 ops::GetTensorFromSelectedRowsKernel, int,

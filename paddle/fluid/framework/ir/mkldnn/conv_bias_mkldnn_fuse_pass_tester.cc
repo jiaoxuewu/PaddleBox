@@ -18,6 +18,7 @@
 #include "paddle/fluid/platform/place.h"
 
 #include "paddle/fluid/framework/op_proto_maker.h"
+#include "paddle/fluid/framework/op_version_registry.h"
 #include "paddle/fluid/imperative/type_defs.h"
 
 namespace paddle {
@@ -30,8 +31,19 @@ void SetOp(ProgramDesc* prog, const std::string& type, const std::string& name,
   auto* op = prog->MutableBlock(0)->AppendOp();
   op->SetType(type);
   if (type == "conv2d") {
+    const std::vector<int> strides({1, 1});
+    const std::vector<int> paddings({0, 0});
+    const std::vector<int> dilations({1, 1});
     op->SetAttr("use_mkldnn", true);
     op->SetAttr("name", name);
+    op->SetAttr("strides", strides);
+    op->SetAttr("groups", 1);
+    op->SetAttr("paddings", paddings);
+    op->SetAttr("padding_algorithm", std::string("EXPLICIT"));
+    op->SetAttr("dilations", dilations);
+    op->SetAttr("data_format", std::string("NCHW"));
+
+    op->SetOutput("Output", outputs);
     op->SetInput("Input", {inputs[0]});
     op->SetInput("Filter", {inputs[1]});
     if (inputs.size() > 2)
@@ -40,10 +52,11 @@ void SetOp(ProgramDesc* prog, const std::string& type, const std::string& name,
       op->SetInput("Bias", {});
   } else if (type == "elementwise_add") {
     op->SetAttr("use_mkldnn", true);
+    op->SetAttr("axis", 1);
     op->SetInput("X", {inputs[0]});
     op->SetInput("Y", {inputs[1]});
+    op->SetOutput("Out", outputs);
   }
-  op->SetOutput("Out", outputs);
   op->SetAttr(OpProtoAndCheckerMaker::OpRoleAttrName(),
               static_cast<int>(OpRole::kForward));
 }
@@ -82,7 +95,8 @@ void InitTensorHolder(Scope* scope, const paddle::platform::Place& place,
                       const char* var_name) {
   auto x = scope->Var(var_name);
   auto tensor = x->GetMutable<LoDTensor>();
-  tensor->mutable_data(place, proto::VarType::FP32, 1);
+  tensor->mutable_data(place,
+                       framework::TransToPhiDataType(proto::VarType::FP32), 1);
 }
 
 void MainTest(bool convWithExistingBias) {
@@ -147,6 +161,12 @@ TEST(ConvBiasFusePass, conv3d) {
 TEST(ConvBiasFusePass, conv2d_transpose) {
   Conv2DTransposeBiasFusePass pass;
   ASSERT_EQ(pass.type(), std::string("conv2d_transpose"));
+}
+
+TEST(ConvBiasFusePass, pass_op_version_check) {
+  ASSERT_TRUE(
+      paddle::framework::compatible::PassVersionCheckerRegistrar::GetInstance()
+          .IsPassCompatible("conv_bias_mkldnn_fuse_pass"));
 }
 
 }  // namespace ir

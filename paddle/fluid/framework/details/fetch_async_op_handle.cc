@@ -13,10 +13,12 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/details/fetch_async_op_handle.h"
+
 #include <string>
-#include <utility>
-#include <vector>
+
+#include "paddle/fluid/framework/convert_utils.h"
 #include "paddle/fluid/platform/profiler.h"
+#include "paddle/fluid/platform/profiler/event_tracing.h"
 
 namespace paddle {
 namespace framework {
@@ -49,7 +51,7 @@ static void CheckTensorAttrs(const LoDTensor *tensor,
   if (tensor->numel() && tensor->IsInitialized()) {
     // step1: check type
     PADDLE_ENFORCE_EQ(
-        type, tensor->type(),
+        type, framework::TransToProtoVarType(tensor->dtype()),
         platform::errors::InvalidArgument(
             "The data type of fetched Tensors or the items of fetched "
             "LoDTensorArray are different from each other on different "
@@ -57,7 +59,7 @@ static void CheckTensorAttrs(const LoDTensor *tensor,
             "(th) fetched variable. Please set the "
             "parameter `return_merged = False` when you "
             "call the `Executor.run()` method.",
-            DataTypeToString(type), DataTypeToString(tensor->type()), offset));
+            DataTypeToString(type), tensor->dtype(), offset));
 
     // step2: check layout
     PADDLE_ENFORCE_EQ(
@@ -116,7 +118,7 @@ static void TransData(const framework::Tensor *src_item,
                       const platform::DeviceContext &ctx) {
   if (src_item->IsInitialized() && src_item->numel() > 0) {
     if (platform::is_gpu_place(src_item->place())) {
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
       TensorCopy(*src_item, platform::CUDAPinnedPlace(), ctx, dst_item);
 #endif
     } else {
@@ -139,7 +141,7 @@ void FetchAsyncOpHandle::FetchMergedLodTensor(
   for (auto *t : src_lodtensors) {
     if (t->numel() && t->IsInitialized()) {
       check_dim = t->dims();
-      new_type = t->type();
+      new_type = paddle::framework::TransToProtoVarType(t->dtype());
       new_layout = t->layout();
       break;
     }
@@ -169,10 +171,10 @@ void FetchAsyncOpHandle::FetchMergedLodTensor(
   dst_lodtensor->set_lod(src_lodtensors[0]->lod());
   if (platform::is_gpu_place(src_lodtensors[0]->place())) {
     dst_lodtensor->mutable_data(platform::CUDAPinnedPlace(),
-                                src_lodtensors[0]->type());
+                                src_lodtensors[0]->dtype());
   } else {
     dst_lodtensor->mutable_data(platform::CPUPlace(),
-                                src_lodtensors[0]->type());
+                                src_lodtensors[0]->dtype());
   }
 
   // slice and memcpy
@@ -189,8 +191,9 @@ void FetchAsyncOpHandle::FetchMergedLodTensor(
 }
 
 void FetchAsyncOpHandle::RunImpl() {
-  platform::RecordEvent record_event(Name());
-  WaitInputVarGenerated();
+  platform::RecordEvent record_event(Name(),
+                                     platform::TracerEventType::Operator, 1);
+  WaitInputVarGenerated(true);
 
   // get src vars
   auto &scopes = *local_exec_scopes_;

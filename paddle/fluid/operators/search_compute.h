@@ -14,15 +14,16 @@ limitations under the License. */
 
 #pragma once
 
-#if !defined(PADDLE_WITH_ARM)
+#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) && \
+    !defined(PADDLE_WITH_MIPS)
 #include <immintrin.h>
 #endif
 #include <cfloat>
 #include <cmath>
 #include <cstring>
 
-#include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -32,7 +33,7 @@ using LoDTensor = framework::LoDTensor;
 using LoD = framework::LoD;
 
 template <typename DeviceContext, typename T>
-void call_gemm(const math::BlasT<DeviceContext, T>& blas,
+void call_gemm(const phi::funcs::BlasT<DeviceContext, T>& blas,
                const CBLAS_TRANSPOSE TransA, const CBLAS_TRANSPOSE TransB,
                const int M, const int N, const int K, const T alpha, const T* A,
                const T* B, const T beta, T* C) {
@@ -48,12 +49,12 @@ void call_gemm(const framework::ExecutionContext& ctx,
                const T* B, const T beta, T* C) {
   int lda = (TransA == CblasNoTrans) ? K : M;
   int ldb = (TransB == CblasNoTrans) ? N : K;
-  auto blas = math::GetBlas<platform::CPUDeviceContext, T>(ctx);
+  auto blas = phi::funcs::GetBlas<platform::CPUDeviceContext, T>(ctx);
   blas.GEMM(TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta, C, N);
 }
 
 template <typename DeviceContext, typename T>
-void call_gemm_with_lda(const math::BlasT<DeviceContext, T>& blas,
+void call_gemm_with_lda(const phi::funcs::BlasT<DeviceContext, T>& blas,
                         const CBLAS_TRANSPOSE TransA,
                         const CBLAS_TRANSPOSE TransB, const int M, const int N,
                         const int K, const T alpha, const T* A, const T* B,
@@ -74,7 +75,8 @@ void call_gemm_batched(const framework::ExecutionContext& ctx,
   }
 }
 
-#if !defined(PADDLE_WITH_ARM)
+#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) && \
+    !defined(PADDLE_WITH_MIPS)
 
 #define __m256x __m256
 
@@ -114,7 +116,8 @@ inline void axpy(const T* x, T* y, size_t len, const T alpha) {
         _mm256_add_px(_mm256_load_px(y + jjj),
                       _mm256_mul_px(mm_alpha, _mm256_load_px(x + jjj))));
   }
-#elif defined(PADDLE_WITH_ARM)
+#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) || \
+    defined(PADDLE_WITH_MIPS)
   PADDLE_THROW(platform::errors::Unimplemented("axpy is not supported"));
 #else
   lll = len & ~SSE_CUT_LEN_MASK;
@@ -143,7 +146,8 @@ inline void axpy_noadd(const T* x, T* y, size_t len, const T alpha) {
   for (jjj = 0; jjj < lll; jjj += AVX_STEP_SIZE) {
     _mm256_store_px(y + jjj, _mm256_mul_px(mm_alpha, _mm256_load_px(x + jjj)));
   }
-#elif defined(PADDLE_WITH_ARM)
+#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) || \
+    defined(PADDLE_WITH_MIPS)
   PADDLE_THROW(platform::errors::Unimplemented("axpy_noadd is not supported"));
 #else
   lll = len & ~SSE_CUT_LEN_MASK;

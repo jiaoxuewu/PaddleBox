@@ -13,23 +13,22 @@
 // limitations under the License.
 
 #include "paddle/fluid/inference/analysis/passes/memory_optimize_pass.h"
-#include <algorithm>
-#include <fstream>
-#include <functional>
-#include <limits>
-#include <map>
-#include <set>
+
 #include <string>
-#include <type_traits>
 #include <utility>
-#include <vector>
+
+#include "glog/logging.h"
 #include "paddle/fluid/framework/ir/graph_helper.h"
-#include "paddle/fluid/framework/ir/graph_pattern_detector.h"
-#include "paddle/fluid/framework/ir/graph_to_program_pass.h"
-#include "paddle/fluid/framework/ir/graph_traits.h"
-#include "paddle/fluid/inference/analysis/helper.h"
-#include "paddle/fluid/inference/api/helper.h"
-#include "paddle/fluid/string/pretty_log.h"
+#include "paddle/fluid/platform/enforce.h"
+
+namespace paddle {
+namespace framework {
+namespace ir {
+class Graph;
+class Node;
+}  // namespace ir
+}  // namespace framework
+}  // namespace paddle
 
 namespace paddle {
 namespace inference {
@@ -53,11 +52,11 @@ typedef struct {
 // The traversal order also affect the lifecycles, so different sort_kind is
 // used.
 void MemoryOptimizePass::CollectLifeCycle(
-    std::unordered_map<std::string, lifecycle_t>* lifecycles,
+    Graph* graph, std::unordered_map<std::string, lifecycle_t>* lifecycles,
     int sort_kind) const {
-  max_lifecycle_ = 0;
+  int max_lifecycle = 0;
   for (auto* op_node : framework::ir::TopologyVarientSort(
-           *graph_, static_cast<framework::ir::SortKind>(sort_kind))) {
+           *graph, static_cast<framework::ir::SortKind>(sort_kind))) {
     if (!op_node->IsOp()) continue;
     auto reads = op_node->inputs;
     auto writes = op_node->outputs;
@@ -78,23 +77,24 @@ void MemoryOptimizePass::CollectLifeCycle(
         if (node->Var()->Persistable()) continue;
         std::string var = node->Name();
         if (!lifecycles->count(var)) {
-          (*lifecycles)[var] = std::make_pair(max_lifecycle_, max_lifecycle_);
+          (*lifecycles)[var] = std::make_pair(max_lifecycle, max_lifecycle);
         } else {
           (*lifecycles)[var].second =
-              std::max(max_lifecycle_, lifecycles->at(var).second);  // max()
+              std::max(max_lifecycle, lifecycles->at(var).second);  // max()
         }
       }
     }
 
-    ++max_lifecycle_;
+    ++max_lifecycle;
   }
 }
 
 void MemoryOptimizePass::CollectVarMemorySize(
-    space_table_t* space_table) const {
+    Graph* graph, space_table_t* space_table) const {
   const int fake_batch_size = 1;
 
   auto valid_var = [&](framework::ir::Node* node) -> bool {
+    // lod operator reuse may cause unknown errors.
     std::set<std::string> invalid_op = {"while",
                                         "conditional_block",
                                         "tensorrt_engine",
@@ -102,7 +102,11 @@ void MemoryOptimizePass::CollectVarMemorySize(
                                         "merge_lod_tensor_infer",
                                         "merge_lod_tensor",
                                         "equal",
-                                        "lod_reset"};
+                                        "sequence_pool",
+                                        "recurrent",
+                                        "lod_reset",
+                                        "fetch",
+                                        "share_data"};
     for (auto* tmp : node->inputs) {
       CHECK(tmp->IsOp());
       std::string op_type = tmp->Op()->Type();
@@ -121,12 +125,27 @@ void MemoryOptimizePass::CollectVarMemorySize(
     }
     return true;
   };
+
+  // MemoryOptimizePass surppose input model is directed acyclic graph
+  // although it's not always the case. so black list is the best compromise
+  // between performance and underlying principle.
+  std::unordered_set<std::string> black_list;
+  for (auto* node : graph->Nodes()) {
+    if (node->IsVar() &&
+        node->Var()->GetType() ==
+            framework::proto::VarType::Type::VarType_Type_LOD_TENSOR) {
+      if (!valid_var(node)) {
+        black_list.emplace(node->Var()->Name());
+      }
+    }
+  }
+
   // Collect tensors from graph.
-  for (auto* node : graph_->Nodes()) {
+  for (auto* node : graph->Nodes()) {
     if (node->IsVar() &&
         node->Var()->GetType() ==
             framework::proto::VarType::Type::VarType_Type_LOD_TENSOR &&
-        valid_var(node)) {
+        !black_list.count(node->Var()->Name())) {
       // Parameters will not be reused.
       if (node->Var()->Persistable()) continue;
       auto shape = node->Var()->GetShape();
@@ -224,7 +243,9 @@ void UpdateOpDescsByReuse(
 
       // modify the graph
       for (auto input_node : node->inputs) {
-        PADDLE_ENFORCE(input_node->IsVar());
+        PADDLE_ENFORCE_EQ(input_node->IsVar(), true,
+                          platform::errors::PreconditionNotMet(
+                              "The input node should be a variable."));
         std::string input_node_name = input_node->Name();
         if (reuse_table.count(input_node_name) &&
             reuse_table.at(input_node_name) != input_node_name) {
@@ -246,7 +267,9 @@ void UpdateOpDescsByReuse(
 
       // modify the graph
       for (auto out_node : node->outputs) {
-        PADDLE_ENFORCE(out_node->IsVar());
+        PADDLE_ENFORCE_EQ(out_node->IsVar(), true,
+                          platform::errors::PreconditionNotMet(
+                              "The output node should be a variable."));
         std::string out_node_name = out_node->Name();
         if (reuse_table.count(out_node_name) &&
             reuse_table.at(out_node_name) != out_node_name) {
@@ -281,7 +304,10 @@ void MemoryOptimizePass::RunImpl(Argument* argument) {
   // 3. Perform reuse plan: Replace all var's name in the model according to the
   // mapping table.
   if (!argument->enable_memory_optim()) return;
-  graph_ = argument->main_graph_ptr();
+  // Because of pass is a singleton, graph can not be member
+  // variables，otherwise，errors will be caused under multithreading
+  // conditions.
+  auto graph = argument->main_graph_ptr();
 
   int sort_kind = 0;
   std::unordered_map<std::string, lifecycle_t> lifecycles;
@@ -289,10 +315,10 @@ void MemoryOptimizePass::RunImpl(Argument* argument) {
   std::unordered_map<std::string, std::string> node2cluster;
   std::unordered_map<std::string, int> cluster_size;
 
-  CollectLifeCycle(&lifecycles, sort_kind);
-  CollectVarMemorySize(&space_table);
+  CollectLifeCycle(graph, &lifecycles, sort_kind);
+  CollectVarMemorySize(graph, &space_table);
   MakeSimpleReusePlan(lifecycles, space_table, &node2cluster, &cluster_size);
-  UpdateOpDescsByReuse(graph_, node2cluster, sort_kind);
+  UpdateOpDescsByReuse(graph, node2cluster, sort_kind);
   return;
 }
 

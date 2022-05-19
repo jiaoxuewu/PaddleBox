@@ -23,12 +23,9 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wall"
 #include "lite/api/cxx_api.h"
+#include "lite/api/paddle_api.h"
 #include "lite/api/paddle_place.h"
-#include "lite/core/context.h"
-#include "lite/core/device_info.h"
-#include "lite/core/memory.h"
-#include "lite/core/op_registry.h"
-#include "lite/core/tensor.h"
+#include "lite/api/paddle_use_passes.h"
 #pragma GCC diagnostic pop
 
 namespace paddle {
@@ -38,25 +35,50 @@ namespace lite {
 struct EngineConfig {
   std::string model;
   std::string param;
-  paddle::lite::Place prefer_place;
-  std::vector<paddle::lite::Place> valid_places;
+  std::vector<paddle::lite_api::Place> valid_places;
   std::vector<std::string> neglected_passes;
   lite_api::LiteModelType model_type{lite_api::LiteModelType::kProtobuf};
   bool model_from_memory{true};
+  // TODO(wilber): now only works for xpu, lite gpu can support device_id or
+  // not?
+  int device_id = 0;
+
+  // for xpu
   size_t xpu_l3_workspace_size;
+  bool locked = false;
+  bool autotune = true;
+  std::string autotune_file = "";
+  std::string precision = "int16";
+  bool adaptive_seqlen = false;
+
+  // for x86 or arm
+  int cpu_math_library_num_threads{1};
+
+  // for cuda
+  bool use_multi_stream{false};
+
+  // for nnadapter or npu.
+  std::string nnadapter_model_cache_dir;
+  std::vector<std::string> nnadapter_device_names;
+  std::string nnadapter_context_properties;
+  std::string nnadapter_subgraph_partition_config_buffer;
+  std::string nnadapter_subgraph_partition_config_path;
+  std::vector<std::string> nnadapter_model_cache_token;
+  std::vector<std::vector<char>> nnadapter_model_cache_buffer;
 };
 
 class EngineManager {
  public:
   bool Empty() const;
   bool Has(const std::string& name) const;
-  paddle::lite::Predictor* Get(const std::string& name) const;
-  paddle::lite::Predictor* Create(const std::string& name,
-                                  const EngineConfig& cfg);
+  paddle::lite_api::PaddlePredictor* Get(const std::string& name) const;
+  paddle::lite_api::PaddlePredictor* Create(const std::string& name,
+                                            const EngineConfig& cfg);
   void DeleteAll();
 
  private:
-  std::unordered_map<std::string, std::unique_ptr<paddle::lite::Predictor>>
+  std::unordered_map<std::string,
+                     std::shared_ptr<paddle::lite_api::PaddlePredictor>>
       engines_;
 };
 

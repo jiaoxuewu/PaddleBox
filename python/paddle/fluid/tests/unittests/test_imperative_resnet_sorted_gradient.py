@@ -22,6 +22,7 @@ from paddle.fluid import core
 from paddle.fluid.dygraph.base import to_variable
 from test_imperative_base import new_program_scope
 from test_imperative_resnet import ResNet
+from paddle.fluid.framework import _test_eager_guard
 
 batch_size = 8
 train_parameters = {
@@ -54,7 +55,7 @@ def optimizer_setting(params, parameter_list=None):
         base_lr = params["lr"]
         lr = []
         lr = [base_lr * (0.1**i) for i in range(len(bd) + 1)]
-        if fluid.in_dygraph_mode():
+        if fluid._non_static_mode():
             optimizer = fluid.optimizer.SGD(learning_rate=0.01,
                                             parameter_list=parameter_list)
         else:
@@ -71,14 +72,14 @@ def optimizer_setting(params, parameter_list=None):
 
 
 class TestDygraphResnetSortGradient(unittest.TestCase):
-    def test_resnet_sort_gradient_float32(self):
+    def func_test_resnet_sort_gradient_float32(self):
         seed = 90
 
         batch_size = train_parameters["batch_size"]
         batch_num = 10
         with fluid.dygraph.guard():
             fluid.set_flags({'FLAGS_sort_sum_gradient': True})
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
 
             resnet = ResNet()
@@ -137,7 +138,7 @@ class TestDygraphResnetSortGradient(unittest.TestCase):
                     dy_param_value[param.name] = param.numpy()
 
         with new_program_scope():
-            paddle.manual_seed(seed)
+            paddle.seed(seed)
             paddle.framework.random._manual_program_seed(seed)
 
             exe = fluid.Executor(fluid.CPUPlace(
@@ -229,6 +230,11 @@ class TestDygraphResnetSortGradient(unittest.TestCase):
             self.assertTrue(np.allclose(value, dy_param_value[key]))
             self.assertTrue(np.isfinite(value.all()))
             self.assertFalse(np.isnan(value.any()))
+
+    def test_resnet_sort_gradient_float32(self):
+        with _test_eager_guard():
+            self.func_test_resnet_sort_gradient_float32()
+        self.func_test_resnet_sort_gradient_float32()
 
 
 if __name__ == '__main__':

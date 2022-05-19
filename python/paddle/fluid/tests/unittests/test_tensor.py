@@ -21,6 +21,14 @@ import numpy
 import numbers
 
 
+class TestTensorPtr(unittest.TestCase):
+    def test_tensor_ptr(self):
+        t = core.Tensor()
+        np_arr = numpy.zeros([2, 3])
+        t.set(np_arr, core.CPUPlace())
+        self.assertGreater(t._ptr(), 0)
+
+
 class TestTensor(unittest.TestCase):
     def setUp(self):
         self.support_dtypes = [
@@ -356,7 +364,7 @@ class TestTensor(unittest.TestCase):
         try:
             error_array = ["1", "2"]
             tensor.set(error_array, place)
-        except core.EnforceNotMet as ex:
+        except ValueError as ex:
             exception = ex
 
         self.assertIsNotNone(exception)

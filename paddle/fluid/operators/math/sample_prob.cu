@@ -18,13 +18,13 @@ limitations under the License. */
 #include <iostream>
 #include <vector>
 
-#include "paddle/fluid/framework/ddim.h"
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/operator.h"
 #include "paddle/fluid/framework/tensor.h"
-#include "paddle/fluid/operators/math/math_function.h"
 #include "paddle/fluid/operators/math/sample_prob.h"
 #include "paddle/fluid/operators/math/sampler.h"
+#include "paddle/phi/core/ddim.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 
 namespace paddle {
 namespace operators {
@@ -142,16 +142,30 @@ void GPUSampleWithProb<T>::operator()(
 
   int num_tries = UniqSampler<T>(sampler, num_samples, s_data);
   VLOG(1) << "num_tries: " << num_tries;
-  PADDLE_ENFORCE_CUDA_SUCCESS(cudaMemcpy(samples_data + num_true, s_data,
-                                         sizeof(int64_t) * num_samples,
-                                         cudaMemcpyHostToDevice));
+
+#ifdef PADDLE_WITH_HIP
+  PADDLE_ENFORCE_GPU_SUCCESS(hipMemcpy(samples_data + num_true, s_data,
+                                       sizeof(int64_t) * num_samples,
+                                       hipMemcpyHostToDevice));
+#else
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpy(samples_data + num_true, s_data,
+                                        sizeof(int64_t) * num_samples,
+                                        cudaMemcpyHostToDevice));
+#endif
 
   int threads = 512;
   const size_t size = batch_size * num_sampled_classes;
   int grid = (batch_size * num_sampled_classes + threads - 1) / threads;
+#ifdef PADDLE_WITH_HIP
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(SamplingCondidate<T>), dim3(grid),
+                     dim3(threads), 0, context.stream(), size, num_tries, range,
+                     log_range, num_true, num_samples, label_data, samples_data,
+                     probabilities_data);
+#else
   SamplingCondidate<T><<<grid, threads, 0, context.stream()>>>(
       size, num_tries, range, log_range, num_true, num_samples, label_data,
       samples_data, probabilities_data);
+#endif
 }
 
 template class GPUSampleWithProb<float>;

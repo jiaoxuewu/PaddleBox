@@ -14,8 +14,16 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/recurrent_op.h"
 
-#include <algorithm>
-#include "paddle/fluid/string/string_helper.h"
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+namespace paddle {
+namespace framework {
+class InferShapeContext;
+class OpDesc;
+}  // namespace framework
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -155,7 +163,9 @@ int64_t RecurrentBase::GetSequenceLength(const framework::Scope &scope) const {
   }
   PADDLE_ENFORCE_GE(seq_len, 0,
                     platform::errors::InvalidArgument(
-                        "RecurrentOp gets invalid sequence length."));
+                        "RecurrentOp gets invalid sequence length. Expected "
+                        "seq_len >= 0. Received seq_len = %d",
+                        seq_len));
   return seq_len;
 }
 
@@ -176,9 +186,9 @@ void RecurrentBase::LinkTensor(const framework::Scope &src_scope,
 // (seq_len, shape) -> return [seq_len] + list(shape)
 framework::DDim RecurrentBase::PrependDims(size_t seq_len,
                                            const framework::DDim &src) {
-  auto dims = framework::vectorize(src);
+  auto dims = phi::vectorize(src);
   dims.insert(dims.begin(), static_cast<int64_t>(seq_len));
-  return framework::make_ddim(dims);
+  return phi::make_ddim(dims);
 }
 
 RecurrentOp::RecurrentOp(const std::string &type,
@@ -203,17 +213,12 @@ void RecurrentOp::RunImpl(const framework::Scope &scope,
   auto *block = Attr<framework::BlockDesc *>(kStepBlock);
 
   auto *program = block->Program();
-  auto ctx = executor.Prepare(
-      *program, block->ID(), Attr<std::vector<std::string>>(
-                                 kSkipEagerDeletionVars) /*skip_ref_cnt_vars*/);
+  auto ctx = executor.Prepare(*program, block->ID(),
+                              Attr<std::vector<std::string>>(
+                                  kSkipEagerDeletionVars), /*skip_ref_cnt_vars*/
+                              true);
 
-  static std::mutex mutex;
-  std::lock_guard<std::mutex> lock(mutex);
   StepScopes scopes = CreateStepScopes(dev_ctx, scope, seq_len);
-  // TODO(gfwm2013) Function CreateStepScopes would make segmentation fault in
-  // multithreading in eval process, so we use a mutex before function
-  // CreateStepScopes to make sure that the computing process is correct. This
-  // problem will fix in next pull request.
   for (size_t i = 0; i < seq_len; ++i) {
     size_t seq_offset = reverse ? seq_len - i - 1 : i;
     VLOG(3) << "Recurrent operate at the time step " << seq_offset;
@@ -227,9 +232,9 @@ void RecurrentOp::RunImpl(const framework::Scope &scope,
         [&seq_offset](const framework::Tensor &outside,
                       framework::Tensor *inside) {
           inside->ShareDataWith(outside.Slice(seq_offset, seq_offset + 1));
-          auto dims = framework::vectorize(inside->dims());
+          auto dims = phi::vectorize(inside->dims());
           dims.erase(dims.begin());
-          inside->Resize(framework::make_ddim(dims));
+          inside->Resize(phi::make_ddim(dims));
         });
 
     if (has_state) {
@@ -248,16 +253,6 @@ void RecurrentOp::RunImpl(const framework::Scope &scope,
     // Link inside::output -> outside::output
     //   outside::output[seq_offset: seq_offset + 1] = inside::output
     executor.CreateVariables(ctx->prog_, &cur_scope, ctx->block_id_);
-    if (i > 0) {
-      LinkTensorWithCallback(scope, Outputs(kOutputs), cur_scope,
-                             Outputs(kOutputs),
-                             [&](const framework::LoDTensor &src_tensor,
-                                 framework::LoDTensor *dst_tensor) {
-                               framework::Tensor src_slice =
-                                   src_tensor.Slice(seq_offset, seq_offset + 1);
-                               dst_tensor->ShareDataWith(src_slice);
-                             });
-    }
 
     // Linked now, execute!
     executor.RunPreparedContext(ctx.get(), &cur_scope,
@@ -270,11 +265,19 @@ void RecurrentOp::RunImpl(const framework::Scope &scope,
               framework::LoDTensor *dst_tensor) {
             // create output tensor at begin
             dst_tensor->Resize(PrependDims(seq_len, src_tensor.dims()));
-            dst_tensor->mutable_data(place, src_tensor.type());
+            dst_tensor->mutable_data(place, src_tensor.dtype());
 
             auto dst_out = dst_tensor->Slice(seq_offset, seq_offset + 1);
             // Explicit copy output since the local RNN scope can be destroyed
             // early.
+            framework::TensorCopy(src_tensor, place, dev_ctx, &dst_out);
+          });
+    } else {
+      LinkTensorWithCallback(
+          cur_scope, Outputs(kOutputs), scope, Outputs(kOutputs),
+          [&](const framework::LoDTensor &src_tensor,
+              framework::LoDTensor *dst_tensor) {
+            auto dst_out = dst_tensor->Slice(seq_offset, seq_offset + 1);
             framework::TensorCopy(src_tensor, place, dev_ctx, &dst_out);
           });
     }
@@ -286,6 +289,11 @@ void RecurrentOp::RunImpl(const framework::Scope &scope,
 StepScopes RecurrentOp::CreateStepScopes(const platform::DeviceContext &dev_ctx,
                                          const framework::Scope &scope,
                                          size_t seq_len) const {
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> lock(mutex);
+  // TODO(baoachun) Function CreateStepScopes may lead to segmentation
+  // fault in multithreading in eval process. The performance drop of
+  // adding mutex need to be fixed.
   auto *var = scope.FindVar(Output(kStepScopes));
   PADDLE_ENFORCE_NOT_NULL(var, platform::errors::InvalidArgument(
                                    "RecurrentOp gets empty StepScopes var"));
@@ -329,9 +337,9 @@ void RecurrentGradOp::RunImpl(const framework::Scope &scope,
         scope, Inputs(kOutputGrads), &cur_scope, Inputs(kOutputGrads),
         [&](const framework::Tensor &outside, framework::Tensor *inside) {
           inside->ShareDataWith(outside.Slice(seq_offset, seq_offset + 1));
-          auto dims = framework::vectorize(inside->dims());
+          auto dims = phi::vectorize(inside->dims());
           dims.erase(dims.begin());
-          inside->Resize(framework::make_ddim(dims));
+          inside->Resize(phi::make_ddim(dims));
         },
         true /*is_backward*/);
     auto og_set = List2Set(Inputs(kOutputGrads));
@@ -430,8 +438,9 @@ void RecurrentGradOp::RunImpl(const framework::Scope &scope,
           auto &inside_tensor =
               cur_scope.FindVar(inside_grad_name)->Get<framework::LoDTensor>();
           framework::AttributeMap attrs;
-          attrs["dtype"] = inside_tensor.type();
-          attrs["shape"] = framework::vectorize<int>(inside_tensor.dims());
+          attrs["dtype"] =
+              framework::TransToProtoVarType(inside_tensor.dtype());
+          attrs["shape"] = phi::vectorize<int>(inside_tensor.dims());
           attrs["value"] = 0.0f;
 
           auto zero_op = framework::OpRegistry::CreateOp(
@@ -466,7 +475,7 @@ void RecurrentGradOp::RunImpl(const framework::Scope &scope,
             }
             // Alloc outside memory
             outside->Resize(PrependDims(seq_len, inside.dims()));
-            outside->mutable_data(place, inside.type());
+            outside->mutable_data(place, inside.dtype());
 
             auto dst = outside->Slice(seq_offset, seq_offset + 1);
             framework::TensorCopy(inside, place, dev_ctx, &dst);
@@ -484,7 +493,7 @@ void RecurrentGradOp::RunImpl(const framework::Scope &scope,
             [&](const framework::LoDTensor &inside,
                 framework::LoDTensor *outside) {
               outside->Resize(inside.dims());
-              outside->mutable_data(place, inside.type());
+              outside->mutable_data(place, inside.dtype());
               framework::TensorCopy(inside, place, dev_ctx, outside);
             },
             true /*is_backward*/);

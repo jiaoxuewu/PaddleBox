@@ -15,15 +15,16 @@
 #pragma once
 
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
-#include "paddle/fluid/framework/ir/graph.h"
-#include "paddle/fluid/framework/ir/pass.h"
 
 namespace paddle {
 namespace framework {
 namespace ir {
 
+class Graph;
+
 class SeqConcatFcFusePass : public FusePassBase {
  public:
+  SeqConcatFcFusePass();
   virtual ~SeqConcatFcFusePass() {}
 
  protected:

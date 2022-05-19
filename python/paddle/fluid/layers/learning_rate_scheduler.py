@@ -31,7 +31,7 @@ from . import ops
 from . import tensor
 from ..framework import default_main_program, Parameter, unique_name, name_scope
 from ..framework import Variable
-from ..framework import in_dygraph_mode
+from ..framework import _non_static_mode
 from ..dygraph import learning_rate_scheduler as imperate_lr
 from ..data_feeder import check_variable_and_dtype, check_type
 
@@ -52,9 +52,6 @@ def _decay_step_counter(begin=0):
 
 def noam_decay(d_model, warmup_steps, learning_rate=1.0):
     """
-	:alias_main: paddle.nn.functional.noam_decay
-	:alias: paddle.nn.functional.noam_decay,paddle.nn.functional.learning_rate.noam_decay
-	:old_api: paddle.fluid.layers.noam_decay
 
     Noam decay method. The numpy implementation of noam decay as follows.
 
@@ -98,7 +95,7 @@ def noam_decay(d_model, warmup_steps, learning_rate=1.0):
                          learning_rate)
     """
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.NoamDecay(
                 d_model, warmup_steps, learning_rate=learning_rate)
             return decay
@@ -115,9 +112,6 @@ def noam_decay(d_model, warmup_steps, learning_rate=1.0):
 
 def exponential_decay(learning_rate, decay_steps, decay_rate, staircase=False):
     """
-	:alias_main: paddle.nn.functional.exponential_decay
-	:alias: paddle.nn.functional.exponential_decay,paddle.nn.functional.learning_rate.exponential_decay
-	:old_api: paddle.fluid.layers.exponential_decay
 
     Applies exponential decay to the learning rate.
 
@@ -149,6 +143,9 @@ def exponential_decay(learning_rate, decay_steps, decay_rate, staircase=False):
         .. code-block:: python
 
           import paddle.fluid as fluid
+          import paddle
+
+          paddle.enable_static()
           base_lr = 0.1
           sgd_optimizer = fluid.optimizer.SGD(
 	      learning_rate=fluid.layers.exponential_decay(
@@ -159,7 +156,7 @@ def exponential_decay(learning_rate, decay_steps, decay_rate, staircase=False):
 
     """
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.ExponentialDecay(learning_rate, decay_steps,
                                                  decay_rate, staircase)
             return decay
@@ -176,9 +173,6 @@ def exponential_decay(learning_rate, decay_steps, decay_rate, staircase=False):
 
 def natural_exp_decay(learning_rate, decay_steps, decay_rate, staircase=False):
     """
-	:alias_main: paddle.nn.functional.natural_exp_decay
-	:alias: paddle.nn.functional.natural_exp_decay,paddle.nn.functional.learning_rate.natural_exp_decay
-	:old_api: paddle.fluid.layers.natural_exp_decay
 
 Applies natural exponential decay to the initial learning rate.
 
@@ -210,6 +204,9 @@ Applies natural exponential decay to the initial learning rate.
         .. code-block:: python
 
           import paddle.fluid as fluid
+          import paddle
+
+          paddle.enable_static()
           base_lr = 0.1
           sgd_optimizer = fluid.optimizer.SGD(
 	      learning_rate=fluid.layers.natural_exp_decay(
@@ -220,7 +217,7 @@ Applies natural exponential decay to the initial learning rate.
 
     """
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.NaturalExpDecay(learning_rate, decay_steps,
                                                 decay_rate, staircase)
             return decay
@@ -237,9 +234,6 @@ Applies natural exponential decay to the initial learning rate.
 
 def inverse_time_decay(learning_rate, decay_steps, decay_rate, staircase=False):
     """
-	:alias_main: paddle.nn.functional.inverse_time_decay
-	:alias: paddle.nn.functional.inverse_time_decay,paddle.nn.functional.learning_rate.inverse_time_decay
-	:old_api: paddle.fluid.layers.inverse_time_decay
 
     Applies inverse time decay to the initial learning rate.
 
@@ -271,6 +265,8 @@ def inverse_time_decay(learning_rate, decay_steps, decay_rate, staircase=False):
         .. code-block:: python
 
           import paddle.fluid as fluid
+          import paddle
+          paddle.enable_static()
           base_lr = 0.1
           sgd_optimizer = fluid.optimizer.SGD(
 	      learning_rate=fluid.layers.inverse_time_decay(
@@ -280,7 +276,7 @@ def inverse_time_decay(learning_rate, decay_steps, decay_rate, staircase=False):
 		    staircase=True))
     """
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.InverseTimeDecay(learning_rate, decay_steps,
                                                  decay_rate, staircase)
             return decay
@@ -302,10 +298,6 @@ def polynomial_decay(learning_rate,
                      power=1.0,
                      cycle=False):
     """
-	:alias_main: paddle.nn.functional.polynomial_decay
-	:alias: paddle.nn.functional.polynomial_decay,paddle.nn.functional.learning_rate.polynomial_decay
-	:old_api: paddle.fluid.layers.polynomial_decay
-2
     Applies polynomial decay to the initial learning rate.
 
     .. code-block:: text
@@ -340,7 +332,7 @@ def polynomial_decay(learning_rate,
 
     """
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.PolynomialDecay(learning_rate, decay_steps,
                                                 end_learning_rate, power, cycle)
             return decay
@@ -371,9 +363,6 @@ def polynomial_decay(learning_rate,
 
 def piecewise_decay(boundaries, values):
     """
-	:alias_main: paddle.nn.functional.piecewise_decay
-	:alias: paddle.nn.functional.piecewise_decay,paddle.nn.functional.learning_rate.piecewise_decay
-	:old_api: paddle.fluid.layers.piecewise_decay
 
 Applies piecewise decay to the initial learning rate.
 
@@ -401,6 +390,8 @@ Applies piecewise decay to the initial learning rate.
         .. code-block:: python
 
           import paddle.fluid as fluid
+          import paddle
+          paddle.enable_static()
           boundaries = [10000, 20000]
           values = [1.0, 0.5, 0.1]
           optimizer = fluid.optimizer.Momentum(
@@ -414,7 +405,7 @@ Applies piecewise decay to the initial learning rate.
         if len(values) - len(boundaries) != 1:
             raise ValueError("len(values) - len(boundaries) should be 1")
 
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.PiecewiseDecay(boundaries, values, 0)
             return decay
         else:
@@ -434,25 +425,24 @@ Applies piecewise decay to the initial learning rate.
                         dtype='float32',
                         value=float(boundaries[i]),
                         force_cpu=True)
-                    value_var = tensor.fill_constant(
-                        shape=[1], dtype='float32', value=float(values[i]))
                     with switch.case(global_step < boundary_val):
-                        tensor.assign(value_var, lr)
-                last_value_var = tensor.fill_constant(
-                    shape=[1],
-                    dtype='float32',
-                    value=float(values[len(values) - 1]))
+                        tensor.fill_constant(
+                            shape=[1],
+                            dtype="float32",
+                            value=float(values[i]),
+                            out=lr)
                 with switch.default():
-                    tensor.assign(last_value_var, lr)
+                    tensor.fill_constant(
+                        shape=[1],
+                        dtype="float32",
+                        value=float(values[len(values) - 1]),
+                        out=lr)
 
             return lr
 
 
 def cosine_decay(learning_rate, step_each_epoch, epochs):
-    """
-	:alias_main: paddle.nn.functional.cosine_decay
-	:alias: paddle.nn.functional.cosine_decay,paddle.nn.functional.learning_rate.cosine_decay
-	:old_api: paddle.fluid.layers.cosine_decay
+    r"""
 
     Applies cosine decay to the learning rate.
 
@@ -484,7 +474,7 @@ def cosine_decay(learning_rate, step_each_epoch, epochs):
                'cosine_decay')
 
     with default_main_program()._lr_schedule_guard():
-        if in_dygraph_mode():
+        if _non_static_mode():
             decay = imperate_lr.CosineDecay(learning_rate, step_each_epoch,
                                             epochs)
             return decay
@@ -499,9 +489,6 @@ def cosine_decay(learning_rate, step_each_epoch, epochs):
 
 def linear_lr_warmup(learning_rate, warmup_steps, start_lr, end_lr):
     """
-	:alias_main: paddle.nn.functional.linear_lr_warmup
-	:alias: paddle.nn.functional.linear_lr_warmup,paddle.nn.functional.learning_rate.linear_lr_warmup
-	:old_api: paddle.fluid.layers.linear_lr_warmup
 
     This operator use the linear learning rate warm up strategy to adjust the learning rate preliminarily before the normal learning rate scheduling.
     For more information, please refer to `Bag of Tricks for Image Classification with Convolutional Neural Networks <https://arxiv.org/abs/1812.01187>`_
@@ -564,7 +551,7 @@ def linear_lr_warmup(learning_rate, warmup_steps, start_lr, end_lr):
     linear_step = float(end_lr) - float(start_lr)
     with default_main_program()._lr_schedule_guard():
 
-        if in_dygraph_mode():
+        if _non_static_mode():
             lr = imperate_lr.LinearLrWarmup(learning_rate, warmup_steps,
                                             start_lr, end_lr)
             return lr

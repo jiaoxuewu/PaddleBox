@@ -14,8 +14,9 @@
 """Http Server."""
 
 import logging
-import BaseHTTPServer
-import SimpleHTTPServer
+# NOTE: HTTPServer has a different name in python2 and python3
+from http.server import HTTPServer
+import http.server as SimpleHTTPServer
 import time
 import threading
 import socket
@@ -123,7 +124,7 @@ class KVHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.end_headers()
 
 
-class KVHTTPServer(BaseHTTPServer.HTTPServer, object):
+class KVHTTPServer(HTTPServer, object):
     """
     it is a http server storing kv pairs.
     """
@@ -173,7 +174,7 @@ class KVServer:
         self.listen_thread.join()
         self.http_server.server_close()
 
-    def shoud_stop(self):
+    def should_stop(self):
         """
         return whether the server should stop.
 

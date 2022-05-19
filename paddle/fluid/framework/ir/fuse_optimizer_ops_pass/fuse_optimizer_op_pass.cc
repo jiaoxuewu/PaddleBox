@@ -13,12 +13,9 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/ir/fuse_optimizer_ops_pass/fuse_optimizer_op_pass.h"
-#include <algorithm>
-#include <set>
-#include <unordered_set>
 #include "paddle/fluid/framework/ir/graph_helper.h"
-#include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/operator.h"
+#include "paddle/phi/core/kernel_factory.h"
 
 namespace paddle {
 namespace framework {
@@ -76,6 +73,9 @@ void FuseOptimizerOpPass::ApplyImpl(ir::Graph *graph) const {
 
   result.Set(details::kFusedOptType, new details::FusedOptType);
   result.Get<details::FusedOptType>(details::kFusedOptType) = fuse_op_type;
+  if (!result.Has(details::kStartupProgramDescs)) {
+    result.Set(details::kStartupProgramDescs, new details::ProgramDescs);
+  }
   if (!result.Has(details::kProgramDescs)) {
     result.Set(details::kProgramDescs, new details::ProgramDescs);
   }
@@ -100,7 +100,12 @@ void FuseOptimizerOpPass::ApplyImpl(ir::Graph *graph) const {
         fused_var_set.count(fused_var_name), 0,
         platform::errors::AlreadyExists(
             "The fused variable(%s) already exists.", fused_var_name));
-    fused_var_set.insert(fused_var_name);
+    // FIXME(wangxi). update persistable
+    details::VariableInfo var_info;
+    var_info.name_ = fused_var_name;
+    var_info.type_ = proto::VarType::LOD_TENSOR;
+    var_info.persistable_ = false;
+    fused_var_set.insert({fused_var_name, var_info});
     fused_vars_name.emplace(var_name, fused_var_name);
   }
 
@@ -151,8 +156,8 @@ void FuseOptimizerOpPass::ApplyImpl(ir::Graph *graph) const {
         return;
       }
       auto &fused_vars = result.Get<details::FusedVars>(details::kFusedVars);
-      auto iter =
-          std::find(fused_vars.begin(), fused_vars.end(), fused_grad.front());
+
+      auto iter = fused_vars.find(fused_grad.front());
       PADDLE_ENFORCE_EQ(
           iter != fused_vars.end(), true,
           platform::errors::NotFound("Not found the fused gradient variable."));
@@ -167,7 +172,7 @@ void FuseOptimizerOpPass::ApplyImpl(ir::Graph *graph) const {
       VLOG(6) << "The number of new gradients is " << new_grad_idx.size();
       if (new_grad_idx.size() == 1) return;
       // NOTE(zcd): If the gradients of backward stage and optimization stage
-      // have diff, Only take care of the the gradient of optimization stage.
+      // have diff, Only take care of the gradient of optimization stage.
       GradientsFilter(new_grad_idx, &opt_nodes, &aux_var_map);
     }
   }
@@ -264,25 +269,43 @@ bool FuseOptimizerOpPass::HasVarDepsBetweenOps(
 
 bool FuseOptimizerOpPass::OpWithKernelSupportCPUAndGPU(
     const std::string &op_type) const {
-  auto &all_kernels = OperatorWithKernel::AllOpKernels();
-  auto it = all_kernels.find(op_type);
-  // skip op not has kernel
-  if (it != all_kernels.end()) {
-    bool support_cpu = false;
-    bool support_gpu = false;
-    for (auto &kernel_pair : it->second) {
-      if (platform::is_cpu_place(kernel_pair.first.place_)) {
-        support_cpu = true;
-      }
-      if (platform::is_gpu_place(kernel_pair.first.place_)) {
-        support_gpu = true;
+  if (op_type == "c_sync_calc_stream" || op_type == "c_sync_comm_stream") {
+    return true;
+  }
+  bool support_cpu = false;
+  bool support_gpu = false;
+  auto &kernel_factory = phi::KernelFactory::Instance();
+  auto kernel_key_map =
+      kernel_factory.SelectKernelMap(phi::TransToPhiKernelName(op_type));
+  bool has_op_kernel = kernel_key_map.size() > 0 ? true : false;
+  for (auto &kernel : kernel_key_map) {
+    if (platform::is_gpu_place(phi::TransToPhiPlace(kernel.first.backend()))) {
+      support_gpu = true;
+    } else if (platform::is_cpu_place(
+                   phi::TransToPhiPlace(kernel.first.backend()))) {
+      support_cpu = true;
+    }
+  }
+
+  if (!support_cpu || !support_gpu) {
+    auto &all_kernels = OperatorWithKernel::AllOpKernels();
+    auto it = all_kernels.find(op_type);
+    // skip op not has kernel
+    if (it != all_kernels.end()) {
+      has_op_kernel = true;
+      for (auto &kernel_pair : it->second) {
+        if (platform::is_cpu_place(kernel_pair.first.place_)) {
+          support_cpu = true;
+        } else if (platform::is_gpu_place(kernel_pair.first.place_)) {
+          support_gpu = true;
+        }
       }
     }
-    VLOG(6) << "Op check: " << op_type << ", support CPU: " << support_cpu
-            << ", support GPU: " << support_gpu;
-    return support_cpu && support_gpu;
   }
-  return true;
+
+  VLOG(6) << "Op check: " << op_type << ", support CPU: " << support_cpu
+          << ", support GPU: " << support_gpu;
+  return has_op_kernel ? (support_cpu && support_gpu) : true;
 }
 
 bool FuseOptimizerOpPass::GradGeneratedOpKernelCheck(
@@ -599,6 +622,23 @@ void FuseOptimizerOpPass::InsertInputAndOutputForFusedOpNode(
   }
 
   outputs.insert(out_dep_vars.begin(), out_dep_vars.end());
+
+  auto nodes_to_string =
+      [](std::unordered_set<ir::Node *> nodes) -> std::string {
+    std::stringstream ss;
+    for (auto n : nodes) {
+      if (n->IsVar()) {
+        ss << n->Name() << " ";
+      }
+    }
+    return ss.str();
+  };
+
+  VLOG(4) << "add inputs to " << fused_opt_node->Op()->Type() << ": "
+          << nodes_to_string(inputs);
+  VLOG(4) << "add outputs to " << fused_opt_node->Op()->Type() << ": "
+          << nodes_to_string(outputs);
+
   fused_opt_node->inputs.insert(fused_opt_node->inputs.begin(), inputs.begin(),
                                 inputs.end());
   fused_opt_node->outputs.insert(fused_opt_node->outputs.begin(),

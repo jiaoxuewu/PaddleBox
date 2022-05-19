@@ -24,6 +24,13 @@
 #include "paddle/fluid/framework/op_info.h"
 #include "paddle/fluid/imperative/prepared_operator.h"
 #include "paddle/fluid/imperative/type_defs.h"
+#include "paddle/phi/core/kernel_registry.h"
+
+PD_DECLARE_KERNEL(split, CPU, ALL_LAYOUT);
+PD_DECLARE_KERNEL(relu, CPU, ALL_LAYOUT);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+PD_DECLARE_KERNEL(relu, GPU, ALL_LAYOUT);
+#endif
 
 namespace imperative = paddle::imperative;
 namespace platform = paddle::platform;
@@ -32,26 +39,8 @@ namespace framework = paddle::framework;
 namespace paddle {
 namespace imperative {
 
-static framework::RuntimeContext PrepareRuntimeContext(
-    const NameVarBaseMap& ins, const NameVarBaseMap& outs) {
-  framework::VariableValueMap inputs, outputs;
-  for (auto& in_pair : ins) {
-    auto& in_ctx = inputs[in_pair.first];
-    in_ctx.reserve(in_pair.second.size());
-    for (auto& in_var : in_pair.second) {
-      in_ctx.emplace_back(in_var->MutableVar());
-    }
-  }
-
-  for (auto& out_pair : outs) {
-    auto& out_ctx = outputs[out_pair.first];
-    out_ctx.reserve(out_pair.second.size());
-    for (auto& out_var : out_pair.second) {
-      out_ctx.emplace_back(out_var->MutableVar());
-    }
-  }
-  return framework::RuntimeContext(std::move(inputs), std::move(outputs));
-}
+extern void TestHandleComplexGradToRealGradEager(
+    const NameVarMap<egr::EagerVariable>& outs);
 
 static framework::VariableNameMap CreateVarNameMap(
     const framework::OpInfo& op_info, const std::string& op_type,
@@ -111,11 +100,10 @@ TEST(test_prepare_op, test_prepare_op) {
       CreateVarNameMap(info, "split", outs, false);
   auto op = framework::OpRegistry::CreateOp("split", var_in_map, var_out_map,
                                             split_attr_map);
-  framework::RuntimeContext ctx = PrepareRuntimeContext(ins, outs);
   ASSERT_NO_FATAL_FAILURE(PreparedOp preparedOp = PreparedOp::Prepare(
                               ins, outs,
                               dynamic_cast<framework::OperatorWithKernel&>(*op),
-                              place, split_attr_map));
+                              place, split_attr_map, {}));
 }
 
 const framework::Tensor* GetTensorFromVar(const framework::Variable& var);
@@ -123,11 +111,12 @@ const framework::Tensor* GetTensorFromVar(const framework::Variable& var);
 TEST(test_prepare_op, test_get_tensor_from_var) {
   std::shared_ptr<imperative::VarBase> vout_error(
       new imperative::VarBase(false, "vout_error"));
-  vout_error->MutableVar()->GetMutable<framework::SelectedRows>();
+  vout_error->MutableVar()->GetMutable<phi::SelectedRows>();
   auto* ts = GetTensorFromVar(*vout_error->MutableVar());
   ASSERT_TRUE(ts != nullptr);
 }
-#if defined(PADDLE_WITH_CUDA)
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 TEST(test_prepare_op, test_prepare_data) {
   std::shared_ptr<imperative::VarBase> vin(
       new imperative::VarBase(false, "vin"));
@@ -142,7 +131,7 @@ TEST(test_prepare_op, test_prepare_data) {
 
   // prepare an cpu only input
   auto* vin_tensor = vin->MutableVar()->GetMutable<framework::LoDTensor>();
-  vin_tensor->Resize(framework::make_ddim(dims));
+  vin_tensor->Resize(phi::make_ddim(dims));
   auto* vin_mutable_tensor = vin_tensor->mutable_data<float>(cpu_place);
   paddle::memory::Copy(cpu_place, vin_mutable_tensor, cpu_place,
                        src_data.data(), sizeof(float) * src_data.size());
@@ -161,12 +150,14 @@ TEST(test_prepare_op, test_prepare_data) {
       CreateVarNameMap(info, op_type, outs, false);
   auto op = framework::OpRegistry::CreateOp(op_type, var_in_map, var_out_map,
                                             attr_map);
-  framework::RuntimeContext ctx = PrepareRuntimeContext(ins, outs);
 
   // test if it can be transformed to GPU place
-  PreparedOp prepared_op = PreparedOp::Prepare(
+  auto prepared_op = PreparedOp::Prepare(
       ins, outs, dynamic_cast<framework::OperatorWithKernel&>(*op), gpu_place,
-      attr_map);
+      attr_map, {});
+  PrepareData<imperative::VarBase>(
+      dynamic_cast<framework::OperatorWithKernel&>(*op), ins,
+      prepared_op.kernel_type());
   for (const auto& name_pair : ins) {
     for (const auto& vb : name_pair.second) {
       ASSERT_TRUE(platform::is_same_place(
@@ -189,7 +180,7 @@ void TestPrepareDataSamePlace(framework::AttributeMap attr_map) {
 
   // prepare an cpu only input
   auto* vin_tensor = vin->MutableVar()->GetMutable<framework::LoDTensor>();
-  vin_tensor->Resize(framework::make_ddim(dims));
+  vin_tensor->Resize(phi::make_ddim(dims));
   auto* vin_mutable_tensor = vin_tensor->mutable_data<float>(cpu_place);
   paddle::memory::Copy(cpu_place, vin_mutable_tensor, cpu_place,
                        src_data.data(), sizeof(float) * src_data.size());
@@ -208,12 +199,14 @@ void TestPrepareDataSamePlace(framework::AttributeMap attr_map) {
 
   auto op = framework::OpRegistry::CreateOp(op_type, var_in_map, var_out_map,
                                             attr_map);
-  framework::RuntimeContext ctx = PrepareRuntimeContext(ins, outs);
 
   // test if it never transferred on GPU place
-  PreparedOp prepared_op = PreparedOp::Prepare(
+  auto prepared_op = PreparedOp::Prepare(
       ins, outs, dynamic_cast<framework::OperatorWithKernel&>(*op), cpu_place,
-      attr_map);
+      attr_map, {});
+  PrepareData<imperative::VarBase>(
+      dynamic_cast<framework::OperatorWithKernel&>(*op), ins,
+      prepared_op.kernel_type());
   for (const auto& name_pair : ins) {
     for (const auto& vb : name_pair.second) {
       ASSERT_TRUE(platform::is_same_place(
@@ -226,6 +219,11 @@ TEST(test_prepare_op, test_prepare_data_same_place) {
   TestPrepareDataSamePlace({});
 }
 
+TEST(test_prepare_op, test_complex_eager) {
+  NameVarMap<egr::EagerVariable> outs = {};
+  TestHandleComplexGradToRealGradEager(outs);
+}
+
 #ifdef PADDLE_WITH_MKLDNN
 TEST(test_prepare_op, test_prepare_data_cpu_mkldnn) {
   TestPrepareDataSamePlace({{"use_mkldnn", true}});
@@ -234,8 +232,8 @@ TEST(test_prepare_op, test_prepare_data_cpu_mkldnn) {
 }  // namespace imperative
 }  // namespace paddle
 
-USE_OP(split);
-USE_OP(relu);
+USE_OP_ITSELF(split);
+USE_OP_ITSELF(relu);
 #ifdef PADDLE_WITH_MKLDNN
 USE_OP_DEVICE_KERNEL(relu, MKLDNN);
 #endif

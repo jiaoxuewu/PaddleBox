@@ -15,8 +15,8 @@
 #include "paddle/fluid/memory/allocation/locked_allocator.h"
 
 #include <mutex>  // NOLINT
-#include <utility>
 
+#include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/lock_guard_ptr.h"
 
 namespace paddle {
@@ -37,12 +37,12 @@ LockedAllocator::LockedAllocator(
   }
 }
 
-void LockedAllocator::FreeImpl(Allocation *allocation) {
+void LockedAllocator::FreeImpl(phi::Allocation *allocation) {
   platform::LockGuardPtr<std::mutex> guard(mtx_);
   underlying_allocator_->Free(allocation);
 }
 
-Allocation *LockedAllocator::AllocateImpl(size_t size) {
+phi::Allocation *LockedAllocator::AllocateImpl(size_t size) {
   platform::LockGuardPtr<std::mutex> guard(mtx_);
   return underlying_allocator_->Allocate(size).release();
 }

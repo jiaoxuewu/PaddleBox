@@ -4,10 +4,10 @@ include(CheckCCompilerFlag)
 include(CheckCXXSymbolExists)
 include(CheckTypeSize)
 
-function(CheckCompilerCXX11Flag)
+function(CheckCompilerCXX14Flag)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 4.8)
-            message(FATAL_ERROR "Unsupported GCC version. GCC >= 4.8 required.")
+        if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 5.4)
+            message(FATAL_ERROR "Unsupported GCC version. GCC >= 5.4 required.")
         elseif(${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 8.2)
             message(WARNING "Found GCC ${CMAKE_CXX_COMPILER_VERSION} which is too high, recommended to use GCC 8.2")
         endif()
@@ -20,23 +20,20 @@ function(CheckCompilerCXX11Flag)
                 message(FATAL_ERROR "Unsupported AppleClang version. AppleClang >= 5.1 required.")
             endif()
         else()
-            if (${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 3.3)
-                message(FATAL_ERROR "Unsupported Clang version. Clang >= 3.3 required.")
+            if (${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 3.4)
+                message(FATAL_ERROR "Unsupported Clang version. Clang >= 3.4 required.")
             endif()
         endif()
     endif()
 endfunction()
 
-CheckCompilerCXX11Flag()
-if (WITH_GPU)
-    if (${CMAKE_CUDA_COMPILER_VERSION} GREATER_EQUAL 11.0)
-       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
-    else()
-      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-    endif()
+CheckCompilerCXX14Flag()
+if(NOT WIN32)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
 else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+    set(CMAKE_CXX_STANDARD 14)
 endif()
+
 # safe_set_flag
 #
 # Set a compile flag only if compiler is support
@@ -90,20 +87,6 @@ macro(safe_set_nvflag flag_name)
     endif()
 endmacro()
 
-macro(safe_set_static_flag) # set c_flags and cxx_flags to static or shared
-    if (BUILD_SHARED_LIBS) 
-        return() # if build shared libs, the flags keep same with '/MD'
-    endif(BUILD_SHARED_LIBS)
-    foreach(flag_var
-        CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
-        CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO
-        CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
-        CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO)
-      if(${flag_var} MATCHES "/MD")
-        string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
-      endif(${flag_var} MATCHES "/MD")
-    endforeach(flag_var)
-endmacro()
 
 CHECK_CXX_SYMBOL_EXISTS(UINT64_MAX "stdint.h" UINT64_MAX_EXISTS)
 if(NOT UINT64_MAX_EXISTS)
@@ -168,12 +151,22 @@ set(COMMON_FLAGS
     ${fsanitize}
 )
 
+if(WITH_IPU)
+    set(COMMON_FLAGS ${COMMON_FLAGS} 
+        -Wno-sign-compare # Warnings in Popart
+        -Wno-non-virtual-dtor # Warnings in Popart
+    )
+endif()
+
+if(WITH_ASCEND_CL AND WITH_ARM_BRPC)
+    set(COMMON_FLAGS ${COMMON_FLAGS} -faligned-new)
+endif()
+
 if(NOT APPLE)
-    if(${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 8.0)
+    if((${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 8.0) OR (WITH_ROCM))
         set(COMMON_FLAGS
                 ${COMMON_FLAGS}
                 -Wno-format-truncation # Warning in boost gcc 8.2
-                -Wno-error=cast-function-type # Warning in boost gcc 8.2
                 -Wno-error=parentheses # Warning in boost gcc 8.2
                 -Wno-error=catch-value # Warning in boost gcc 8.2
                 -Wno-error=nonnull-compare # Warning in boost gcc 8.2
@@ -197,17 +190,30 @@ set(GPU_COMMON_FLAGS
     -Wno-error=unused-function  # Warnings in Numpy Header.
     -Wno-error=array-bounds # Warnings in Eigen::array
 )
-if (NOT WITH_NV_JETSON AND NOT WITH_ARM)
+if (NOT WITH_NV_JETSON AND NOT WITH_ARM AND NOT WITH_SW AND NOT WITH_MIPS)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m64")
 endif()
 endif(NOT WIN32)
 
 if (APPLE)
-    # On Mac OS X build fat binaries with x86_64 architectures by default.
-    set (CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architectures for OSX" FORCE)
+    if(WITH_ARM)
+      set (CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for OSX" FORCE)
+    else(WITH_ARM)
+     set (CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architectures for OSX" FORCE)
+    endif(WITH_ARM)
     # On Mac OS X register class specifier is deprecated and will cause warning error on latest clang 10.0
     set (COMMON_FLAGS -Wno-deprecated-register)
 endif(APPLE)
+
+if(WITH_HETERPS AND WITH_PSLIB)
+    set(COMMON_FLAGS
+        -D_GLIBCXX_USE_CXX11_ABI=0
+        ${COMMON_FLAGS})
+
+    set(GPU_COMMON_FLAGS
+        -D_GLIBCXX_USE_CXX11_ABI=0
+        ${GPU_COMMON_FLAGS})
+endif()
 
 if(LINUX)
     set(GPU_COMMON_FLAGS
@@ -227,22 +233,21 @@ foreach(flag ${GPU_COMMON_FLAGS})
     safe_set_nvflag(${flag})
 endforeach()
 
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${SAFE_GPU_COMMON_FLAGS}")
+if(WITH_GPU)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${SAFE_GPU_COMMON_FLAGS}")
+endif()
 
+if(WITH_ROCM)
+    set(HIP_HIPCC_FLAGS "${HIP_HIPCC_FLAGS} ${SAFE_GPU_COMMON_FLAGS}")
+endif()
 
-if(WIN32)
-    # windows build turn off warnings.
-    if(MSVC_STATIC_CRT)
-        safe_set_static_flag()
-    endif()
-    foreach(flag_var
-        CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
-        CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO
-        CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
-        CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO)
-        string(REGEX REPLACE "/W[1-4]" " /W0 " ${flag_var} "${${flag_var}}")
-    endforeach(flag_var)
-    foreach(flag_var CMAKE_CXX_FLAGS CMAKE_C_FLAGS)
-        set(${flag_var} "${${flag_var}} /w")
-    endforeach(flag_var)
+ # Disable -Werror, otherwise the compile will fail for rocblas_gemm_ex
+if(WITH_ROCM)
+    string (REPLACE "-Werror" "-Wno-error" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
+    string (REPLACE "-Werror" "-Wno-error" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
+endif()
+
+if(WITH_PSCORE OR WITH_PSLIB)
+    string (REPLACE "-Wnon-virtual-dtor" "-Wno-non-virtual-dtor" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
+    string (REPLACE "-Wnon-virtual-dtor" "-Wno-non-virtual-dtor" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 endif()

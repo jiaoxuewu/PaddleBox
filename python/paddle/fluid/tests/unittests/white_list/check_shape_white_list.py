@@ -26,4 +26,7 @@ NEED_TO_FIX_OP_LIST = [
     'squared_l2_distance',
     'tree_conv',
     'cvm',
+    'cudnn_lstm',
+    'rnn',
+    'multi_dot',
 ]

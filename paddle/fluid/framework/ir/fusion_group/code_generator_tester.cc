@@ -12,20 +12,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/framework/ir/fusion_group/code_generator.h"
 #include <gtest/gtest.h>
 #include <cmath>
 #include <string>
-#include <vector>
+
+#include "paddle/fluid/framework/ir/fusion_group/code_generator.h"
 #include "paddle/fluid/framework/ir/fusion_group/operation.h"
 #include "paddle/fluid/framework/ir/pass_tester_helper.h"
-#include "paddle/fluid/framework/lod_tensor.h"
-#include "paddle/fluid/operators/math.h"
 #include "paddle/fluid/platform/device_code.h"
 #include "paddle/fluid/platform/float16.h"
-#include "paddle/fluid/platform/init.h"
 
-#ifdef PADDLE_WITH_CUDA
+namespace phi {
+class DenseTensor;
+}  // namespace phi
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 
 namespace paddle {
 namespace framework {
@@ -177,7 +178,11 @@ void TestMainImpl(std::string func_name, std::string code_str,
 
   paddle::platform::CUDAPlace place = paddle::platform::CUDAPlace(0);
   paddle::platform::CUDADeviceCode device_code(place, func_name, code_str);
+#ifdef PADDLE_WITH_HIP
+  device_code.Compile(true);
+#else
   device_code.Compile(is_float16);
+#endif
 
   std::vector<paddle::framework::LoDTensor> gpu_tensors(cpu_tensors.size());
   std::vector<paddle::framework::LoDTensor> tmp_cpu_tensors(cpu_tensors.size());
@@ -199,9 +204,11 @@ void TestMainImpl(std::string func_name, std::string code_str,
         for (int64_t i = 0; i < cpu_tensors[id].numel(); ++i) {
           tmp_cpu_ptr[i] = paddle::platform::float16(cpu_ptr[i]);
         }
-        TensorCopySync(tmp_cpu_tensors[id], place, &gpu_tensors[id]);
+        paddle::framework::TensorCopySync(tmp_cpu_tensors[id], place,
+                                          &gpu_tensors[id]);
       } else {
-        TensorCopySync(cpu_tensors[id], place, &gpu_tensors[id]);
+        paddle::framework::TensorCopySync(cpu_tensors[id], place,
+                                          &gpu_tensors[id]);
       }
       args.push_back(&gpu_ptrs[id]);
     }
@@ -227,8 +234,8 @@ void TestMainImpl(std::string func_name, std::string code_str,
       paddle::platform::float16* tmp_cpu_ptr =
           tmp_cpu_tensors[id].mutable_data<paddle::platform::float16>(
               cpu_tensors[id].dims(), paddle::platform::CPUPlace());
-      TensorCopySync(gpu_tensors[id], paddle::platform::CPUPlace(),
-                     &tmp_cpu_tensors[id]);
+      paddle::framework::TensorCopySync(
+          gpu_tensors[id], paddle::platform::CPUPlace(), &tmp_cpu_tensors[id]);
 
       float* cpu_ptr = cpu_tensors[id].mutable_data<float>(
           cpu_tensors[id].dims(), paddle::platform::CPUPlace());
@@ -236,8 +243,8 @@ void TestMainImpl(std::string func_name, std::string code_str,
         cpu_ptr[i] = static_cast<float>(tmp_cpu_ptr[i]);
       }
     } else {
-      TensorCopySync(gpu_tensors[id], paddle::platform::CPUPlace(),
-                     &cpu_tensors[id]);
+      paddle::framework::TensorCopySync(
+          gpu_tensors[id], paddle::platform::CPUPlace(), &cpu_tensors[id]);
     }
   }
 }
@@ -257,8 +264,8 @@ void TestElementwiseMain(
 
   // Prepare CPU tensors which always hold float.
   std::vector<paddle::framework::LoDTensor> cpu_tensors(ids.size());
-  auto dims = paddle::framework::make_ddim(
-      {static_cast<int64_t>(256), static_cast<int64_t>(1024)});
+  auto dims =
+      phi::make_ddim({static_cast<int64_t>(256), static_cast<int64_t>(1024)});
   for (size_t i = 0; i < cpu_tensors.size(); ++i) {
     cpu_tensors[i].mutable_data<float>(dims, paddle::platform::CPUPlace());
   }
@@ -413,11 +420,7 @@ std::unique_ptr<paddle::framework::ir::Graph> BuildGraph(bool backward,
       n->Var()->SetDataType(proto_dtype);
     }
   }
-#ifdef __clang__
   return graph;
-#else
-  return std::move(graph);
-#endif
 }
 
 std::unordered_set<paddle::framework::ir::Node*> DistilGradNodes(

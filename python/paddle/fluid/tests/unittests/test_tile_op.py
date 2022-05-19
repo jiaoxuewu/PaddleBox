@@ -22,7 +22,7 @@ import paddle.fluid as fluid
 from paddle.fluid import compiler, Program, program_guard
 
 
-# Situation 1: repeat_times is a list (without tensor)
+#Situation 1: repeat_times is a list (without tensor)
 class TestTileOpRank1(OpTest):
     def setUp(self):
         self.op_type = "tile"
@@ -230,13 +230,13 @@ class TestTileAPI(unittest.TestCase):
     def test_api(self):
         with fluid.dygraph.guard():
             np_x = np.random.random([12, 14]).astype("float32")
-            x = paddle.to_variable(np_x)
+            x = paddle.to_tensor(np_x)
 
             positive_2 = np.array([2]).astype("int32")
-            positive_2 = paddle.to_variable(positive_2)
+            positive_2 = paddle.to_tensor(positive_2)
 
             repeat_times = np.array([2, 3]).astype("int32")
-            repeat_times = paddle.to_variable(repeat_times)
+            repeat_times = paddle.to_tensor(repeat_times)
 
             out_1 = paddle.tile(x, repeat_times=[2, 3])
             out_2 = paddle.tile(x, repeat_times=[positive_2, 3])
@@ -248,4 +248,5 @@ class TestTileAPI(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    paddle.enable_static()
     unittest.main()

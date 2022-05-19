@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cuda_runtime.h>
 #include <paddle/fluid/platform/device_context.h>
 #include <algorithm>
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/memory/malloc.h"
 #include "paddle/fluid/operators/math/bert_encoder_functor.h"
-#include "paddle/fluid/operators/math/blas.h"
+#include "paddle/phi/kernels/funcs/blas/blas.h"
 
 namespace paddle {
 namespace operators {
@@ -89,7 +88,7 @@ __global__ void TransposeQkvKernel(const int H, const T *input, const T *bias,
 
 void TransQKVWithBias(const int batch, const int seq_len, const int head_size,
                       const int head_num, const float *input, const float *bias,
-                      float *output, cudaStream_t stream) {
+                      float *output, gpuStream_t stream) {
   // BxSx3xNxH + 3xNxH -> 3xBxNxSxH
   int scratch_size = batch * head_num * seq_len * seq_len;
   const dim3 grid(seq_len, batch, 3);
@@ -133,6 +132,24 @@ void TransQKVWithBias(const int batch, const int seq_len, const int head_size,
   }
 }
 
+inline int round_up(int seq_len, int multiple = 32) {
+  PADDLE_ENFORCE_GT(
+      multiple, 0,
+      platform::errors::InvalidArgument(
+          "multiple should be a positive number，but it's (%d)", multiple));
+  return ((seq_len + multiple - 1) / multiple) * multiple;
+}
+
+template <typename T>
+__global__ void broadcast(const T *src, T *dst, const int seq_len,
+                          const int head_num) {
+  int batch_id = blockIdx.x / (head_num * seq_len);
+  int dst_offset = blockIdx.x * seq_len;
+  if (threadIdx.x < seq_len) {
+    dst[threadIdx.x + dst_offset] = src[threadIdx.x + batch_id * seq_len];
+  }
+}
+
 template <typename DeviceContext, typename T>
 class MultiHeadMatMulV2Kernel : public framework::OpKernel<T> {
  public:
@@ -153,6 +170,7 @@ class MultiHeadMatMulV2Kernel : public framework::OpKernel<T> {
     int head_number = context.Attr<int>("head_number");
     // compute q*k with eltadd
     auto &device_ctx = context.template device_context<DeviceContext>();
+    auto stream = device_ctx.stream();
     // should be (B * S * hidden)
     auto input_dims = input->dims();
     // shouble be (hidden * 3 * all_head_size)
@@ -160,7 +178,17 @@ class MultiHeadMatMulV2Kernel : public framework::OpKernel<T> {
     int batch = input_dims[0];
     int seq_len = input_dims[1];
     int hidden = input_dims[2];
-
+    Tensor temp_bias_tensor;
+    // if bias_qk is[batch, 1, 1, seq_len], the bias_qk_d need to be broadcasted
+    if (bias_qk.numel() == (batch * seq_len)) {
+      temp_bias_tensor.Resize({batch * head_number * seq_len * seq_len});
+      auto *temp_qk_bias = temp_bias_tensor.mutable_data<T>(context.GetPlace());
+      int grid = batch * head_number * seq_len;
+      int block = round_up(seq_len);
+      broadcast<<<grid, block, 0, stream>>>(bias_qk_d, temp_qk_bias, seq_len,
+                                            head_number);
+      bias_qk_d = static_cast<const T *>(temp_qk_bias);
+    }
     int all_head_size = w_dims[2];
     int head_size = all_head_size / head_number;
 
@@ -177,13 +205,13 @@ class MultiHeadMatMulV2Kernel : public framework::OpKernel<T> {
 
     Tensor temp_out_tensor;
     auto temp_out_dims =
-        framework::make_ddim({batch, seq_len, 3, head_number, head_size});
-    temp_out_tensor.Resize({batch * seq_len, framework::product(temp_out_dims) /
-                                                 (batch * seq_len)});
+        phi::make_ddim({batch, seq_len, 3, head_number, head_size});
+    temp_out_tensor.Resize(
+        {batch * seq_len, phi::product(temp_out_dims) / (batch * seq_len)});
     auto *temp_out_data = temp_out_tensor.mutable_data<T>(context.GetPlace());
 
     // (B * S, hidden) * (hidden, 3 * N * H) -> (B * S * 3 * N * H)
-    auto blas = math::GetBlas<platform::CUDADeviceContext, T>(device_ctx);
+    auto blas = phi::funcs::GetBlas<platform::CUDADeviceContext, T>(device_ctx);
     blas.MatMul(input_matrix, w_matrix, &temp_out_tensor);
 
     // temp_out_tensor.Resize(temp_out_dims);
@@ -197,7 +225,6 @@ class MultiHeadMatMulV2Kernel : public framework::OpKernel<T> {
     auto *qkptr = multihead_temp_data;
     auto *tptr = multihead_temp_data + scratch_size;
 
-    auto stream = device_ctx.stream();
     // Do the transpose with bias.
     // BxSx3xNxH => tptr: 3xBxNxSxH.
     TransQKVWithBias(batch, seq_len, head_size, head_number, temp_out_data,

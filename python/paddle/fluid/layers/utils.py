@@ -17,13 +17,17 @@ import collections
 import copy
 import six
 import numpy as np
-from ..framework import Variable
+from ..framework import Block, Variable, _non_static_mode
 from ..data_feeder import convert_dtype, check_variable_and_dtype, check_type, check_dtype
 from ..layer_helper import LayerHelper
 from sys import version_info
+try:
+    from collections.abc import Sequence
+except:
+    from collections import Sequence
 
 
-def convert_to_list(value, n, name, dtype=np.int):
+def convert_to_list(value, n, name, dtype=int):
     """
     Converts a single numerical type or iterable of numerical
     types into an numerical type list.
@@ -74,8 +78,16 @@ def is_sequence(seq):
     """
     if isinstance(seq, dict):
         return True
-    return (isinstance(seq, collections.Sequence) and
-            not isinstance(seq, six.string_types))
+    return (isinstance(seq, Sequence) and not isinstance(seq, six.string_types))
+
+
+def _hash_with_id(*args):
+    """
+    Return int hash value calculated by id(arg) or tuple(id1,id2, ...).
+    """
+    assert len(args) > 0
+    info = tuple([id(v) for v in args])
+    return hash(info) & 0xfffffff
 
 
 def _sorted(dict_):
@@ -139,7 +151,7 @@ def _sequence_like(instance, args):
         return type(instance)((key, result[key])
                               for key in six.iterkeys(instance))
     elif (isinstance(instance, tuple) and hasattr(instance, "_fields") and
-          isinstance(instance._fields, collections.Sequence) and
+          isinstance(instance._fields, Sequence) and
           all(isinstance(f, six.string_types) for f in instance._fields)):
         # This is a namedtuple
         return type(instance)(*args)
@@ -354,10 +366,10 @@ def convert_shape_to_list(shape):
     """
     if isinstance(shape, (list, tuple)):
         shape = list(
-            map(lambda x: x.numpy()[0] if isinstance(x, Variable) else x,
+            map(lambda x: x.numpy().flat[0] if isinstance(x, Variable) else x,
                 shape))
     else:
-        shape = list(shape.numpy().astype(int))
+        shape = shape.numpy().astype(int).tolist()
     return shape
 
 
@@ -378,3 +390,82 @@ def check_shape(shape):
                     raise TypeError(
                         "All elements in ``shape`` must be integers when it's a list or tuple"
                     )
+
+
+def try_set_static_shape_tensor(tensor, shape):
+    """Try to set static shape of tensor from a shape tensor.
+    
+    For example,
+
+    import paddle
+    paddle.enable_static()
+    data = paddle.static.data(name="x", shape=[-1, 2], dtype='float32')
+    shape = paddle.shape(data)  # shape should be [-1, 2] instead of [-1, -1]
+    x = paddle.uniform(shape) 
+    print(x.shape) 
+    # (-1, 2)
+    
+    """
+    if not _non_static_mode():
+        # static mode, and shape is not all inferred (contains -1)
+        if -1 in tensor.shape:
+            if isinstance(shape, Variable):
+                shape = try_get_constant_shape_from_tensor(shape)
+                if shape:
+                    tensor.desc.set_shape(shape)
+
+
+def try_get_constant_shape_from_tensor(shape_tensor):
+    """Try to get shape from a tensor with constant value.
+
+    For example,
+    
+    import paddle
+    paddle.enable_static()
+    data = paddle.static.data(name="x", shape=[-1, 2], dtype='float32')
+    shape = paddle.shape(data)  # shape should be [-1, 2] instead of [-1, -1]
+    x = paddle.uniform(shape) 
+    print(x.shape) 
+    # (-1, 2)
+    
+    """
+    if not _non_static_mode():
+        try:
+            if shape_tensor.op is not None:
+                generate_op = shape_tensor.op
+                if generate_op.type == 'shape':
+                    var = shape_tensor.block.vars[generate_op.input_arg_names[
+                        0]]
+                    return var.shape
+        except:
+            return None
+
+        return None
+
+
+def get_inputs_outputs_in_block(block):
+    """
+    Returns the inputs and outputs variable used in this block but not
+    created in this block.
+    """
+    assert isinstance(
+        block,
+        Block), "input non-Block argument for get_inputs_outputs_in_block."
+    assert block.parent_idx != -1, "input block should be a sub-block, not main block."
+
+    # Find input/output var names of all ops in block
+    inner_inputs = set()
+    inner_outputs = set()
+    for op in block.ops:
+        for iname in op.input_names:
+            for in_var_name in op.input(iname):
+                if not block.has_var(in_var_name):
+                    # variable not created in this block
+                    inner_inputs.add(in_var_name)
+        for oname in op.output_names:
+            for out_var_name in op.output(oname):
+                if not block.has_var(out_var_name):
+                    # variable not created in this block
+                    inner_outputs.add(out_var_name)
+
+    return inner_inputs, inner_outputs

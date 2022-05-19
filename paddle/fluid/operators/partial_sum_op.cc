@@ -78,7 +78,7 @@ class PartialSumOp : public framework::OperatorWithKernel {
     std::vector<int64_t> out_dims(2);
     out_dims[0] = batch_size;
     out_dims[1] = (length == -1) ? input_len - start_index : length;
-    ctx->SetOutputDim("Out", framework::make_ddim(out_dims));
+    ctx->SetOutputDim("Out", phi::make_ddim(out_dims));
     ctx->ShareLoD("X", /*->*/ "Out");
   }
 
@@ -90,7 +90,7 @@ class PartialSumOp : public framework::OperatorWithKernel {
     bool flag = 0;
     for (auto *input : inputs) {
       if (input->IsInitialized() && input->numel() > 0) {
-        input_data_type = input->type();
+        input_data_type = framework::TransToProtoVarType(input->dtype());
         flag = 1;
         break;
       }
@@ -143,7 +143,8 @@ class PartialSumOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<bool>(
         "use_mkldnn",
         "(bool, default false) Indicates if MKL-DNN kernel will be used")
-        .SetDefault(false);
+        .SetDefault(false)
+        .AsExtra();
     AddAttr<int>("start_index", "The start index of tensor wanted to be added.")
         .SetDefault(0);
     AddAttr<int>("length", "The length of tensor wanted to be added.")

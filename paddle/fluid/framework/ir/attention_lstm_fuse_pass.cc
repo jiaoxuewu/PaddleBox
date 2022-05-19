@@ -13,16 +13,71 @@
 // limitations under the License.
 
 #include "paddle/fluid/framework/ir/attention_lstm_fuse_pass.h"
+
 #include <string>
-#include <unordered_set>
+
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
 #include "paddle/fluid/framework/ir/graph_viz_pass.h"
-#include "paddle/fluid/framework/lod_tensor.h"
 
 namespace paddle {
 namespace framework {
 namespace ir {
 
+AttentionLSTMFusePass::AttentionLSTMFusePass() {
+  AddOpCompat(OpCompat("while"))
+      .AddInput("X")  // A set of variables, unconstrained
+      .End()
+      .AddInput("Condition")  // An scalar
+      .IsTensor()
+      .End()
+      .AddOutput("Out")  // A set of variables, unconstrained
+      .End()
+      .AddOutput("StepScopes")  // A vector of local scope, unconstrained
+      .End()
+      .AddAttr("sub_block")
+      .IsType<framework::BlockDesc*>()
+      .End();
+
+  AddOpCompat(OpCompat("fill_constant"))
+      .AddInput("ValueTensor")
+      .IsTensor()
+      .IsOptional()
+      .End()
+      .AddInput("ShapeTensor")
+      .IsTensor()
+      .IsOptional()
+      .End()
+      .AddInput("ShapeTensorList")  // vector<Tensor<int>>
+      .IsOptional()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("dtype")
+      .IsNumGE(0)
+      .IsNumLE(25)
+      .End()
+      .AddAttr("shape")
+      .IsType<std::vector<int>>()
+      .End()
+      .AddAttr("value")
+      .IsType<float>()
+      .End();
+
+  AddOpCompat(OpCompat("sequence_expand"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddInput("Y")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("ref_level")
+      .IsNumGE(-1)
+      .End();
+}
 struct Param {
   std::string X = "concat_0.tmp_0";
   std::string C0 = "cell_init";
@@ -43,7 +98,7 @@ struct Param {
 
 void PrepareParameters(Graph* graph, const Param& param, ir::Node* lstm_op);
 
-void FindWhileOp(Graph* graph) {
+void AttentionLSTMFusePass::FindWhileOp(Graph* graph) const {
   GraphPatternDetector gpd;
   std::unordered_set<int> fused_external_ops(
       {35, 36, 37, 38, 43, 44, 49, 45, 46, 47, 41, 42, 53, 54, 48,
@@ -60,6 +115,10 @@ void FindWhileOp(Graph* graph) {
 
   auto handle = [&](const GraphPatternDetector::subgraph_t& subgraph,
                     Graph* g) {
+    if (!IsCompat(subgraph, g)) {
+      LOG(WARNING) << "Pass in op compat failed.";
+      return;
+    }
     auto* while_pat_node = gpd.pattern().RetrieveNode("while");
     auto* while_node = subgraph.at(while_pat_node);
     marked_nodes.insert(while_node);
@@ -108,7 +167,9 @@ void FindWhileOp(Graph* graph) {
   GraphSafeRemoveNodes(graph, marked_nodes);
 }
 
-#define CHECK_P1(x) PADDLE_ENFORCE_NOT_NULL(x);
+#define CHECK_P1(x)        \
+  PADDLE_ENFORCE_NOT_NULL( \
+      x, platform::errors::NotFound("%s is a null pointer.", #x))
 #define CHECK_P2(x0, x1) \
   CHECK_P1(x0);          \
   CHECK_P1(x1);
@@ -199,12 +260,12 @@ void PrepareParameters(Graph* graph, const Param& param, ir::Node* lstm_op) {
                     platform::errors::InvalidArgument(
                         "Tensor attention bias dimension size(%d) must be 1.",
                         attention_bias_t->dims().size()));
-  attention_bias_t->Resize(make_ddim({1, attention_bias_t->dims()[0]}));
+  attention_bias_t->Resize(phi::make_ddim({1, attention_bias_t->dims()[0]}));
 
   auto* attention_scalar_bias_t =
       scope.FindVar(param.AttentionScalarBias)->GetMutable<LoDTensor>();
   attention_scalar_bias_t->Resize(
-      make_ddim({1, attention_scalar_bias_t->dims()[0]}));
+      phi::make_ddim({1, attention_scalar_bias_t->dims()[0]}));
 
   PrepareLSTMWeight(W_forget_w0_t, W_forget_w1_t, W_input_w0_t, W_input_w1_t,
                     W_output_w0_t, W_output_w1_t, W_c_w0_t, W_c_w1_t,
@@ -222,7 +283,7 @@ void PrepareLSTMWeight(const LoDTensor& W_forget_w0,
                        const LoDTensor& W_cell_w1, LoDTensor* out) {
   int D = W_forget_w0.dims()[0];
   int M = W_forget_w1.dims()[0];
-  out->Resize(make_ddim({D + M, 4 * D}));
+  out->Resize(phi::make_ddim({D + M, 4 * D}));
   VLOG(3) << "LSTMWeight resized to " << out->dims();
 
   float* out_data = out->mutable_data<float>(platform::CPUPlace());
@@ -262,7 +323,7 @@ void PrepareLSTMBias(const LoDTensor& B_forget, const LoDTensor& B_input,
                         "Tensor B forget dimension size(%d) must be 1.",
                         B_forget.dims().size()));
   int D = B_forget.dims()[0];
-  out->Resize(make_ddim({1, 4 * D}));
+  out->Resize(phi::make_ddim({1, 4 * D}));
   auto* out_data = out->mutable_data<float>(platform::CPUPlace());
   for (size_t i = 0; i < tensors.size(); i++) {
     memcpy(out_data + D * i, tensors[i], D * sizeof(float));

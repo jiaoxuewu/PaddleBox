@@ -38,7 +38,7 @@ class CosSimOp : public framework::OperatorWithKernel {
 
     bool check = true;
     if ((!ctx->IsRuntime()) &&
-        (framework::product(x_dims) <= 0 || framework::product(y_dims) <= 0)) {
+        (phi::product(x_dims) <= 0 || phi::product(y_dims) <= 0)) {
       check = false;
     }
 
@@ -57,8 +57,8 @@ class CosSimOp : public framework::OperatorWithKernel {
               "But received: Ranks of Input(X) is [%d]",
               x_dims.size()));
       PADDLE_ENFORCE_EQ(
-          framework::slice_ddim(x_dims, 1, x_dims.size()),
-          framework::slice_ddim(y_dims, 1, y_dims.size()),
+          phi::slice_ddim(x_dims, 1, x_dims.size()),
+          phi::slice_ddim(y_dims, 1, y_dims.size()),
           platform::errors::InvalidArgument(
               "All dimensions except the 1st of Input(X) and Input(Y) "
               "must be equal."));
@@ -82,7 +82,7 @@ class CosSimOpMaker : public framework::OpProtoAndCheckerMaker {
  public:
   void Make() override {
     AddInput("X",
-             "The 1st input of cos_sim op, LoDTensor with shape ``[N_1, N_2, "
+             "The 1st input of cos_sim op, Tensor with shape ``[N_1, N_2, "
              "..., N_k]``, the data type is float32.");
     AddInput("Y",
              "The 2nd input of cos_sim op, Tensor with shape ``[N_1 or 1, N_2, "
@@ -109,9 +109,6 @@ The input X and Y must have the same shape, except that the 1st dimension
 of input Y could be just 1 (different from input X), which will be
 broadcasted to match the shape of input X before computing their cosine
 similarity.
-
-Both the input X and Y can carry the LoD (Level of Details) information,
-or not. But the output only shares the LoD information with input X.
 
 )DOC");
   }
@@ -153,8 +150,8 @@ class CosSimOpGrad : public framework::OperatorWithKernel {
             "But received: Ranks of Input(X) is [%d]",
             x_dims.size()));
     PADDLE_ENFORCE_EQ(
-        framework::slice_ddim(x_dims, 1, x_dims.size()),
-        framework::slice_ddim(y_dims, 1, y_dims.size()),
+        phi::slice_ddim(x_dims, 1, x_dims.size()),
+        phi::slice_ddim(y_dims, 1, y_dims.size()),
         platform::errors::InvalidArgument(
             "All dimensions except the 1st of Input(X) [%s] and Input(Y) [%s] "
             "must be equal.",
@@ -165,8 +162,8 @@ class CosSimOpGrad : public framework::OperatorWithKernel {
             "The 1st dimension of Input(Y) %d must be equal to Input(X) %d or"
             " just 1 (which will be broadcasted to match Input(X)).",
             y_dims[0], x_dims[0]));
-    auto target_xnorm_dims = framework::make_ddim({x_dims[0], 1});
-    auto target_ynorm_dims = framework::make_ddim({y_dims[0], 1});
+    auto target_xnorm_dims = phi::make_ddim({x_dims[0], 1});
+    auto target_ynorm_dims = phi::make_ddim({y_dims[0], 1});
     PADDLE_ENFORCE_EQ(
         xnorm_dims, target_xnorm_dims,
         platform::errors::InvalidArgument(

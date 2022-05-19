@@ -13,13 +13,16 @@
 // limitations under the License.
 
 #pragma once
+#include <stdint.h>
 #include <algorithm>
 #include <mutex>  // NOLINT
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
 #include "paddle/fluid/memory/allocation/allocator.h"
 #include "paddle/fluid/platform/place.h"
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -31,8 +34,9 @@ class NaiveBestFitAllocator : public Allocator {
   bool IsAllocThreadSafe() const override { return true; }
 
  protected:
-  Allocation *AllocateImpl(size_t size) override;
-  void FreeImpl(Allocation *allocation) override;
+  phi::Allocation *AllocateImpl(size_t size) override;
+  void FreeImpl(phi::Allocation *allocation) override;
+  uint64_t ReleaseImpl(const platform::Place &place) override;
 
  private:
   platform::Place place_;

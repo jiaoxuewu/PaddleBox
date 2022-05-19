@@ -32,7 +32,6 @@ Communicator is used for async distribute training in distribute_transpiler mode
 It's a wrapper of a cpp class Communicator and should be used inside fleet API.
 """
 from . import core
-from paddle.fluid.framework import Program
 from paddle.fluid.incubate.fleet.parameter_server.mode import DistributedMode
 
 __all__ = ['Communicator', 'LargeScaleKV']
@@ -63,15 +62,18 @@ class Communicator(object):
         """
         # set all recv op to not_run mode
 
-        if mode == DistributedMode.SYNC:
-            envs["pserver_endpoints"] = ','.join(kwargs["pserver_endpoints"])
-            envs["trainer_id"] = str(kwargs["trainer_id"])
+        if kwargs == None:
+            if envs == None:
+                envs = {}
+        else:
+            if mode == DistributedMode.SYNC:
+                envs["pserver_endpoints"] = ','.join(kwargs[
+                    "pserver_endpoints"])
 
-        if mode == DistributedMode.GEO:
             envs["trainers"] = str(kwargs["trainers"])
-            envs["sparse_attrs"] = str(kwargs["sparse_attrs"])
-
-        envs["need_global_step"] = str(kwargs["need_global_step"])
+            envs["trainer_id"] = str(kwargs["trainer_id"])
+            envs["need_global_step"] = str(kwargs["need_global_step"])
+            envs["barrier_table_id"] = str(kwargs["barrier_table_id"])
 
         mode_str = None
 
@@ -87,11 +89,35 @@ class Communicator(object):
         self.mode = mode_str
         self.envs = envs
         self.communicator_ = None
+        self.send_ctx_ = None
+        self.recv_ctx_ = None
 
-    def init_with_ctx(self, send_ctx, recv_ctx):
-        self.communicator_ = core.DistCommunicator(self.mode, send_ctx,
-                                                   recv_ctx,
-                                                   global_scope(), self.envs)
+    def init_with_ctx(self,
+                      send_ctx,
+                      recv_ctx,
+                      proto_txt,
+                      unit64_hosts,
+                      scope=None):
+        if scope == None:
+            scope = global_scope()
+        self.communicator_ = core.DistCommunicator(self.mode, proto_txt,
+                                                   unit64_hosts, send_ctx,
+                                                   recv_ctx, scope, self.envs)
+        self.send_ctx_ = send_ctx
+        self.recv_ctx_ = recv_ctx
+
+    def create_client_to_client_connection(self,
+                                           pserver_timeout_ms=500000,
+                                           pserver_connect_timeout_ms=10000,
+                                           max_retry=3):
+        self.communicator_.create_client_to_client_connection(
+            pserver_timeout_ms, pserver_connect_timeout_ms, max_retry)
+
+    def get_client_info(self):
+        return self.communicator_.get_client_info()
+
+    def set_clients(self, host_list):
+        self.communicator_.set_clients(host_list)
 
     def start(self):
         """
@@ -110,6 +136,9 @@ class Communicator(object):
                 comm.start()
                 comm.stop()
         """
+        if self.communicator_ == None:
+            print('you must call init_with_ctx first to init comm before start')
+            return
         self.communicator_.start()
 
     def stop(self):
@@ -129,6 +158,9 @@ class Communicator(object):
                 comm.start()
                 comm.stop()
         """
+        if self.communicator_ == None:
+            print('you must call init_with_ctx first to init comm before stop')
+            return
         self.communicator_.stop()
 
     def is_running(self):
@@ -147,10 +179,32 @@ class Communicator(object):
                 comm = fluid.communicator.Communicator(prog)
                 comm.is_running()
         """
+        if self.communicator_ == None:
+            print('you must call init_with_ctx first to init comm before stop')
+            return
         self.communicator_.is_running()
 
     def recv(self):
         self.communicator_.recv()
+
+    def init_params(self, context):
+        self.communicator_.init_params(context)
+
+    def pull_dense(self, context):
+        self.communicator_.pull_dense(context)
+
+    def push_sparse_param(self, var_name, table_id=-1, scope=None):
+        if scope == None:
+            scope = global_scope()
+        if not self.is_running():
+            raise ValueError(
+                "Communicator should init first. Using fleet.init_worker() before push_sparse_param()"
+            )
+        assert isinstance(var_name, str)
+        assert isinstance(table_id, int)
+        if table_id == -1:
+            table_id = self.send_ctx_[var_name].table_id()
+        self.communicator_.push_sparse_param(var_name, table_id, scope)
 
 
 class LargeScaleKV(object):
@@ -162,3 +216,15 @@ class LargeScaleKV(object):
 
     def load(self, varname, dirname):
         self.scale_kv.load(varname, dirname)
+
+    def size(self, varname):
+        return self.scale_kv.size(varname)
+
+
+class HeterClient(object):
+    def __init__(self, endpoint, previous_endpoint, trainer_id):
+        self.heter_client_ = core.HeterClient(endpoint, previous_endpoint,
+                                              trainer_id)
+
+    def stop(self):
+        self.heter_client_.stop()

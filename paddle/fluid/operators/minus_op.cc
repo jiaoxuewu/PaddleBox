@@ -44,7 +44,7 @@ class MinusOp : public framework::OperatorWithKernel {
     auto y_dims = ctx->GetInputDim("Y");
 
     if (ctx->IsRuntime() ||
-        (framework::product(x_dims) > 0 && framework::product(y_dims) > 0)) {
+        (phi::product(x_dims) > 0 && phi::product(y_dims) > 0)) {
       PADDLE_ENFORCE_EQ(
           x_dims, y_dims,
           platform::errors::InvalidArgument(
@@ -146,3 +146,6 @@ REGISTER_OPERATOR(minus, ops::MinusOp, ops::MinusOpMaker,
                   ops::MinusGradDescMaker, ops::MinusGradMaker);
 REGISTER_OP_CPU_KERNEL(
     minus, ops::MinusKernel<paddle::platform::CPUDeviceContext, float>);
+
+REGISTER_OP_CUDA_KERNEL(
+    minus, ops::MinusKernel<paddle::platform::CUDADeviceContext, float>);

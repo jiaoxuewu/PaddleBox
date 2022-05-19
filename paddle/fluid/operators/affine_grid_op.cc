@@ -17,9 +17,8 @@ limitations under the License. */
 #include <string>
 #include <vector>
 #include "paddle/fluid/framework/op_registry.h"
-#ifdef PADDLE_WITH_CUDA
-#include "paddle/fluid/platform/cudnn_helper.h"
-#endif
+#include "paddle/fluid/framework/op_version_registry.h"
+#include "paddle/fluid/platform/device/gpu/gpu_dnn.h"
 
 namespace paddle {
 namespace operators {
@@ -99,8 +98,7 @@ class AffineGridOp : public framework::OperatorWithKernel {
             theta_dims[2], theta_dims));
 
     // N * H * W * 2
-    ctx->SetOutputDim("Output",
-                      framework::make_ddim({theta_dims[0], -1, -1, 2}));
+    ctx->SetOutputDim("Output", phi::make_ddim({theta_dims[0], -1, -1, 2}));
     ctx->ShareLoD("Theta", "Output");
   }
 
@@ -108,7 +106,7 @@ class AffineGridOp : public framework::OperatorWithKernel {
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext& ctx) const override {
     framework::LibraryType library{framework::LibraryType::kPlain};
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     if (platform::CanCUDNNBeUsed(ctx)) {
       library = framework::LibraryType::kCUDNN;
     }
@@ -134,10 +132,11 @@ class AffineGridOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<bool>(
         "use_cudnn",
         "(bool, default false) Only used in cudnn kernel, need install cudnn")
-        .SetDefault(true);
+        .SetDefault(true)
+        .AsExtra();
     AddAttr<bool>("align_corners",
                   "(bool, default false) Whether to align the corners of input"
-                  "and ouput.")
+                  "and output.")
         .SetDefault(true);
     AddAttr<std::vector<int>>(
         "output_shape",
@@ -225,7 +224,7 @@ class AffineGridOpGrad : public framework::OperatorWithKernel {
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext& ctx) const override {
     framework::LibraryType library_{framework::LibraryType::kPlain};
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     if (platform::CanCUDNNBeUsed(ctx)) {
       library_ = framework::LibraryType::kCUDNN;
     }
@@ -271,3 +270,11 @@ REGISTER_OP_CPU_KERNEL(
     affine_grid_grad,
     ops::AffineGridGradOpKernel<paddle::platform::CPUDeviceContext, float>,
     ops::AffineGridGradOpKernel<paddle::platform::CPUDeviceContext, double>);
+
+REGISTER_OP_VERSION(affine_grid)
+    .AddCheckpoint(
+        R"ROC(
+               Compatible upgrade of affine_grid, add a new attribute [align_corners])ROC",
+        paddle::framework::compatible::OpVersionDesc().NewAttr(
+            "align_corners",
+            "Whether to align the corners of input and output.", true));

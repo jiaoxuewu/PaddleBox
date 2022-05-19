@@ -15,6 +15,7 @@
 #pragma once
 
 #include <string>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/framework/ir/graph.h"
 #include "paddle/fluid/framework/ir/graph_pattern_detector.h"
@@ -24,15 +25,19 @@ namespace framework {
 namespace ir {
 
 /**
- * Fuse ( (A.^2 * B.^2) - (A * B).^2 ) .* scalar
+ * Fuse ( (A * B).^2 - (A.^2 * B.^2) ) .* scalar
  */
+class Graph;
+
 class SquaredMatSubFusePass : public FusePassBase {
  public:
+  SquaredMatSubFusePass();
+  bool IsAcceptable(const GraphPatternDetector::subgraph_t& subgraph,
+                    Graph* g) const;
   virtual ~SquaredMatSubFusePass() {}
 
  protected:
   void ApplyImpl(ir::Graph* graph) const override;
-
   const std::string name_scope_{"squared_mat_sub_fuse"};
 };
 

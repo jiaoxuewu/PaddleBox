@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/prroi_pool_op.h"
-#include "paddle/fluid/platform/cuda_primitives.h"
 
 namespace paddle {
 namespace operators {
@@ -27,22 +26,6 @@ static constexpr int kNumMaximumNumBlocks = 4096;
 static inline int NumBlocks(const int N) {
   return std::min((N + kNumCUDAThreads - 1) / kNumCUDAThreads,
                   kNumMaximumNumBlocks);
-}
-
-template <typename T>
-DEVICE void PrRoIPoolingDistributeDiffCUDA(T* diff, const T top_diff,
-                                           const int h, const int w,
-                                           const int height, const int width,
-                                           const T coeff) {
-  bool overflow = (h < 0) || (w < 0) || (h >= height) || (w >= width);
-  if (!overflow) {
-    paddle::platform::CudaAtomicAdd(diff + h * width + w, top_diff * coeff);
-  }
-}
-
-template <typename T>
-DEVICE void GPUAccumulateRois(T* offset, T data) {
-  paddle::platform::CudaAtomicAdd(offset, data);
 }
 
 template <typename T>
@@ -170,25 +153,23 @@ __global__ void GPUPRROIPoolBackward(
 
     for (int w_iter = s_w; w_iter < e_w; ++w_iter) {
       for (int h_iter = s_h; h_iter < e_h; ++h_iter) {
-        PrRoIPoolingMatDistributeDiff(
+        PrRoIPoolingMatDistributeDiff<T>(
             offset_input_grad_data, sum_out, h_iter, w_iter, h_iter + 1,
             w_iter + 1, max(win_start_h, static_cast<T>(h_iter)),
             max(win_start_w, static_cast<T>(w_iter)),
             min(win_end_h, static_cast<T>(h_iter) + static_cast<T>(1.0)),
             min(win_end_w, static_cast<T>(w_iter) + static_cast<T>(1.0)),
-            height, width, PrRoIPoolingDistributeDiffCUDA<T>);
+            height, width);
       }
     }
 
     const T* offset_out_data = out_data + i;
     const T* offset_in_data = in_data + input_offset;
-    PrRoIPoolingCoorBackward(
+    PrRoIPoolingCoorBackward<T>(
         s_w, e_w, s_h, e_h, width, height, win_start_w, win_start_h, win_end_w,
         win_end_h, pw, ph, pooled_width, pooled_height, win_size, spatial_scale,
         offset_in_data, offset_out_data, offset_input_roi_grad_data,
-        offset_output_grad_data, GPUAccumulateRois<T>,
-        [](const T x, const T y) { return max(x, y); },
-        [](const T x, const T y) { return min(x, y); });
+        offset_output_grad_data);
   }
 }
 
@@ -265,7 +246,7 @@ class GPUPRROIPoolOpKernel : public framework::OpKernel<T> {
     int bytes = rois_batch_id_list.numel() * sizeof(int);
     auto roi_ptr = memory::Alloc(dev_ctx, bytes);
     int* roi_id_data = reinterpret_cast<int*>(roi_ptr->ptr());
-    const auto gplace = BOOST_GET_CONST(platform::CUDAPlace, ctx.GetPlace());
+    const auto gplace = ctx.GetPlace();
     memory::Copy(gplace, roi_id_data, cplace, rois_batch_id_data, bytes,
                  dev_ctx.stream());
 
@@ -341,12 +322,12 @@ class GPUPRROIPoolGradOpKernel : public framework::OpKernel<T> {
       int bytes = rois_batch_id_list.numel() * sizeof(int);
       auto roi_ptr = memory::Alloc(dev_ctx, bytes);
       int* roi_id_data = reinterpret_cast<int*>(roi_ptr->ptr());
-      const auto gplace = BOOST_GET_CONST(platform::CUDAPlace, ctx.GetPlace());
+      const auto gplace = ctx.GetPlace();
       memory::Copy(gplace, roi_id_data, cplace, rois_batch_id_data, bytes,
                    dev_ctx.stream());
 
       input_grad->mutable_data<T>(ctx.GetPlace());
-      math::SetConstant<DeviceContext, T> set_zero;
+      phi::funcs::SetConstant<DeviceContext, T> set_zero;
       set_zero(ctx.cuda_device_context(), input_grad, static_cast<T>(0));
       input_roi_grad->mutable_data<T>(ctx.GetPlace());
       set_zero(ctx.cuda_device_context(), input_roi_grad, static_cast<T>(0));

@@ -16,6 +16,7 @@
 from paddle.fluid.proto import data_feed_pb2
 from google.protobuf import text_format
 from . import core
+from ..utils import deprecated
 __all__ = ['DatasetFactory', 'InMemoryDataset', 'QueueDataset']
 
 
@@ -73,6 +74,8 @@ class DatasetBase(object):
         self.dataset = core.Dataset("MultiSlotDataset")
         self.thread_num = 1
         self.filelist = []
+        self.use_ps_gpu = False
+        self.psgpu = None
 
     def set_pipe_command(self, pipe_command):
         """
@@ -91,6 +94,23 @@ class DatasetBase(object):
 
         """
         self.proto_desc.pipe_command = pipe_command
+
+    def set_so_parser_name(self, so_parser_name):
+        """
+        Set so parser name of current dataset
+
+        Examples:
+            .. code-block:: python
+
+              import paddle.fluid as fluid
+              dataset = fluid.DatasetFactory().create_dataset()
+              dataset.set_so_parser_name("./abc.so")
+
+        Args:
+            pipe_command(str): pipe command
+
+        """
+        self.proto_desc.so_parser_name = so_parser_name
 
     def set_rank_offset(self, rank_offset):
         """
@@ -250,9 +270,11 @@ class DatasetBase(object):
                 slot_var.type = "float"
             elif var.dtype == core.VarDesc.VarType.INT64:
                 slot_var.type = "uint64"
+            elif var.dtype == core.VarDesc.VarType.INT32:
+                slot_var.type = "uint32"
             else:
                 raise ValueError(
-                    "Currently, fluid.dataset only supports dtype=float32 and dtype=int64"
+                    "Currently, fluid.dataset only supports dtype=float32, dtype=int32 and dtype=int64"
                 )
 
     def set_hdfs_config(self, fs_name, fs_ugi):
@@ -299,6 +321,20 @@ class DatasetBase(object):
         self.dataset.set_data_feed_desc(self.desc())
         self.dataset.create_readers()
 
+    def _set_use_ps_gpu(self, psgpu):
+        """
+        set use_ps_gpu flag
+
+        Args:
+            use_ps_gpu: bool
+        """
+        self.use_ps_gpu = True
+        # if not defined heterps with paddle, users will not use psgpu
+        if not core._is_compiled_with_heterps():
+            self.use_ps_gpu = False
+        elif self.use_ps_gpu:
+            self.psgpu = psgpu
+
     def _finish_to_run(self):
         self.dataset.destroy_readers()
 
@@ -335,6 +371,7 @@ class InMemoryDataset(DatasetBase):
         dataset = paddle.fluid.DatasetFactory().create_dataset("InMemoryDataset")
     """
 
+    @deprecated(since="2.0.0", update_to="paddle.distributed.InMemoryDataset")
     def __init__(self):
         """ Init. """
         super(InMemoryDataset, self).__init__()
@@ -349,13 +386,22 @@ class InMemoryDataset(DatasetBase):
         self.enable_pv_merge = False
         self.merge_by_lineid = False
         self.fleet_send_sleep_seconds = None
+        self.trainer_num = -1
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_feed_type")
     def set_feed_type(self, data_feed_type):
         """
         Set data_feed_desc
         """
         self.proto_desc.name = data_feed_type
+        if (self.proto_desc.name == "SlotRecordInMemoryDataFeed"):
+            self.dataset = core.Dataset("SlotRecordDataset")
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._prepare_to_run")
     def _prepare_to_run(self):
         """
         Set data_feed_desc before load or shuffle,
@@ -376,16 +422,33 @@ class InMemoryDataset(DatasetBase):
         self.dataset.create_channel()
         self.dataset.create_readers()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._dynamic_adjust_before_train"
+    )
     def _dynamic_adjust_before_train(self, thread_num):
         if not self.is_user_set_queue_num:
-            self.dataset.dynamic_adjust_channel_num(thread_num, False)
+            if self.use_ps_gpu:
+                self.dataset.dynamic_adjust_channel_num(thread_num, True)
+            else:
+                self.dataset.dynamic_adjust_channel_num(thread_num, False)
         self.dataset.dynamic_adjust_readers_num(thread_num)
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._dynamic_adjust_after_train"
+    )
     def _dynamic_adjust_after_train(self):
         if not self.is_user_set_queue_num:
-            self.dataset.dynamic_adjust_channel_num(self.thread_num, False)
+            if self.use_ps_gpu:
+                self.dataset.dynamic_adjust_channel_num(self.thread_num, True)
+            else:
+                self.dataset.dynamic_adjust_channel_num(self.thread_num, False)
         self.dataset.dynamic_adjust_readers_num(self.thread_num)
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_queue_num")
     def set_queue_num(self, queue_num):
         """
         Set Dataset output queue num, training threads get data from queues
@@ -404,6 +467,9 @@ class InMemoryDataset(DatasetBase):
         self.is_user_set_queue_num = True
         self.queue_num = queue_num
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_parse_ins_id")
     def set_parse_ins_id(self, parse_ins_id):
         """
         Set id Dataset need to parse insid
@@ -421,6 +487,9 @@ class InMemoryDataset(DatasetBase):
         """
         self.parse_ins_id = parse_ins_id
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_parse_content")
     def set_parse_content(self, parse_content):
         """
         Set if Dataset need to parse content
@@ -455,6 +524,26 @@ class InMemoryDataset(DatasetBase):
         """
         self.parse_logkey = parse_logkey
 
+    def _set_trainer_num(self, trainer_num):
+        """
+        Set trainer num
+
+        Args:
+            trainer_num(int): trainer num
+
+        Examples:
+            .. code-block:: python
+
+              import paddle.fluid as fluid
+              dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
+              dataset._set_trainer_num(1)
+
+        """
+        self.trainer_num = trainer_num
+
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_merge_by_sid")
     def set_merge_by_sid(self, merge_by_sid):
         """
         Set if Dataset need to merge sid. If not, one ins means one Pv.
@@ -544,6 +633,10 @@ class InMemoryDataset(DatasetBase):
         """
         self.dataset.postprocess_instance()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_fleet_send_batch_size"
+    )
     def set_fleet_send_batch_size(self, fleet_send_batch_size=1024):
         """
         Set fleet send batch size, default is 1024
@@ -561,6 +654,10 @@ class InMemoryDataset(DatasetBase):
         """
         self.fleet_send_batch_size = fleet_send_batch_size
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_fleet_send_sleep_seconds"
+    )
     def set_fleet_send_sleep_seconds(self, fleet_send_sleep_seconds=0):
         """
         Set fleet send sleep time, default is 0
@@ -578,6 +675,9 @@ class InMemoryDataset(DatasetBase):
         """
         self.fleet_send_sleep_seconds = fleet_send_sleep_seconds
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_merge_by_lineid")
     def set_merge_by_lineid(self, merge_size=2):
         """
         Set merge by line id, instances of same line id will be merged after
@@ -598,23 +698,61 @@ class InMemoryDataset(DatasetBase):
         self.merge_by_lineid = True
         self.parse_ins_id = True
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._set_generate_unique_feasigns"
+    )
     def set_generate_unique_feasigns(self, generate_uni_feasigns, shard_num):
         self.dataset.set_generate_unique_feasigns(generate_uni_feasigns)
         self.gen_uni_feasigns = generate_uni_feasigns
         self.local_shard_num = shard_num
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset._generate_local_tables_unlock"
+    )
     def generate_local_tables_unlock(self, table_id, fea_dim, read_thread_num,
                                      consume_thread_num, shard_num):
         self.dataset.generate_local_tables_unlock(
             table_id, fea_dim, read_thread_num, consume_thread_num, shard_num)
 
-    def load_into_memory(self):
+    def set_date(self, date):
         """
-        Load data into memory
+        :api_attr: Static Graph
+
+        Set training date for pull sparse parameters, saving and loading model. Only used in psgpu
+
+        Args:
+            date(str): training date(format : YYMMDD). eg.20211111
 
         Examples:
             .. code-block:: python
 
+                import paddle.fluid as fluid
+
+                dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
+                dataset.set_date("20211111")
+        """
+        year = int(date[:4])
+        month = int(date[4:6])
+        day = int(date[6:])
+        if self.use_ps_gpu and core._is_compiled_with_heterps():
+            self.psgpu.set_date(year, month, day)
+
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.load_into_memory")
+    def load_into_memory(self, is_shuffle=False):
+        """
+        Load data into memory
+
+         Args:
+            is_shuffle(bool): whether to use local shuffle, default is False
+
+        Examples:
+            .. code-block:: python
+
+              # required: skiptest
               import paddle.fluid as fluid
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
               filelist = ["a.txt", "b.txt"]
@@ -622,8 +760,15 @@ class InMemoryDataset(DatasetBase):
               dataset.load_into_memory()
         """
         self._prepare_to_run()
-        self.dataset.load_into_memory()
+        if not self.use_ps_gpu:
+            self.dataset.load_into_memory()
+        elif core._is_compiled_with_heterps():
+            self.psgpu.set_dataset(self.dataset)
+            self.psgpu.load_into_memory(is_shuffle)
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.preload_into_memory")
     def preload_into_memory(self, thread_num=None):
         """
         Load data into memory in async mode
@@ -634,6 +779,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
               filelist = ["a.txt", "b.txt"]
@@ -648,6 +794,9 @@ class InMemoryDataset(DatasetBase):
         self.dataset.create_preload_readers()
         self.dataset.preload_into_memory()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.wait_preload_done")
     def wait_preload_done(self):
         """
         Wait preload_into_memory done
@@ -655,6 +804,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
               filelist = ["a.txt", "b.txt"]
@@ -665,6 +815,9 @@ class InMemoryDataset(DatasetBase):
         self.dataset.wait_preload_done()
         self.dataset.destroy_preload_readers()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.local_shuffle")
     def local_shuffle(self):
         """
         Local shuffle
@@ -672,6 +825,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
               filelist = ["a.txt", "b.txt"]
@@ -681,6 +835,9 @@ class InMemoryDataset(DatasetBase):
         """
         self.dataset.local_shuffle()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.global_shuffle")
     def global_shuffle(self, fleet=None, thread_num=12):
         """
         Global shuffle.
@@ -691,6 +848,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               from paddle.fluid.incubate.fleet.parameter_server.pslib import fleet
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
@@ -704,28 +862,44 @@ class InMemoryDataset(DatasetBase):
             thread_num(int): shuffle thread num. Default is 12.
 
         """
-        trainer_num = 1
         if fleet is not None:
-            fleet._role_maker.barrier_worker()
-            trainer_num = fleet.worker_num()
+            if hasattr(fleet, "barrier_worker"):
+                print("pscore fleet")
+                fleet.barrier_worker()
+            else:
+                fleet._role_maker.barrier_worker()
+            if self.trainer_num == -1:
+                self.trainer_num = fleet.worker_num()
         if self.fleet_send_batch_size is None:
             self.fleet_send_batch_size = 1024
         if self.fleet_send_sleep_seconds is None:
             self.fleet_send_sleep_seconds = 0
         self.dataset.register_client2client_msg_handler()
-        self.dataset.set_trainer_num(trainer_num)
+        self.dataset.set_trainer_num(self.trainer_num)
         self.dataset.set_fleet_send_batch_size(self.fleet_send_batch_size)
         self.dataset.set_fleet_send_sleep_seconds(self.fleet_send_sleep_seconds)
         if fleet is not None:
-            fleet._role_maker.barrier_worker()
+            if hasattr(fleet, "barrier_worker"):
+                fleet.barrier_worker()
+            else:
+                fleet._role_maker.barrier_worker()
         self.dataset.global_shuffle(thread_num)
         if fleet is not None:
-            fleet._role_maker.barrier_worker()
+            if hasattr(fleet, "barrier_worker"):
+                fleet.barrier_worker()
+            else:
+                fleet._role_maker.barrier_worker()
         if self.merge_by_lineid:
             self.dataset.merge_by_lineid()
         if fleet is not None:
-            fleet._role_maker.barrier_worker()
+            if hasattr(fleet, "barrier_worker"):
+                fleet.barrier_worker()
+            else:
+                fleet._role_maker.barrier_worker()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.release_memory")
     def release_memory(self):
         """
         :api_attr: Static Graph
@@ -735,6 +909,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               from paddle.fluid.incubate.fleet.parameter_server.pslib import fleet
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
@@ -774,6 +949,9 @@ class InMemoryDataset(DatasetBase):
         """
         return self.dataset.get_pv_data_size()
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.get_memory_data_size")
     def get_memory_data_size(self, fleet=None):
         """
         Get memory data size, user can call this function to know the num
@@ -791,6 +969,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               from paddle.fluid.incubate.fleet.parameter_server.pslib import fleet
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
@@ -810,6 +989,9 @@ class InMemoryDataset(DatasetBase):
             return global_data_size[0]
         return local_data_size[0]
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.InMemoryDataset.get_shuffle_data_size")
     def get_shuffle_data_size(self, fleet=None):
         """
         Get shuffle data size, user can call this function to know the num
@@ -828,6 +1010,7 @@ class InMemoryDataset(DatasetBase):
         Examples:
             .. code-block:: python
 
+              # required: skiptest
               import paddle.fluid as fluid
               from paddle.fluid.incubate.fleet.parameter_server.pslib import fleet
               dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
@@ -841,12 +1024,23 @@ class InMemoryDataset(DatasetBase):
         import numpy as np
         local_data_size = self.dataset.get_shuffle_data_size()
         local_data_size = np.array([local_data_size])
+        print('global shuffle local_data_size: ', local_data_size)
         if fleet is not None:
             global_data_size = local_data_size * 0
-            fleet._role_maker.all_reduce_worker(local_data_size,
-                                                global_data_size)
+            if hasattr(fleet, "util"):
+                global_data_size = fleet.util.all_reduce(local_data_size)
+            else:
+                fleet._role_maker.all_reduce_worker(local_data_size,
+                                                    global_data_size)
             return global_data_size[0]
         return local_data_size[0]
+
+    def _set_heter_ps(self, enable_heter_ps=False):
+        """
+        Set heter ps mode
+        user no need to call this function.
+        """
+        self.dataset.set_heter_ps(enable_heter_ps)
 
 
 class QueueDataset(DatasetBase):
@@ -869,6 +1063,9 @@ class QueueDataset(DatasetBase):
         super(QueueDataset, self).__init__()
         self.proto_desc.name = "MultiSlotDataFeed"
 
+    @deprecated(
+        since="2.0.0",
+        update_to="paddle.distributed.QueueDataset._prepare_to_run")
     def _prepare_to_run(self):
         """
         Set data_feed_desc/thread num/filelist before run,

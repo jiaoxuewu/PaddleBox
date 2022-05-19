@@ -15,21 +15,24 @@
 #include "paddle/fluid/framework/ir/mkldnn/mkldnn_inplace_pass.h"
 
 #include <gtest/gtest.h>
-#include <boost/logic/tribool.hpp>
 #include <unordered_set>
+
+#include <boost/logic/tribool.hpp>
+
 #include "paddle/fluid/framework/ir/pass_tester_helper.h"
 #include "paddle/fluid/framework/op_registry.h"
 
-USE_OP(softmax);
+USE_OP_ITSELF(softmax);
 USE_OP_DEVICE_KERNEL(softmax, MKLDNN);
-USE_OP(elementwise_add);
+USE_OP_ITSELF(elementwise_add);
 USE_OP_DEVICE_KERNEL(elementwise_add, MKLDNN);
-USE_OP(leaky_relu);
+USE_OP_ITSELF(leaky_relu);
 USE_OP_DEVICE_KERNEL(leaky_relu, MKLDNN);
-USE_OP(gelu);
-USE_OP(relu);
-USE_OP(tanh);
+USE_OP_ITSELF(gelu);
+USE_OP_ITSELF(relu);
+USE_OP_ITSELF(tanh);
 USE_OP_DEVICE_KERNEL(tanh, MKLDNN);
+PD_DECLARE_ARG_MAPPING_FN(gelu);
 
 namespace paddle {
 namespace framework {
@@ -167,7 +170,7 @@ TEST(MKLDNNInplacePass, inplace_softmax_branched) {
 
 TEST(MKLDNNInplacePass, inplace_elementwise_add) {
   // Two elementwise_add mkl-dnn enabled op instances to be made inplace
-  MKLDNNInplacePassTest().MainTest("elementwise_add", false, 1);
+  MKLDNNInplacePassTest().MainTest("elementwise_add", false, 0);
 }
 TEST(MKLDNNInplacePass, inplace_tanh) {
   MKLDNNInplacePassTest().MainTest("tanh", false, 1);

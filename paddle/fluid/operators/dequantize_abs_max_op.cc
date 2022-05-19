@@ -13,8 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/dequantize_abs_max_op.h"
+
 #include <string>
-#include <vector>
+
+namespace paddle {
+namespace framework {
+class InferShapeContext;
+class OpDesc;
+template <typename T>
+class EmptyGradOpMaker;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+namespace platform {}  // namespace platform
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -35,6 +48,7 @@ struct DequantizeFunctor<platform::CPUDeviceContext, T> {
 };
 
 template struct DequantizeFunctor<platform::CPUDeviceContext, int8_t>;
+template struct DequantizeFunctor<platform::CPUDeviceContext, int16_t>;
 
 class DequantizeMaxAbsOp : public framework::OperatorWithKernel {
  public:
@@ -45,10 +59,8 @@ class DequantizeMaxAbsOp : public framework::OperatorWithKernel {
       : OperatorWithKernel(type, inputs, outputs, attrs) {}
 
   void InferShape(framework::InferShapeContext* ctx) const override {
-    PADDLE_ENFORCE_EQ(ctx->HasInput("X"), true,
-                      "Input(X) of DequantizeMaxAbsOp should not be null.");
-    PADDLE_ENFORCE_EQ(ctx->HasOutput("Out"), true,
-                      "Output(Out) of DequantizeMaxAbsOp should not be null.");
+    OP_INOUT_CHECK(ctx->HasInput("X"), "Input", "X", "DequantizeMaxAbs");
+    OP_INOUT_CHECK(ctx->HasOutput("Out"), "Output", "Out", "DequantizeMaxAbs");
 
     ctx->ShareDim("X", /*->*/ "Out");
     ctx->ShareLoD("X", /*->*/ "Out");
@@ -66,7 +78,7 @@ class DequantizeMaxAbsOpMaker : public framework::OpProtoAndCheckerMaker {
  public:
   void Make() override {
     AddInput("X",
-             "(int8 Tensor) The input with int8 type is the "
+             "(Int Tensor) The input with int8/16 type is the "
              "low precision tensor.");
     AddInput("Scale", "(float) The scale in quantization stage.");
     AddOutput("Out",
@@ -95,4 +107,5 @@ REGISTER_OPERATOR(
     paddle::framework::EmptyGradOpMaker<paddle::framework::OpDesc>,
     paddle::framework::EmptyGradOpMaker<paddle::imperative::OpBase>);
 REGISTER_OP_CPU_KERNEL(dequantize_abs_max,
-                       ops::DequantizeMaxAbsKernel<CPU, int8_t>);
+                       ops::DequantizeMaxAbsKernel<CPU, int8_t>,
+                       ops::DequantizeMaxAbsKernel<CPU, int16_t>);

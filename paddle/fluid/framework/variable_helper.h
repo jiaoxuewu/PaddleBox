@@ -15,11 +15,12 @@ limitations under the License. */
 
 #include <vector>
 
-#include "paddle/fluid/framework/framework.pb.h"
 #include "paddle/fluid/framework/variable.h"
 
 namespace paddle {
 namespace framework {
+
+class Variable;
 
 void InitializeVariable(Variable* var, proto::VarType::Type var_type);
 void CopyVariable(const Variable& src_var, Variable* dst_var);

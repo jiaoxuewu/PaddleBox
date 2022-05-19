@@ -23,7 +23,9 @@ import six
 import paddle
 import paddle.fluid as fluid
 from paddle.fluid import core
+from paddle.fluid import unique_name
 from test_imperative_base import new_program_scope
+from jit_load_rename_var import rename_var_with_generator
 
 LOADED_VAR_SUFFIX = ".load_0"
 
@@ -113,7 +115,8 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
                 self.save_dirname, ["img"], [prediction],
                 exe,
                 model_filename=self.model_filename,
-                params_filename=self.params_filename)
+                params_filename=self.params_filename,
+                clip_extra=False)
 
     def load_and_train_dygraph(self):
         place = fluid.CUDAPlace(0) if core.is_compiled_with_cuda(
@@ -128,6 +131,9 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
                 model_filename=self.model_filename,
                 params_filename=self.params_filename)
 
+            suffix_varname_dict = mnist._program_holder_dict[
+                'forward']._suffix_varname_dict
+            dict_old_new = {v: k for k, v in suffix_varname_dict.items()}
             dy_param_init_value = {}
             for param in mnist.parameters():
                 dy_param_init_value[param.name] = param.numpy()
@@ -169,7 +175,7 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
             for param in mnist.parameters():
                 dy_param_value[param.name] = param.numpy()
 
-        return dy_x_data, dy_out, dy_param_init_value, dy_param_value
+        return dy_x_data, dy_out, dy_param_init_value, dy_param_value, dict_old_new
 
     def load_and_train_static(self):
         with new_program_scope():
@@ -298,7 +304,8 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
         self.train_and_save_model()
 
         # Phase 2. load model & train dygraph
-        dy_x_data, dy_out, dy_param_init_value, dy_param_value = \
+
+        dy_x_data, dy_out, dy_param_init_value, dy_param_value, dict_old_new_init= \
             self.load_and_train_dygraph()
 
         static_x_data, static_out, static_param_init_value, static_param_value = \
@@ -308,14 +315,14 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
         self.assertTrue(np.array_equal(static_x_data, dy_x_data))
 
         for key, value in six.iteritems(static_param_init_value):
-            key += LOADED_VAR_SUFFIX
+            key = dict_old_new_init[key]
             self.assertTrue(np.array_equal(value, dy_param_init_value[key]))
 
         # np.testing.assert_array_almost_equal(static_out, dy_out)
         self.assertTrue(np.allclose(static_out, dy_out, atol=1e-04))
 
         for key, value in six.iteritems(static_param_value):
-            key += LOADED_VAR_SUFFIX
+            key = dict_old_new_init[key]
             self.assertTrue(np.allclose(value, dy_param_value[key], atol=1e-4))
 
     def test_mnist_train_with_params_filename(self):
@@ -325,8 +332,8 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
         # Phase 1. run and save static model
         self.train_and_save_model()
 
-        # Phase 2. load model & train dygraph
-        dy_x_data, dy_out, dy_param_init_value, dy_param_value = \
+        # Phase 2. load model & train dygraph        
+        dy_x_data, dy_out, dy_param_init_value, dy_param_value, dict_old_new_init= \
             self.load_and_train_dygraph()
 
         static_x_data, static_out, static_param_init_value, static_param_value = \
@@ -334,16 +341,15 @@ class TestImperativeStaticModelRunnerMnist(unittest.TestCase):
 
         # Phase 3. compare
         self.assertTrue(np.array_equal(static_x_data, dy_x_data))
-
         for key, value in six.iteritems(static_param_init_value):
-            key += LOADED_VAR_SUFFIX
+            key = dict_old_new_init[key]
             self.assertTrue(np.array_equal(value, dy_param_init_value[key]))
 
         # np.testing.assert_array_almost_equal(static_out, dy_out)
         self.assertTrue(np.allclose(static_out, dy_out, atol=1e-04))
 
         for key, value in six.iteritems(static_param_value):
-            key += LOADED_VAR_SUFFIX
+            key = dict_old_new_init[key]
             self.assertTrue(np.allclose(value, dy_param_value[key], atol=1e-4))
 
     def test_mnist_infer_no_params_filename(self):

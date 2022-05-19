@@ -13,8 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/rank_loss_op.h"
-#include <memory>
+
 #include <string>
+
+namespace paddle {
+namespace framework {
+class InferShapeContext;
+class OpDesc;
+}  // namespace framework
+namespace imperative {
+class OpBase;
+}  // namespace imperative
+namespace platform {
+class CPUDeviceContext;
+}  // namespace platform
+}  // namespace paddle
 
 namespace paddle {
 namespace operators {
@@ -217,3 +230,10 @@ REGISTER_OP_CPU_KERNEL(
 REGISTER_OP_CPU_KERNEL(
     rank_loss_grad,
     ops::RankLossGradKernel<paddle::platform::CPUDeviceContext, float>);
+
+REGISTER_OP_CUDA_KERNEL(rank_loss,
+                        paddle::operators::RankLossKernel<
+                            paddle::platform::CUDADeviceContext, float>);
+REGISTER_OP_CUDA_KERNEL(rank_loss_grad,
+                        paddle::operators::RankLossGradKernel<
+                            paddle::platform::CUDADeviceContext, float>);

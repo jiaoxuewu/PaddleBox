@@ -34,6 +34,8 @@ import paddle.fluid.layers as layers
 from functools import reduce
 from test_collective_base import TestCollectiveRunnerBase, runtime_main
 
+paddle.enable_static()
+
 
 class TestCollectiveReduceScatter(TestCollectiveRunnerBase):
     def __init__(self):
@@ -46,6 +48,7 @@ class TestCollectiveReduceScatter(TestCollectiveRunnerBase):
             tindata = layers.data(
                 name="tindata", shape=[10, 1000], dtype='float32')
             toutdata = fluid.layers.collective._c_reducescatter(tindata, nranks)
+            toutdata = fluid.layers.collective._c_sync_comm_stream(toutdata, 0)
             return toutdata
 
 

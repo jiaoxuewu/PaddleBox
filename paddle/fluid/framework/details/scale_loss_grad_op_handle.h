@@ -23,6 +23,15 @@
 
 namespace paddle {
 namespace framework {
+class Scope;
+namespace ir {
+class Node;
+}  // namespace ir
+}  // namespace framework
+}  // namespace paddle
+
+namespace paddle {
+namespace framework {
 namespace details {
 
 struct ScaleLossGradOpHandle : public OpHandleBase {
@@ -33,6 +42,12 @@ struct ScaleLossGradOpHandle : public OpHandleBase {
   ~ScaleLossGradOpHandle() final;
 
   std::string Name() const override;
+
+  platform::Place GetPlace() const { return place_; }
+
+  void RunOnVar(Variable *var, bool record_event = false);
+
+  std::string LossGradName() const;
 
  protected:
   void RunImpl() override;

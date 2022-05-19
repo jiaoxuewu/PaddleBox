@@ -31,7 +31,9 @@ void IrGraphBuildPass::RunImpl(Argument *argument) {
   if (!argument->scope_valid()) {
     argument->SetScope(new framework::Scope);
   }
-  PADDLE_ENFORCE(argument->use_gpu_valid());
+  PADDLE_ENFORCE_EQ(argument->use_gpu_valid(), true,
+                    platform::errors::PreconditionNotMet(
+                        "The use_gpu field should be valid"));
 
   // The load program should run on the same device with the inference program,
   // so that the parameters will on the same device, or they will keep copying
@@ -51,15 +53,43 @@ void IrGraphBuildPass::RunImpl(Argument *argument) {
         argument->model_from_memory_valid() && argument->model_from_memory());
     argument->SetMainProgram(program.release());
   } else {
-    PADDLE_THROW(
-        "either model_dir or (program path and parameter path) should be set.");
+    PADDLE_THROW(platform::errors::PreconditionNotMet(
+        "either model_dir or (program path and parameter path) should be "
+        "set."));
   }
 
   auto graph = std::unique_ptr<Graph>(new Graph(argument->main_program()));
   argument->SetMainGraph(graph.release());
   auto *scope_ptr = argument->scope_ptr();
-  PADDLE_ENFORCE(scope_ptr);
+  PADDLE_ENFORCE_NOT_NULL(scope_ptr,
+                          platform::errors::PreconditionNotMet(
+                              "The scope ptr should not be nullptr."));
   argument->main_graph().SetNotOwned(framework::ir::kParamScopeAttr, scope_ptr);
+
+// ipu related
+#ifdef PADDLE_WITH_IPU
+  if (argument->Has("use_ipu")) {
+    if (argument->use_ipu()) {
+      argument->main_graph().SetNotOwned("num_ipus",
+                                         &argument->ipu_device_num());
+      argument->main_graph().SetNotOwned("micro_batch_size",
+                                         &argument->ipu_micro_batch_size());
+      argument->main_graph().SetNotOwned("enable_pipelining",
+                                         &argument->ipu_enable_pipelining());
+      argument->main_graph().SetNotOwned("batches_per_step",
+                                         &argument->ipu_batches_per_step());
+      argument->main_graph().SetNotOwned("enable_fp16",
+                                         &argument->ipu_enable_fp16());
+      argument->main_graph().SetNotOwned("replica_num",
+                                         &argument->ipu_replica_num());
+      argument->main_graph().SetNotOwned(
+          "available_memory_proportion",
+          &argument->ipu_available_memory_proportion());
+      argument->main_graph().SetNotOwned("enable_half_partial",
+                                         &argument->ipu_enable_half_partial());
+    }
+  }
+#endif
 }
 
 std::unique_ptr<framework::ProgramDesc> IrGraphBuildPass::LoadModel(

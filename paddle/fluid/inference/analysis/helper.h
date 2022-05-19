@@ -25,11 +25,10 @@ limitations under the License. */
 #include <utility>
 #include <vector>
 
-#include "paddle/fluid/framework/framework.pb.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/framework/variable.h"
 #include "paddle/fluid/platform/enforce.h"
-#include "paddle/fluid/platform/port.h"
+#include "paddle/phi/backends/dynload/port.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -73,12 +72,15 @@ struct DataTypeNamer {
   template <typename T>
   const std::string &repr() const {
     auto x = std::type_index(typeid(T));
-    PADDLE_ENFORCE(dic_.count(x), "unknown type for representation");
+    PADDLE_ENFORCE_GT(dic_.count(x), 0, platform::errors::PreconditionNotMet(
+                                            "unknown type for representation"));
     return dic_.at(x);
   }
 
   const std::string &repr(const std::type_index &type) const {  // NOLINT
-    PADDLE_ENFORCE(dic_.count(type), "unknown type for representation");
+    PADDLE_ENFORCE_GT(dic_.count(type), 0,
+                      platform::errors::PreconditionNotMet(
+                          "unknown type for representation"));
     return dic_.at(type);
   }
 
@@ -116,7 +118,9 @@ template <typename T>
 class OrderedRegistry {
  public:
   T *Register(const std::string &name, T *x) {
-    PADDLE_ENFORCE(!dic_.count(name), "duplicate key [%s]", name);
+    PADDLE_ENFORCE_EQ(dic_.count(name), 0,
+                      platform::errors::PreconditionNotMet(
+                          "There exists duplicate key [%s]", name));
     dic_[name] = elements_.size();
     elements_.emplace_back(std::unique_ptr<T>(x));
     return elements_.back().get();
@@ -136,14 +140,20 @@ class OrderedRegistry {
 template <typename T>
 T &GetFromScope(const framework::Scope &scope, const std::string &name) {
   framework::Variable *var = scope.FindVar(name);
-  PADDLE_ENFORCE(var != nullptr);
+  PADDLE_ENFORCE_NOT_NULL(
+      var, platform::errors::PreconditionNotMet(
+               "The var which name is %s should not be nullptr.", name));
   return *var->GetMutable<T>();
 }
 
 static framework::proto::ProgramDesc LoadProgramDesc(
     const std::string &model_path) {
   std::ifstream fin(model_path, std::ios::in | std::ios::binary);
-  PADDLE_ENFORCE(fin.is_open(), "Cannot open file %s", model_path);
+  PADDLE_ENFORCE_EQ(
+      fin.is_open(), true,
+      platform::errors::NotFound(
+          "Cannot open file %s, please confirm whether the file exists",
+          model_path));
   fin.seekg(0, std::ios::end);
   std::string buffer(fin.tellg(), ' ');
   fin.seekg(0, std::ios::beg);
@@ -172,27 +182,34 @@ static bool PathExists(const std::string &path) {
 }
 
 static std::string GetDirRoot(const std::string &path) {
-  char sep = '/';
+  char sep_1 = '/', sep_2 = '\\';
 
-#ifdef _WIN32
-  sep = '\\';
-#endif
-
-  size_t i = path.rfind(sep, path.length());
-  if (i != std::string::npos) {
-    return (path.substr(0, i));
+  size_t i_1 = path.rfind(sep_1, path.length());
+  size_t i_2 = path.rfind(sep_2, path.length());
+  if (i_1 != std::string::npos && i_2 != std::string::npos) {
+    return path.substr(0, std::max(i_1, i_2));
+  } else if (i_1 != std::string::npos) {
+    return path.substr(0, i_1);
+  } else if (i_2 != std::string::npos) {
+    return path.substr(0, i_2);
   }
   return path;
 }
 
+static void MakeDirIfNotExists(const std::string &path) {
+  if (!PathExists(path)) {
+    PADDLE_ENFORCE_NE(
+        MKDIR(path.c_str()), -1,
+        platform::errors::PreconditionNotMet(
+            "Can not create optimize cache directory: %s, Make sure you "
+            "have permission to write",
+            path));
+  }
+}
+
 static std::string GetOrCreateModelOptCacheDir(const std::string &model_root) {
   std::string opt_cache_dir = model_root + "/_opt_cache/";
-  if (!PathExists(opt_cache_dir)) {
-    PADDLE_ENFORCE(MKDIR(opt_cache_dir.c_str()) != -1,
-                   "Can not create optimize cache directory: %s, Make sure you "
-                   "have permission to write",
-                   opt_cache_dir);
-  }
+  MakeDirIfNotExists(opt_cache_dir);
   return opt_cache_dir;
 }
 
@@ -231,7 +248,7 @@ static std::string GetTrtEngineSerializedData(
   if (FileExists(trt_serialized_path)) {
     VLOG(3) << "Trt serialized file: " << trt_serialized_path
             << "is found here";
-    std::ifstream infile(trt_serialized_path, std::ios::in);
+    std::ifstream infile(trt_serialized_path, std::ios::binary);
     std::stringstream buffer;
     buffer << infile.rdbuf();
     std::string trt_engine_serialized_data(buffer.str());
@@ -243,7 +260,7 @@ static std::string GetTrtEngineSerializedData(
 static void SaveTrtEngineSerializedDataToFile(
     const std::string &trt_serialized_path,
     const std::string &engine_serialized_data) {
-  std::ofstream outfile(trt_serialized_path);
+  std::ofstream outfile(trt_serialized_path, std::ios::binary);
   outfile << engine_serialized_data;
   outfile.close();
 }

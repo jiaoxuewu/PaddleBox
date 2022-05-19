@@ -159,7 +159,7 @@ class TestCRFModel(unittest.TestCase):
                 train_data = paddle.batch(
                     paddle.reader.shuffle(
                         paddle.dataset.conll05.test(), buf_size=8192),
-                    batch_size=16)
+                    batch_size=8)
 
                 place = fluid.CUDAPlace(0) if use_cuda else fluid.CPUPlace()
                 exe = fluid.Executor(place)
@@ -176,7 +176,7 @@ class TestCRFModel(unittest.TestCase):
                     place=fluid.CPUPlace())
 
             data = train_data()
-            for i in range(10):
+            for i in range(4):
                 cur_batch = next(data)
                 print(exe.run(train_cp,
                               feed=feeder.feed(cur_batch),

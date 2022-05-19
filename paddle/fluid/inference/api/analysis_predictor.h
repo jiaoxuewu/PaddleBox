@@ -18,6 +18,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#if defined(PADDLE_WITH_DISTRIBUTE) && defined(PADDLE_WITH_PSCORE)
+#include "paddle/fluid/distributed/fleet_executor/fleet_executor.h"
+#endif
 #include "paddle/fluid/framework/naive_executor.h"
 #include "paddle/fluid/framework/op_compatible_info.h"
 #include "paddle/fluid/inference/analysis/analyzer.h"
@@ -25,12 +28,20 @@
 #include "paddle/fluid/inference/api/details/reset_tensor_array.h"
 #include "paddle/fluid/inference/api/helper.h"
 #include "paddle/fluid/inference/api/paddle_inference_api.h"
+#include "paddle/fluid/platform/device/gpu/gpu_types.h"
+#include "paddle/fluid/platform/float16.h"
 #include "paddle/fluid/string/printf.h"
 #ifdef PADDLE_WITH_TESTING
 #include <gtest/gtest.h>
 #include <gtest/gtest_prod.h>
 #endif
 
+namespace paddle_infer {
+using float16 = paddle::platform::float16;
+namespace experimental {
+class InternalUtils;
+};
+}
 ///
 /// \file analysis_predictor.h
 ///
@@ -87,6 +98,10 @@ class AnalysisPredictor : public PaddlePredictor {
   /// \param[in] AnalysisConfig config
   ///
   explicit AnalysisPredictor(const AnalysisConfig &config) : config_(config) {
+    if (config_.shape_range_info_collected()) {
+      config_.SwitchIrOptim(false);
+      config_.EnableMemoryOptim(false);
+    }
     predictor_id_ = inference::GetUniqueId();
   }
   ///
@@ -164,6 +179,11 @@ class AnalysisPredictor : public PaddlePredictor {
   ///
   bool ZeroCopyRun() override;
 
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  // Note: Can only be used under thread_local semantics.
+  bool ExpRunWithExternalStream(const gpuStream_t stream);
+#endif
+
   ///
   /// \brief Create feed fetch variables
   ///
@@ -192,6 +212,17 @@ class AnalysisPredictor : public PaddlePredictor {
   ///
   ///
   void ClearIntermediateTensor();
+
+  ///
+  /// \brief Release all tmp tensor to compress the size of the memory pool.
+  /// The memory pool is considered to be composed of a list of chunks, if
+  /// the chunk is not occupied, it can be released.
+  ///
+  /// \return Number of bytes released. It may be smaller than the actual
+  /// released memory, because part of the memory is not managed by the
+  /// MemoryPool.
+  ///
+  uint64_t TryShrinkMemory() override;
 
   ///
   /// \brief Get the argument used by predictor
@@ -317,6 +348,17 @@ class AnalysisPredictor : public PaddlePredictor {
   /// \param[in] inputs tensors
   ///
   void MkldnnPreSet(const std::vector<PaddleTensor> &inputs);
+
+  ///
+  /// \brief PreSet for Mkldnn multi-thread and dynamic shape input.
+  ///
+  /// Used in AnalysisPredictor::Run(), do not support
+  /// AnalysisPredictor::ZeroCopyRun() now.
+  ///
+  /// \param[in] inputs tensor shape
+  ///
+  void MkldnnPreSet(const std::vector<std::vector<int>> &inputs_shape);
+
   ///
   /// \brief PostReset for Mkldnn multi-thread and dynamic shape input.
   ///
@@ -324,13 +366,6 @@ class AnalysisPredictor : public PaddlePredictor {
   /// AnalysisPredictor::ZeroCopyRun() now.
   ///
   void MkldnnPostReset();
-  ///
-  /// \brief Compute compatibility based on model version information and
-  /// operator version information
-  ///
-  /// \return Compatible information
-  ///
-  bool CheckOperatorCompatible();
 
 #if PADDLE_WITH_TENSORRT
   ///
@@ -356,6 +391,56 @@ class AnalysisPredictor : public PaddlePredictor {
   FRIEND_TEST(AnalysisPredictor, analysis_off);
   FRIEND_TEST(AnalysisPredictor, analysis_on);
   FRIEND_TEST(AnalysisPredictor, with_gpu);
+#endif
+
+ private:
+  void StatisticShapeRangeInfo();
+  void CollectShapeRangeInfo();
+
+#if defined(PADDLE_WITH_DISTRIBUTE) && defined(PADDLE_WITH_PSCORE)
+  // fleet exe related
+
+  ///
+  /// \brief prepare for fleet executor to run
+  ///
+  /// Used in AnalysisPredictor::Init(),
+  ///
+  bool PrepareFleetExecutor();
+
+  ///
+  /// \brief init NCCL env for multi gpus inference
+  ///
+  /// Used in AnalysisPredictor::PrepareFleetExecutor()
+  ///
+  bool CommInit();
+
+  ///
+  /// \brief read the config to init NCCL env
+  ///
+  /// Used in AnalysisPredictor::CommInit()
+  ///
+  /// \param[in] ring_id_to_ranks: a ptr to ring_id_to_ranks
+  /// \param[in] rank_to_ring_ids: a ptr to rank_to_ring_ids
+  ///
+  bool LoadConverterConfig(
+      std::map<int64_t, std::vector<int64_t>> *ring_id_to_ranks,
+      std::map<int64_t, std::vector<int64_t>> *rank_to_ring_ids);
+
+  ///
+  /// \brief add ops and run them with NaiveExecutor to init NCCL env
+  ///
+  /// Used in AnalysisPredictor::CommInit()
+  ///
+  /// \param[in] tmp_var_name: var name to hold NCCL unique id
+  /// \param[in] nranks: number of ranks in one comm group
+  /// \param[in] rank: relative rank of current rank in the comm group
+  /// \param[in] peer_endpoints: group's peers' endpoints
+  /// \param[in] block: the block to insert comm ops
+  /// \param[in] ring_id: the ring id to be used to init NCCL env
+  ///
+  void InsertCommOp(std::string tmp_var_name, int nranks, int rank,
+                    const std::vector<std::string> &peer_endpoints,
+                    framework::BlockDesc *block, int ring_id);
 #endif
 
  private:
@@ -400,7 +485,17 @@ class AnalysisPredictor : public PaddlePredictor {
  private:
   // Some status here that help to determine the status inside the predictor.
   bool status_is_cloned_{false};
-  bool status_use_gpu_{false};
+
+  std::map<std::string, std::vector<std::vector<int32_t>>> shape_info_;
+  static int clone_num_;
+
+#if defined(PADDLE_WITH_DISTRIBUTE) && defined(PADDLE_WITH_PSCORE)
+  // fleet executor related
+  distributed::FleetExecutorDesc executor_desc_;
+  std::shared_ptr<distributed::FleetExecutor> fleet_exe_;
+  std::shared_ptr<distributed::TaskNode> task_node_;
+#endif
+  friend class paddle_infer::experimental::InternalUtils;
 };
 
 }  // namespace paddle

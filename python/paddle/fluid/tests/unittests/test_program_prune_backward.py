@@ -22,8 +22,9 @@ import paddle.fluid as fluid
 import paddle.fluid.core as core
 from simple_nets import init_data, simple_fc_net, fc_with_batchnorm
 import seresnext_net
-from test_parallel_executor_transformer import transformer, get_feed_data_reader
+from test_parallel_executor_transformer import transformer, get_feed_data_reader, DeviceType
 from fake_reader import fake_imdb_reader
+import paddle
 
 
 def lstm_net(use_feed):
@@ -219,7 +220,7 @@ class TestProgramPruneBackward(unittest.TestCase):
         with self.program_scope_guard():
             self.check_prune_correctness(
                 method=seresnext_net.model,
-                feed_dict=seresnext_net.feed_dict(use_cuda=False),
+                feed_dict=seresnext_net.feed_dict(use_device=DeviceType.CPU),
                 optimizer=seresnext_net.optimizer)
 
     def test_transformer(self):
@@ -309,4 +310,5 @@ class TestProgramPruneBackward(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    paddle.enable_static()
     unittest.main()

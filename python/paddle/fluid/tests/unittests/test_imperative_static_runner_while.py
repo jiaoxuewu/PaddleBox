@@ -23,7 +23,9 @@ import six
 import paddle
 import paddle.fluid as fluid
 from paddle.fluid import core
+from paddle.fluid import unique_name
 from test_imperative_base import new_program_scope
+from jit_load_rename_var import rename_var_with_generator
 
 import paddle.fluid.transpiler.details.program_utils as pu
 
@@ -102,7 +104,8 @@ class TestImperativeStaticModelRunnerWhile(unittest.TestCase):
             self.save_dirname, ["img"], [pred],
             exe,
             model_filename=self.model_filename,
-            params_filename=self.params_filename)
+            params_filename=self.params_filename,
+            clip_extra=False)
 
     def load_and_train_dygraph(self):
         place = fluid.CUDAPlace(0) if core.is_compiled_with_cuda(
@@ -211,15 +214,20 @@ class TestImperativeStaticModelRunnerWhile(unittest.TestCase):
         self.train_and_save_model()
 
         # # Phase 2. load model & train dygraph
-        dy_out, dy_param_init_value, dy_param_value = \
+        with unique_name.guard():
+            dy_out, dy_param_init_value, dy_param_value = \
             self.load_and_train_dygraph()
 
-        static_out, static_param_init_value, static_param_value = \
-            self.load_and_train_static()
+        with unique_name.guard():
+            static_out, static_param_init_value, static_param_value = \
+                self.load_and_train_static()
 
         # Phase 3. compare
+        with unique_name.guard():
+            dict_old_new_init = rename_var_with_generator(
+                static_param_init_value.keys())
         for key, value in six.iteritems(static_param_init_value):
-            key += LOADED_VAR_SUFFIX
+            key = dict_old_new_init[key]
             self.assertTrue(np.array_equal(value, dy_param_init_value[key]))
 
         self.assertTrue(np.allclose(static_out, dy_out))

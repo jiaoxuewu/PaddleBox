@@ -33,6 +33,8 @@ class SimpleFCLayer(fluid.dygraph.Layer):
 
 class TestTracedLayerRecordNonPersistableInput(unittest.TestCase):
     def test_main(self):
+        if fluid.framework.in_dygraph_mode():
+            return
         traced_layer = None
         with fluid.dygraph.guard():
             feature_size = 3
@@ -75,10 +77,12 @@ class TestTracedLayerRecordNonPersistableInput(unittest.TestCase):
 
         self.assertEqual(actual_persistable_vars, expected_persistable_vars)
 
-        dirname = './traced_layer_test_non_persistable_vars'
-        traced_layer.save_inference_model(dirname=dirname)
-        filenames = set([f for f in os.listdir(dirname) if f != '__model__'])
-        self.assertEqual(filenames, expected_persistable_vars)
+        traced_layer.save_inference_model(
+            path='./traced_layer_test_non_persistable_vars')
+        self.assertTrue('traced_layer_test_non_persistable_vars.pdmodel' in
+                        os.listdir('./'))
+        self.assertTrue('traced_layer_test_non_persistable_vars.pdiparams' in
+                        os.listdir('./'))
 
 
 if __name__ == '__main__':

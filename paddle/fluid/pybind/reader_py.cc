@@ -22,7 +22,6 @@
 #include "Python.h"
 #include "boost/optional.hpp"
 #include "gflags/gflags.h"
-#include "paddle/fluid/framework/ddim.h"
 #include "paddle/fluid/framework/reader.h"
 #include "paddle/fluid/imperative/layer.h"
 #include "paddle/fluid/imperative/tracer.h"
@@ -30,11 +29,13 @@
 #include "paddle/fluid/operators/reader/lod_tensor_blocking_queue.h"
 #include "paddle/fluid/operators/reader/py_reader.h"
 #include "paddle/fluid/platform/place.h"
+#include "paddle/phi/core/ddim.h"
 #include "pybind11/stl.h"
 
-DEFINE_bool(reader_queue_speed_test_mode, false,
-            "If set true, the queue.pop will only get data from queue but not "
-            "remove the data from queue for speed testing");
+DECLARE_bool(reader_queue_speed_test_mode);
+
+// disable auto conversion to list in Python
+PYBIND11_MAKE_OPAQUE(paddle::framework::LoDTensorArray);
 
 namespace paddle {
 namespace pybind {
@@ -44,7 +45,7 @@ namespace reader = operators::reader;
 
 // Check whether the tensor shape matches the VarDesc shape
 // Return the different shape if exists
-static boost::optional<std::vector<int64_t>> DiffTensorShapeWithVarDesc(
+static paddle::optional<std::vector<int64_t>> DiffTensorShapeWithVarDesc(
     const framework::LoDTensor &tensor, const framework::VarDesc &var_desc,
     size_t num_places) {
   auto tensor_shape = tensor.dims();
@@ -54,9 +55,9 @@ static boost::optional<std::vector<int64_t>> DiffTensorShapeWithVarDesc(
 
   if (UNLIKELY(rank == 0)) {
     if (desc_shape.size() != 0) {  // Tensor rank = 0 but desc does not match
-      return framework::vectorize<int64_t>(tensor_shape);
+      return phi::vectorize<int64_t>(tensor_shape);
     } else {
-      return boost::none;
+      return paddle::none;
     }
   }
 
@@ -72,12 +73,12 @@ static boost::optional<std::vector<int64_t>> DiffTensorShapeWithVarDesc(
     tensor_shape[0] = split_size;
     if (desc_shape[0] >= 0) {  // need check dim 0
       if (tensor_shape[0] != desc_shape[0]) {
-        return framework::vectorize<int64_t>(tensor_shape);
+        return phi::vectorize<int64_t>(tensor_shape);
       }
 
       if (remainder > 0) {
         tensor_shape[0] = remainder;
-        return framework::vectorize<int64_t>(tensor_shape);
+        return phi::vectorize<int64_t>(tensor_shape);
       }
     }
   }
@@ -88,11 +89,11 @@ static boost::optional<std::vector<int64_t>> DiffTensorShapeWithVarDesc(
         platform::errors::InvalidArgument(
             "Tensor shape at dim %d must not be less than 0", idx));
     if (desc_shape[idx] >= 0 && tensor_shape[idx] != desc_shape[idx]) {
-      return framework::vectorize<int64_t>(tensor_shape);
+      return phi::vectorize<int64_t>(tensor_shape);
     }
   }
 
-  return boost::none;
+  return paddle::none;
 }
 
 static const std::shared_ptr<reader::LoDTensorBlockingQueue> &GetQueue(
@@ -133,7 +134,7 @@ class MultiDeviceFeedReader {
         pin_memory_(pin_memory) {
     std::vector<framework::DDim> dims;
     for (auto &shape : shapes) {
-      dims.push_back(framework::make_ddim(shape));
+      dims.push_back(phi::make_ddim(shape));
     }
 
     auto first_reader = std::make_shared<reader::PyReader>(
@@ -223,6 +224,10 @@ class MultiDeviceFeedReader {
     ReadAsync();
   }
 
+  void Shutdown() {
+    for (auto &r : readers_) r->Shutdown();
+  }
+
   ~MultiDeviceFeedReader() {
     queue_->Close();
     pool_.reset();
@@ -264,10 +269,6 @@ class MultiDeviceFeedReader {
     } else {
       return success_num > 0 ? Status::kSuccess : Status::kEOF;
     }
-  }
-
-  void Shutdown() {
-    for (auto &r : readers_) r->Shutdown();
   }
 
   void Start() {
@@ -349,7 +350,8 @@ void BindMultiDeviceReader(py::module *module, const char *reader_name) {
                auto new_var = std::make_shared<imperative::VarBase>(act_name);
                new_var->SetPersistable(false);
                new_var->SetType(framework::proto::VarType::LOD_TENSOR);
-               new_var->SetDataType(lod_tensor.type());
+               new_var->SetDataType(
+                   framework::TransToProtoVarType(lod_tensor.dtype()));
                auto *tensor =
                    new_var->MutableVar()->GetMutable<framework::LoDTensor>();
                *tensor = std::move(lod_tensor);
@@ -362,6 +364,8 @@ void BindMultiDeviceReader(py::module *module, const char *reader_name) {
            },
            py::call_guard<py::gil_scoped_release>())
       .def("reset", &ReaderType::Reset,
+           py::call_guard<py::gil_scoped_release>())
+      .def("shutdown", &ReaderType::Shutdown,
            py::call_guard<py::gil_scoped_release>());
 }
 

@@ -20,12 +20,15 @@ import string
 
 from six.moves import cStringIO
 from ..proto import framework_pb2
-from ..framework import OpProtoHolder, Variable, core, convert_np_dtype_to_dtype_, in_dygraph_mode
+from ..framework import OpProtoHolder, Variable, core, convert_np_dtype_to_dtype_, _non_static_mode, in_dygraph_mode, _in_legacy_dygraph
 from ..layer_helper import LayerHelper
 from ..data_feeder import check_variable_and_dtype
+from paddle.fluid.framework import in_dygraph_mode, _in_legacy_dygraph
+from paddle import _C_ops
 
 __all__ = [
-    'generate_layer_fn', 'generate_activation_fn', 'autodoc', 'templatedoc'
+    'generate_layer_fn', 'generate_activation_fn', 'generate_inplace_fn',
+    'autodoc', 'templatedoc'
 ]
 
 
@@ -55,10 +58,11 @@ _two_bang_pattern_ = re.compile(r"!!([^!]+)!!")
 
 
 def escape_math(text):
-    return _two_bang_pattern_.sub(
-        r'$$\1$$',
-        _single_dollar_pattern_.sub(r':math:`\1`',
-                                    _two_dollar_pattern_.sub(r"!!\1!!", text)))
+    #return _two_bang_pattern_.sub(
+    #    r'$$\1$$',
+    #    _single_dollar_pattern_.sub(r':math:\n`\1`',
+    #                                _two_dollar_pattern_.sub(r"!!\1!!", text)))
+    return _two_dollar_pattern_.sub(r':math:`\1`', text)
 
 
 def _generate_doc_string_(op_proto,
@@ -254,8 +258,14 @@ def generate_activation_fn(op_type):
     op_proto = OpProtoHolder.instance().get_op_proto(op_type)
 
     def func(x, name=None):
-        if in_dygraph_mode():
-            op = getattr(core.ops, op_type)
+        final_state_op_type = "final_state_%s" % op_type
+        if in_dygraph_mode() and hasattr(_C_ops, final_state_op_type):
+            op = getattr(_C_ops, final_state_op_type)
+            return op(x)
+        # TODO(dev): Because some ops' yaml has not been migrated.
+        # Replace it with _in_legacy_dygraph while all yaml work is done.
+        if _non_static_mode():
+            op = getattr(_C_ops, op_type)
             return op(x)
 
         if op_type not in ["abs", "exp", "square"]:
@@ -263,9 +273,10 @@ def generate_activation_fn(op_type):
                                      op_type)
         else:
             # abs exp square ops support dtype(int32, int64, float16, float32, float64)
-            check_variable_and_dtype(
-                x, 'x', ['int32', 'int64', 'float16', 'float32', 'float64'],
-                op_type)
+            check_variable_and_dtype(x, 'x', [
+                'int32', 'int64', 'float16', 'float32', 'float64', 'complex64',
+                'complex128'
+            ], op_type)
 
         helper = LayerHelper(op_type, **locals())
 
@@ -279,6 +290,35 @@ def generate_activation_fn(op_type):
         additional_args_lines=[
             "name (str, optional): Name for the operation (optional, default is None). For more information, please refer to :ref:`api_guide_Name`."
         ])
+    return func
+
+
+def generate_inplace_fn(inplace_op_type):
+    """Register the Python layer for an Inplace Operator without Attribute.
+
+    Args:
+       inplace_op_type: The name of the inplace operator to be created.
+
+    This function takes in the inplace operator type (exp_ , ceil_ etc) and
+    creates the operator functionality.
+    """
+    origin_op_type = inplace_op_type[:-1]
+
+    def func(x, name=None):
+        if _non_static_mode():
+            op = getattr(_C_ops, inplace_op_type)
+            return op(x)
+        warnings.warn(
+            "In static mode, {}() is the same as {}() and does not perform inplace operation.".
+            format(inplace_op_type, origin_op_type))
+        return generate_activation_fn(origin_op_type)(x, name)
+
+    func.__name__ = inplace_op_type
+    func.__doc__ = """
+Inplace version of ``{0}`` API, the output Tensor will be inplaced with input ``x``.
+Please refer to :ref:`api_fluid_layers_{1}`.
+""".format(origin_op_type, origin_op_type)
+
     return func
 
 

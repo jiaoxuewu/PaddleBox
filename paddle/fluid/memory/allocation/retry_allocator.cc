@@ -14,6 +14,8 @@
 
 #include "paddle/fluid/memory/allocation/retry_allocator.h"
 
+#include "glog/logging.h"
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -37,7 +39,7 @@ class WaitedAllocateSizeGuard {
   size_t requested_size_;
 };
 
-void RetryAllocator::FreeImpl(Allocation* allocation) {
+void RetryAllocator::FreeImpl(phi::Allocation* allocation) {
   // Delete underlying allocation first.
   size_t size = allocation->size();
   underlying_allocator_->Free(allocation);
@@ -49,7 +51,7 @@ void RetryAllocator::FreeImpl(Allocation* allocation) {
   }
 }
 
-Allocation* RetryAllocator::AllocateImpl(size_t size) {
+phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
   auto alloc_func = [&, this]() {
     return underlying_allocator_->Allocate(size).release();
   };

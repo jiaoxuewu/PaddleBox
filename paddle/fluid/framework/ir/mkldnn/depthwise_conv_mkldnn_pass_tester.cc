@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include "paddle/fluid/framework/op_version_registry.h"
+
 namespace paddle {
 namespace framework {
 namespace ir {
@@ -27,10 +29,16 @@ void SetOp(ProgramDesc* prog, const std::string& type, const std::string& name,
   op->SetType(type);
   op->SetAttr("use_mkldnn", use_mkldnn);
   op->SetAttr("name", name);
+  op->SetAttr("groups", 1);
+  op->SetAttr("padding_algorithm", std::string("EXPLICIT"));
+  op->SetAttr("data_format", std::string("NCHW"));
+  op->SetAttr("strides", std::vector<int>({1, 1}));
+  op->SetAttr("dilations", std::vector<int>({1, 1}));
+  op->SetAttr("paddings", std::vector<int>({0, 0}));
   op->SetInput("Input", {inputs[0]});
   op->SetInput("Filter", {inputs[1]});
   op->SetInput("Bias", {inputs[2]});
-  op->SetOutput("Out", outputs);
+  op->SetOutput("Output", outputs);
 }
 
 // (a, weights, bias)->depthwise conv mkldnn->b
@@ -68,6 +76,12 @@ ProgramDesc BuildProgramDesc() {
         std::vector<std::string>({"e"}), false);
 
   return prog;
+}
+
+TEST(DepthwiseConvMKLDNNPass, pass_op_version_check) {
+  ASSERT_TRUE(
+      paddle::framework::compatible::PassVersionCheckerRegistrar::GetInstance()
+          .IsPassCompatible("depthwise_conv_mkldnn_pass"));
 }
 
 TEST(DepthwiseConvMKLDNNPass, basic) {

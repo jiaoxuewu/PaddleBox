@@ -17,12 +17,13 @@ from __future__ import print_function
 import tarfile
 import numpy as np
 import gzip
+import six
 
 from paddle.io import Dataset
 import paddle.compat as cpt
 from paddle.dataset.common import _check_exists_and_download
 
-__all__ = ['WMT14']
+__all__ = []
 
 URL_DEV_TEST = ('http://www-lium.univ-lemans.fr/~schwenk/'
                 'cslm_joint_paper/data/dev+test.tgz')
@@ -43,7 +44,7 @@ class WMT14(Dataset):
     Implementation of `WMT14 <http://www.statmt.org/wmt14/>`_ test dataset.
     The original WMT14 dataset is too large and a small set of data for set is
     provided. This module will download dataset from
-    http://paddlepaddle.bj.bcebos.com/demo/wmt_shrinked_data/wmt14.tgz
+    http://paddlemodels.bj.bcebos.com/wmt/wmt14.tgz .
 
     Args:
         data_file(str): path to data tar file, can be set None if
@@ -54,8 +55,10 @@ class WMT14(Dataset):
             :attr:`data_file` is not set. Default True
 
     Returns:
-        Dataset: instance of WMT14 dataset
-
+        Dataset: Instance of WMT14 dataset
+            - src_ids (np.array) - The sequence of token ids of source language.
+            - trg_ids (np.array) - The sequence of token ids of target language.
+            - trg_ids_next (np.array) - The next sequence of token ids of target language.
     Examples:
 
         .. code-block:: python
@@ -69,8 +72,6 @@ class WMT14(Dataset):
 
                 def forward(self, src_ids, trg_ids, trg_ids_next):
                     return paddle.sum(src_ids), paddle.sum(trg_ids), paddle.sum(trg_ids_next)
-
-            paddle.disable_static()
 
             wmt14 = WMT14(mode='train', dict_size=50)
 

@@ -19,7 +19,7 @@ https://github.com/caffe2/caffe2/blob/master/caffe2/operators/lstm_unit_op_gpu.c
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/cross_entropy_op.h"
 #include "paddle/fluid/operators/lstm_unit_op.h"
-#include "paddle/fluid/platform/hostdevice.h"
+#include "paddle/phi/core/hostdevice.h"
 
 namespace paddle {
 namespace operators {
@@ -93,8 +93,9 @@ template <typename T>
 class LstmUnitOpCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    PADDLE_ENFORCE(platform::is_gpu_place(ctx.GetPlace()),
-                   "It must use CUDAPlace.");
+    PADDLE_ENFORCE_EQ(
+        platform::is_gpu_place(ctx.GetPlace()), true,
+        paddle::platform::errors::PreconditionNotMet("It must use CUDAPlace."));
 
     auto* x_tensor = ctx.Input<framework::Tensor>("X");
     auto* c_prev_tensor = ctx.Input<framework::Tensor>("C_prev");
@@ -124,8 +125,9 @@ template <typename T>
 class LstmUnitGradOpCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    PADDLE_ENFORCE(platform::is_gpu_place(ctx.GetPlace()),
-                   "It must use CUDAPlace.");
+    PADDLE_ENFORCE_EQ(
+        platform::is_gpu_place(ctx.GetPlace()), true,
+        paddle::platform::errors::PreconditionNotMet("It must use CUDAPlace."));
 
     auto x_tensor = ctx.Input<Tensor>("X");
     auto c_prev_tensor = ctx.Input<Tensor>("C_prev");

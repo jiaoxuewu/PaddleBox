@@ -12,20 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <memory>
-#include <string>
-#include <unordered_set>
-#include <vector>
-
-#include "paddle/fluid/framework/ir/graph_viz_pass.h"
-#include "paddle/fluid/framework/ir/node.h"
 #include "paddle/fluid/framework/ir/transpose_flatten_concat_fuse_pass.h"
+#include "paddle/fluid/framework/op_version_registry.h"
 
 namespace paddle {
 namespace framework {
 namespace ir {
 
-void RunTransposeFlattenConcatFuse(ir::Graph *graph, int times) {
+TransposeFlattenConcatFusePass::TransposeFlattenConcatFusePass() {
+  AddOpCompat(OpCompat("transpose2"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddOutput("XShape")
+      .IsTensor()
+      .End()
+      .AddAttr("axis")
+      .IsType<std::vector<int>>()
+      .End();
+  AddOpCompat(OpCompat("flatten2"))
+      .AddInput("X")
+      .IsTensor()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddOutput("XShape")
+      .IsTensor()
+      .End()
+      .AddAttr("axis")
+      .IsNumGE(0)
+      .End();
+  AddOpCompat(OpCompat("concat"))
+      .AddInput("X")  // Input("X"): vector<tensors>
+      .End()
+      .AddInput("AxisTensor")
+      .IsTensor()
+      .IsOptional()
+      .End()
+      .AddOutput("Out")
+      .IsTensor()
+      .End()
+      .AddAttr("axis")
+      .IsIntIn({0, 1})
+      .End();
+}
+
+void TransposeFlattenConcatFusePass::RunTransposeFlattenConcatFuse(
+    ir::Graph *graph, int times) const {
   const std::string pattern_name =
       "transpose_flatten" + std::to_string(times) + "_concat_fuse";
 
@@ -43,13 +80,20 @@ void RunTransposeFlattenConcatFuse(ir::Graph *graph, int times) {
 
   auto handler = [&](const GraphPatternDetector::subgraph_t &subgraph,
                      Graph *g) {
+    if (!IsCompat(subgraph, g)) {
+      LOG(WARNING) << "Pass in op compat failed.";
+      return;
+    }
+
     const int kNumFields = 5;
     const int kTransOffset = 1;
     const int kTransOutOffset = 2;
     const int kFlattenOffset = 3;
     const int kFlattenOutOffset = 4;
-    std::vector<Node *> nodes;
 
+    std::vector<Node *> nodes;
+    std::vector<int> trans_axis0;
+    int flatten_axis0;
     for (int i = 0; i < times; i++) {
       PADDLE_ENFORCE_NOT_NULL(
           subgraph.at(pattern.GetPDNode("transpose" + std::to_string(i))),
@@ -70,6 +114,33 @@ void RunTransposeFlattenConcatFuse(ir::Graph *graph, int times) {
           subgraph.at(input_nodes[i]),
           platform::errors::NotFound("Can not find %s in subgraph.",
                                      input_nodes[i]->name()));
+
+      if (i == 0) {
+        trans_axis0 = BOOST_GET_CONST(
+            std::vector<int>,
+            subgraph.at(pattern.GetPDNode("transpose" + std::to_string(0)))
+                ->Op()
+                ->GetAttr("axis"));
+        flatten_axis0 = BOOST_GET_CONST(
+            int, subgraph.at(pattern.GetPDNode("flatten" + std::to_string(0)))
+                     ->Op()
+                     ->GetAttr("axis"));
+      } else {
+        std::vector<int> trans_axis = BOOST_GET_CONST(
+            std::vector<int>,
+            subgraph.at(pattern.GetPDNode("transpose" + std::to_string(i)))
+                ->Op()
+                ->GetAttr("axis"));
+        // All axis of transpose should be the same
+        if (trans_axis0 != trans_axis) return;
+
+        int flatten_axis = BOOST_GET_CONST(
+            int, subgraph.at(pattern.GetPDNode("flatten" + std::to_string(0)))
+                     ->Op()
+                     ->GetAttr("axis"));
+        // All axis of flatten should be the same
+        if (flatten_axis0 != flatten_axis) return;
+      }
 
       nodes.push_back(subgraph.at(input_nodes[i]));
       nodes.push_back(
@@ -145,3 +216,11 @@ void TransposeFlattenConcatFusePass::ApplyImpl(ir::Graph *graph) const {
 
 REGISTER_PASS(transpose_flatten_concat_fuse_pass,
               paddle::framework::ir::TransposeFlattenConcatFusePass);
+REGISTER_PASS_CAPABILITY(transpose_flatten_concat_fuse_pass)
+    .AddCombination(
+        paddle::framework::compatible::OpVersionComparatorCombination()
+            .EQ("transpose", 0)
+            .EQ("transpose2", 0)
+            .EQ("flatten", 0)
+            .EQ("concat", 0)
+            .EQ("fusion_transpose_flatten_concat", 0));

@@ -45,6 +45,7 @@ using reg32_t = const Xbyak::Reg32;
 using xmm_t = const Xbyak::Xmm;
 using ymm_t = const Xbyak::Ymm;
 using zmm_t = const Xbyak::Zmm;
+using opmask_t = const Xbyak::Opmask;
 using Label = Xbyak::Label;
 
 typedef enum {
@@ -98,7 +99,7 @@ class JitCode : public GenBase, public Xbyak::CodeGenerator {
     ret();
   }
   void L(const char* label) { Xbyak::CodeGenerator::L(label); }
-  void L(const Xbyak::Label& label) { Xbyak::CodeGenerator::L(label); }
+  void L(Xbyak::Label& label) { Xbyak::CodeGenerator::L(label); }  // NOLINT
   // Enhanced vector extension
   Xbyak::Address EVEX_compress_addr(Xbyak::Reg64 base, int offt,
                                     bool bcast = false) {

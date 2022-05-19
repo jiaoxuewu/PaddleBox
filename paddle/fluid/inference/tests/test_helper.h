@@ -21,10 +21,26 @@ limitations under the License. */
 
 #include "paddle/fluid/framework/lod_tensor.h"
 #include "paddle/fluid/inference/io.h"
-#include "paddle/fluid/platform/port.h"
+#include "paddle/fluid/platform/errors.h"
 #include "paddle/fluid/platform/profiler.h"
+#include "paddle/phi/backends/dynload/port.h"
 
 DECLARE_bool(use_mkldnn);
+
+namespace paddle {
+bool gpu_place_used(const paddle::PaddlePlace& place) {
+  return place == paddle::PaddlePlace::kGPU;
+}
+bool xpu_place_used(const paddle::PaddlePlace& place) {
+  return place == paddle::PaddlePlace::kXPU;
+}
+bool npu_place_used(const paddle::PaddlePlace& place) {
+  return place == paddle::PaddlePlace::kNPU;
+}
+bool cpu_place_used(const paddle::PaddlePlace& place) {
+  return place == paddle::PaddlePlace::kCPU;
+}
+}  // namespace paddle
 
 template <typename T>
 void SetupTensor(paddle::framework::LoDTensor* input,
@@ -42,7 +58,7 @@ void SetupTensor(paddle::framework::LoDTensor* input,
 template <typename T>
 void SetupTensor(paddle::framework::LoDTensor* input,
                  paddle::framework::DDim dims, const std::vector<T>& data) {
-  CHECK_EQ(paddle::framework::product(dims), static_cast<int64_t>(data.size()));
+  CHECK_EQ(phi::product(dims), static_cast<int64_t>(data.size()));
   T* input_ptr = input->mutable_data<T>(dims, paddle::platform::CPUPlace());
   memcpy(input_ptr, data.data(), input->numel() * sizeof(T));
 }
@@ -155,14 +171,15 @@ void TestInference(const std::string& dirname,
   if (paddle::platform::is_cpu_place(place)) {
     state = paddle::platform::ProfilerState::kCPU;
   } else {
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     state = paddle::platform::ProfilerState::kAll;
     // The default device_id of paddle::platform::CUDAPlace is 0.
     // Users can get the device_id using:
     //   int device_id = place.GetDeviceId();
     paddle::platform::SetDeviceId(0);
 #else
-    PADDLE_THROW("'CUDAPlace' is not supported in CPU only device.");
+    PADDLE_THROW(paddle::platform::errors::Unavailable(
+        "'CUDAPlace' is not supported in CPU only device."));
 #endif
   }
 

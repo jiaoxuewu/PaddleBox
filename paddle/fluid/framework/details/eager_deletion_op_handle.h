@@ -19,12 +19,24 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+
 #include "paddle/fluid/framework/details/op_handle_base.h"
 #include "paddle/fluid/framework/ir/memory_optimize_pass/reference_count_pass_helper.h"
 
 namespace paddle {
+namespace platform {
+class CUDADeviceContext;
+}  // namespace platform
+}  // namespace paddle
+
+namespace paddle {
 namespace framework {
+class GarbageCollector;
 class Scope;
+
+namespace ir {
+class Node;
+}  // namespace ir
 
 namespace ir {
 class MemOptVarInfo;
@@ -52,6 +64,8 @@ class EagerDeletionOpHandle : public OpHandleBase {
 
   size_t GetScopeIdx() const { return scope_idx_; }
 
+  std::vector<std::string> VarsToDelete() const;
+
  protected:
   void RunImpl() override;
 
@@ -70,9 +84,9 @@ class EagerDeletionOpHandle : public OpHandleBase {
   std::vector<ir::MemOptVarInfo *> var_infos_;  // not own
   GarbageCollector *gc_;                        // not own
   std::vector<Variable *> vars_;
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   platform::CUDADeviceContext *dev_ctx_{nullptr};
-  cudaEvent_t event_{nullptr};
+  gpuEvent_t event_{nullptr};
 #endif
 };
 

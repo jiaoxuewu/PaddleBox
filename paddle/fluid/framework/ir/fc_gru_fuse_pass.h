@@ -15,9 +15,9 @@
 #pragma once
 
 #include <string>
+
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/framework/ir/graph.h"
-#include "paddle/fluid/framework/ir/graph_pattern_detector.h"
 
 namespace paddle {
 namespace framework {
@@ -27,17 +27,20 @@ namespace ir {
 
 class FCGRUFusePass : public FusePassBase {
  public:
+  FCGRUFusePass();
   virtual ~FCGRUFusePass() {}
 
  protected:
   void ApplyImpl(ir::Graph* graph) const override;
-
   const std::string name_scope_{"fc_gru_fuse"};
+  int BuildFusion(Graph* graph, const std::string& name_scope, Scope* scope,
+                  bool with_fc_bias) const;
 };
 
 // Just FC without bias
-class MulGRUFusePass : public FusePassBase {
+class MulGRUFusePass : public FCGRUFusePass {
  public:
+  MulGRUFusePass();
   virtual ~MulGRUFusePass() {}
 
  protected:

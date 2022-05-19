@@ -11,43 +11,63 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
-#include <string.h>  // for strdup
-#include <algorithm>
+#include <csignal>
 #include <fstream>
-#include <iostream>
-#include <memory>
-#include <set>
-#include <stdexcept>
 #include <string>
 
-#include "paddle/fluid/framework/operator.h"
 #include "paddle/fluid/platform/cpu_helper.h"
 #include "paddle/fluid/platform/cpu_info.h"
+#include "paddle/fluid/platform/device/npu/npu_info.h"
 #include "paddle/fluid/string/split.h"
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 #include "paddle/fluid/platform/cuda_device_guard.h"
+#endif
+#ifdef PADDLE_WITH_CUDA
 #include "paddle/fluid/platform/dynload/cupti.h"
 #endif
+#include "paddle/fluid/platform/device/device_wrapper.h"
 #include "paddle/fluid/platform/device_context.h"
 #include "paddle/fluid/platform/init.h"
+#include "paddle/fluid/platform/os_info.h"
 #include "paddle/fluid/platform/place.h"
-#include "paddle/fluid/string/piece.h"
 
 #ifdef PADDLE_WITH_XPU
-#include "paddle/fluid/platform/xpu_header.h"
-#include "paddle/fluid/platform/xpu_info.h"
+#include "paddle/fluid/platform/device/xpu/xpu_header.h"
+#include "paddle/fluid/platform/device/xpu/xpu_info.h"
 #endif
 
+#ifdef PADDLE_WITH_MLU
+#include "paddle/fluid/platform/device/mlu/mlu_info.h"
+#endif
+
+#ifdef WITH_WIN_DUMP_DBG
+#include <stdio.h>
+#include <time.h>
+#ifndef NOMINMAX
+#define NOMINMAX  // msvc max/min macro conflict with std::min/max
+#endif
+#include <windows.h>
+
+#include "DbgHelp.h"
+#endif
+
+#ifdef PADDLE_WITH_IPU
+#include "paddle/fluid/platform/device/ipu/ipu_info.h"
+#endif
+
+#include "paddle/phi/core/custom_kernel.h"
+
 DECLARE_int32(paddle_num_threads);
-DEFINE_int32(multiple_of_cupti_buffer_size, 1,
-             "Multiple of the CUPTI device buffer size. If the timestamps have "
-             "been dropped when you are profiling, try increasing this value.");
+PADDLE_DEFINE_EXPORTED_int32(
+    multiple_of_cupti_buffer_size, 1,
+    "Multiple of the CUPTI device buffer size. If the timestamps have "
+    "been dropped when you are profiling, try increasing this value.");
 
 namespace paddle {
 namespace platform {
 
 void ParseCommandLineFlags(int argc, char **argv, bool remove) {
-  google::ParseCommandLineFlags(&argc, &argv, remove);
+  ::GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, remove);
 }
 
 }  // namespace platform
@@ -62,7 +82,7 @@ namespace framework {
 
 std::once_flag gflags_init_flag;
 std::once_flag glog_init_flag;
-std::once_flag p2p_init_flag;
+std::once_flag npu_init_flag;
 
 bool InitGflags(std::vector<std::string> args) {
   bool successed = false;
@@ -86,7 +106,7 @@ bool InitGflags(std::vector<std::string> args) {
             << ", Init commandline: " << line;
 
     char **arr = argv.data();
-    google::ParseCommandLineFlags(&argc, &arr, true);
+    ::GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &arr, true);
     successed = true;
 
     VLOG(1) << "After Parse: argc is " << argc;
@@ -94,29 +114,7 @@ bool InitGflags(std::vector<std::string> args) {
   return successed;
 }
 
-void InitP2P(std::vector<int> devices) {
 #ifdef PADDLE_WITH_CUDA
-  std::call_once(p2p_init_flag, [&]() {
-    int count = devices.size();
-    for (int i = 0; i < count; ++i) {
-      for (int j = 0; j < count; ++j) {
-        if (devices[i] == devices[j]) continue;
-        int can_acess = -1;
-        PADDLE_ENFORCE_CUDA_SUCCESS(
-            cudaDeviceCanAccessPeer(&can_acess, devices[i], devices[j]));
-        if (can_acess != 1) {
-          LOG(WARNING) << "Cannot enable P2P access from " << devices[i]
-                       << " to " << devices[j];
-        } else {
-          platform::CUDADeviceGuard guard(devices[i]);
-          cudaDeviceEnablePeerAccess(devices[j], 0);
-        }
-      }
-    }
-  });
-#endif
-}
-
 void InitCupti() {
 #ifdef PADDLE_WITH_CUPTI
   if (FLAGS_multiple_of_cupti_buffer_size == 1) return;
@@ -142,14 +140,38 @@ void InitCupti() {
 #undef MULTIPLY_ATTR_VALUE
 #endif
 }
+#endif
 
-void InitDevices(bool init_p2p) {
-  // CUPTI attribute should be set before any CUDA context is created (see CUPTI
-  // documentation about CUpti_ActivityAttribute).
+#ifdef PADDLE_WITH_CUSTOM_DEVICE
+void LoadCustomDevice(const std::string &library_dir) {
+  LOG(INFO) << "Try loading custom device libs from: [" << library_dir << "]";
+  std::vector<std::string> libs = phi::ListAllLibraries(library_dir);
+  for (const auto &lib_path : libs) {
+    auto dso_handle = dlopen(lib_path.c_str(), RTLD_NOW);
+    PADDLE_ENFORCE_NOT_NULL(
+        dso_handle,
+        platform::errors::InvalidArgument(
+            "Fail to open library: %s with error: %s", lib_path, dlerror()));
+
+    phi::LoadCustomRuntimeLib(lib_path, dso_handle);
+  }
+  phi::CustomKernelMap::Instance().RegisterCustomKernels();
+  LOG(INFO) << "Finished in LoadCustomDevice with libs_path: [" << library_dir
+            << "]";
+}
+#endif
+
+void InitDevices() {
+  // set name at the entry point of Paddle
+  platform::SetCurrentThreadName("MainThread");
+// CUPTI attribute should be set before any CUDA context is created (see CUPTI
+// documentation about CUpti_ActivityAttribute).
+#ifdef PADDLE_WITH_CUDA
   InitCupti();
+#endif
   /*Init all available devices by default */
   std::vector<int> devices;
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   try {
     // use user specified GPUs in single-node multi-process mode.
     devices = platform::GetSelectedDevices();
@@ -165,10 +187,38 @@ void InitDevices(bool init_p2p) {
     LOG(WARNING) << "Compiled with WITH_XPU, but no XPU found in runtime.";
   }
 #endif
-  InitDevices(init_p2p, devices);
+#ifdef PADDLE_WITH_ASCEND_CL
+  // NOTE(zhiqiu): use singleton to explicitly init and finalize ACL
+  platform::AclInstance::Instance();  // NOLINT
+  try {
+    // use user specified XPUs in single-node multi-process mode.
+    devices = platform::GetSelectedNPUDevices();
+  } catch (const std::exception &exp) {
+    LOG(WARNING)
+        << "Compiled with PADDLE_WITH_ASCEND_CL, but no NPU found in runtime.";
+  }
+#endif
+#ifdef PADDLE_WITH_IPU
+  try {
+    // use user specified IPUs.
+    devices = platform::GetSelectedIPUDevices();
+  } catch (const std::exception &exp) {
+    LOG(WARNING)
+        << "Compiled with PADDLE_WITH_IPU, but no IPU found in runtime.";
+  }
+#endif
+#ifdef PADDLE_WITH_MLU
+  try {
+    // use user specified MLUs in single-node multi-process mode.
+    devices = platform::GetMLUSelectedDevices();
+  } catch (const std::exception &exp) {
+    LOG(WARNING) << "Compiled with WITH_MLU, but no MLU found in runtime.";
+  }
+#endif
+  InitDevices(devices);
 }
 
-void InitDevices(bool init_p2p, const std::vector<int> devices) {
+void InitDevices(const std::vector<int> devices) {
   std::vector<platform::Place> places;
 
   for (size_t i = 0; i < devices.size(); ++i) {
@@ -179,19 +229,49 @@ void InitDevices(bool init_p2p, const std::vector<int> devices) {
       continue;
     }
 
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     places.emplace_back(platform::CUDAPlace(devices[i]));
 #endif
 #ifdef PADDLE_WITH_XPU
     places.emplace_back(platform::XPUPlace(devices[i]));
 #endif
-  }
-  if (init_p2p) {
-    InitP2P(devices);
+#ifdef PADDLE_WITH_IPU
+    places.emplace_back(platform::IPUPlace(devices[i]));
+#endif
+#ifdef PADDLE_WITH_ASCEND_CL
+    places.emplace_back(platform::NPUPlace(devices[i]));
+#endif
+#ifdef PADDLE_WITH_MLU
+    places.emplace_back(platform::MLUPlace(devices[i]));
+#endif
   }
   places.emplace_back(platform::CPUPlace());
-#ifdef PADDLE_WITH_CUDA
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   places.emplace_back(platform::CUDAPinnedPlace());
+#endif
+#ifdef PADDLE_WITH_CUSTOM_DEVICE
+  const char *custom_kernel_root_p = std::getenv("CUSTOM_DEVICE_ROOT");
+  if (!custom_kernel_root_p) {
+    VLOG(3) << "Env [CUSTOM_DEVICE_ROOT] is not set.";
+  } else {
+    std::string custom_kernel_root(custom_kernel_root_p);
+    if (!custom_kernel_root.empty()) {
+      LOG(INFO) << "ENV [CUSTOM_DEVICE_ROOT]=" << custom_kernel_root;
+      LoadCustomDevice(custom_kernel_root);
+
+      auto device_types = phi::DeviceManager::GetAllCustomDeviceTypes();
+      for (auto &dev_type : device_types) {
+        auto device_count = phi::DeviceManager::GetDeviceCount(dev_type);
+        LOG(INFO) << "CustomDevice: " << dev_type
+                  << ", visible devices count: " << device_count;
+        for (size_t i = 0; i < device_count; i++) {
+          places.push_back(platform::CustomPlace(dev_type, i));
+        }
+      }
+    } else {
+      VLOG(3) << "ENV [CUSTOM_DEVICE_ROOT] is empty.";
+    }
+  }
 #endif
   platform::DeviceContextPool::Init(places);
 
@@ -250,15 +330,16 @@ void InitDevices(bool init_p2p, const std::vector<int> devices) {
 // Description Quoted from
 // https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/signal.h.html
 const struct {
+  int signal_number;
   const char *name;
   const char *error_string;
 } SignalErrorStrings[] = {
-    {"SIGSEGV", "Segmentation fault"},
-    {"SIGILL", "Illegal instruction"},
-    {"SIGFPE", "Erroneous arithmetic operation"},
-    {"SIGABRT", "Process abort signal"},
-    {"SIGBUS", "Access to an undefined portion of a memory object"},
-    {"SIGTERM", "Termination signal"},
+    {SIGSEGV, "SIGSEGV", "Segmentation fault"},
+    {SIGILL, "SIGILL", "Illegal instruction"},
+    {SIGFPE, "SIGFPE", "Erroneous arithmetic operation"},
+    {SIGABRT, "SIGABRT", "Process abort signal"},
+    {SIGBUS, "SIGBUS", "Access to an undefined portion of a memory object"},
+    {SIGTERM, "SIGTERM", "Termination signal"},
 };
 
 bool StartsWith(const char *str, const char *prefix) {
@@ -286,7 +367,7 @@ void SignalHandle(const char *data, int size) {
     // NOTE2: we only deal with the time info ane signal info,
     //   the stack trace will generated by paddle self
     if (StartsWith(data, "*** Aborted at")) {
-      *signal_msg_dunmer_ptr << "  [TimeInfo: " << std::string(data, size - 1)
+      *signal_msg_dunmer_ptr << "\n  [TimeInfo: " << std::string(data, size - 1)
                              << "]\n";
     } else if (StartsWith(data, "***")) {
       std::string signal_info(data, size - 1);
@@ -294,14 +375,29 @@ void SignalHandle(const char *data, int size) {
       size_t start_pos = signal_info.rfind(useless_substr);
       signal_info.replace(start_pos, useless_substr.length(), "");
       *signal_msg_dunmer_ptr << "  [SignalInfo: " << signal_info << "]\n";
-      // NOTE3: Here does not throw an exception,
+
+      // NOTE3: Final singal error message print.
+      // Here does not throw an exception,
       // otherwise it will casue "terminate called recursively"
-      auto exp = platform::EnforceNotMet(
-          platform::errors::Fatal(
-              "A serious error (%s) is detected by the operating system.",
-              ParseSignalErrorString(signal_info)),
-          __FILE__, __LINE__);
-      std::cout << exp.what() << (*signal_msg_dunmer_ptr).str() << std::endl;
+      std::ostringstream sout;
+      sout << "\n\n--------------------------------------\n";
+      sout << "C++ Traceback (most recent call last):";
+      sout << "\n--------------------------------------\n";
+      auto traceback = platform::GetCurrentTraceBackString(/*for_signal=*/true);
+      if (traceback.empty()) {
+        sout
+            << "No stack trace in paddle, may be caused by external reasons.\n";
+      } else {
+        sout << traceback;
+      }
+
+      sout << "\n----------------------\nError Message "
+              "Summary:\n----------------------\n";
+      sout << platform::errors::Fatal(
+                  "`%s` is detected by the operating system.",
+                  ParseSignalErrorString(signal_info))
+                  .to_string();
+      std::cout << sout.str() << (*signal_msg_dunmer_ptr).str() << std::endl;
     }
   } catch (...) {
     // Since the program has already triggered a system error,
@@ -309,12 +405,69 @@ void SignalHandle(const char *data, int size) {
     // will Kill program by the default signal handler
   }
 }
+#endif  // _WIN32
+
+void DisableSignalHandler() {
+#ifndef _WIN32
+  for (size_t i = 0;
+       i < (sizeof(SignalErrorStrings) / sizeof(*(SignalErrorStrings))); ++i) {
+    int signal_number = SignalErrorStrings[i].signal_number;
+    struct sigaction sig_action;
+    memset(&sig_action, 0, sizeof(sig_action));
+    sigemptyset(&sig_action.sa_mask);
+    sig_action.sa_handler = SIG_DFL;
+    sigaction(signal_number, &sig_action, NULL);
+  }
+#endif
+}
+
+#ifdef WITH_WIN_DUMP_DBG
+typedef BOOL(WINAPI *MINIDUMP_WRITE_DUMP)(
+    IN HANDLE hProcess, IN DWORD ProcessId, IN HANDLE hFile,
+    IN MINIDUMP_TYPE DumpType,
+    IN CONST PMINIDUMP_EXCEPTION_INFORMATION ExceptionParam,
+    OPTIONAL IN PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
+    OPTIONAL IN PMINIDUMP_CALLBACK_INFORMATION CallbackParam OPTIONAL);
+void CreateDumpFile(LPCSTR lpstrDumpFilePathName,
+                    EXCEPTION_POINTERS *pException) {
+  HANDLE hDumpFile = CreateFile(lpstrDumpFilePathName, GENERIC_WRITE, 0, NULL,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  MINIDUMP_EXCEPTION_INFORMATION dumpInfo;
+  dumpInfo.ExceptionPointers = pException;
+  dumpInfo.ThreadId = GetCurrentThreadId();
+  dumpInfo.ClientPointers = TRUE;
+  MINIDUMP_WRITE_DUMP MiniDumpWriteDump_;
+  HMODULE hDbgHelp = LoadLibrary("DBGHELP.DLL");
+  MiniDumpWriteDump_ =
+      (MINIDUMP_WRITE_DUMP)GetProcAddress(hDbgHelp, "MiniDumpWriteDump");
+  MiniDumpWriteDump_(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile,
+                     MiniDumpWithPrivateReadWriteMemory, &dumpInfo, NULL, NULL);
+  CloseHandle(hDumpFile);
+}
+
+LONG ApplicationCrashHandler(EXCEPTION_POINTERS *pException) {
+  time_t time_seconds = time(0);
+  struct tm now_time;
+  localtime_s(&now_time, &time_seconds);
+
+  char buf[1024];
+  sprintf_s(buf, "C:\\Paddle%04d%02d%02d-%02d%02d%02d.dmp",
+            1900 + now_time.tm_year, 1 + now_time.tm_mon, now_time.tm_mday,
+            now_time.tm_hour, now_time.tm_min, now_time.tm_sec);
+
+  CreateDumpFile(buf, pException);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
 #endif
 
 void InitGLOG(const std::string &prog_name) {
   std::call_once(glog_init_flag, [&]() {
-    // glog will not hold the ARGV[0] inside.
-    // Use strdup to alloc a new string.
+// glog will not hold the ARGV[0] inside.
+// Use strdup to alloc a new string.
+#ifdef WITH_WIN_DUMP_DBG
+    SetUnhandledExceptionFilter(
+        (LPTOP_LEVEL_EXCEPTION_FILTER)ApplicationCrashHandler);
+#endif
     google::InitGoogleLogging(strdup(prog_name.c_str()));
 #ifndef _WIN32
     google::InstallFailureSignalHandler();

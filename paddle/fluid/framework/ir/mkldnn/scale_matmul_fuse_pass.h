@@ -20,8 +20,11 @@ namespace paddle {
 namespace framework {
 namespace ir {
 
+class Graph;
+
 class ScaleMatmulFusePass : public FusePassBase {
  public:
+  ScaleMatmulFusePass();
   virtual ~ScaleMatmulFusePass() {}
 
  protected:

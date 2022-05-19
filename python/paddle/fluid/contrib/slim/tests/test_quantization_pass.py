@@ -21,11 +21,14 @@ import six
 import paddle
 from paddle.fluid.framework import IrGraph
 from paddle.fluid.contrib.slim.quantization import QuantizationTransformPass
+from paddle.fluid.contrib.slim.quantization import QuantizationTransformPassV2
 from paddle.fluid.contrib.slim.quantization import QuantizationFreezePass
 from paddle.fluid.contrib.slim.quantization import ConvertToInt8Pass
 from paddle.fluid.contrib.slim.quantization import TransformForMobilePass
 from paddle.fluid.contrib.slim.quantization import AddQuantDequantPass
 from paddle.fluid import core
+
+paddle.enable_static()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["CPU_NUM"] = "1"
@@ -255,6 +258,7 @@ class TestQuantizationFreezePass(unittest.TestCase):
                      use_cuda,
                      seed,
                      activation_quant_type,
+                     bias_correction=False,
                      weight_quant_type='abs_max',
                      for_ci=True,
                      quant_skip_pattern='skip_quant'):
@@ -353,7 +357,8 @@ class TestQuantizationFreezePass(unittest.TestCase):
 
         # Freeze graph for inference, but the weight of fc/conv is still float type.
         freeze_pass = QuantizationFreezePass(
-            scope=scope, place=place, weight_quantize_type=weight_quant_type)
+            scope=scope, place=place, bias_correction=bias_correction, \
+            weight_quantize_type=weight_quant_type)
         freeze_pass.apply(test_graph)
         if not for_ci:
             marked_nodes = set()
@@ -474,6 +479,13 @@ class TestQuantizationFreezePass(unittest.TestCase):
                     True,
                     seed=1,
                     activation_quant_type='range_abs_max',
+                    bias_correction=True,
+                    weight_quant_type='abs_max',
+                    for_ci=True)
+                self.freeze_graph(
+                    True,
+                    seed=1,
+                    activation_quant_type='range_abs_max',
                     weight_quant_type='abs_max',
                     for_ci=True)
                 self.freeze_graph(
@@ -492,6 +504,13 @@ class TestQuantizationFreezePass(unittest.TestCase):
                     True,
                     seed=1,
                     activation_quant_type='moving_average_abs_max',
+                    weight_quant_type='channel_wise_abs_max',
+                    for_ci=True)
+                self.freeze_graph(
+                    True,
+                    seed=1,
+                    activation_quant_type='moving_average_abs_max',
+                    bias_correction=True,
                     weight_quant_type='channel_wise_abs_max',
                     for_ci=True)
 
@@ -660,12 +679,136 @@ class TestAddQuantDequantPass(unittest.TestCase):
         self.residual_block_quant(
             quantizable_op_type, skip_pattern='skip_quant', for_ci=True)
 
-    def test_residual_block_skip_pattern(self):
+    def test_residual_block_skip_pattern_1(self):
         quantizable_op_type = ['elementwise_add', 'pool2d', 'mul', 'matmul']
         self.residual_block_quant(
             quantizable_op_type,
             skip_pattern=['skip_quant1', 'skip_quant2'],
             for_ci=True)
+
+
+class TestQuantizationTransformPassV2(unittest.TestCase):
+    def setUp(self):
+        self.quantizable_op_and_inputs = {
+            'conv2d': ['Input', 'Filter'],
+            'depthwise_conv2d': ['Input', 'Filter'],
+            'mul': ['X', 'Y']
+        }
+        self.quantizable_grad_op_inputs = {
+            'conv2d_grad': ['Input', 'Filter'],
+            'depthwise_conv2d_grad': ['Input', 'Filter'],
+            'mul_grad': ['X', 'Y']
+        }
+
+    def check_program(self, program):
+        quantized_ops = set()
+        for block in program.blocks:
+            for op in block.ops:
+                # check forward
+                if op.type in self.quantizable_op_and_inputs:
+                    for arg_name in op.input_arg_names:
+                        self.assertTrue(
+                            arg_name.endswith('.quantized.dequantized'))
+                        quantized_ops.add(arg_name)
+
+            for op in block.ops:
+                # check backward
+                if op.type in self.quantizable_grad_op_inputs:
+                    for pname in self.quantizable_grad_op_inputs[op.type]:
+                        arg_name = op.input(pname)[0]
+                        self.assertTrue(
+                            arg_name.endswith('.quantized.dequantized'))
+                        self.assertTrue(arg_name in quantized_ops)
+
+    def linear_fc_quant(self,
+                        activation_quant_type,
+                        weight_quantize_type,
+                        for_ci=True):
+        main = fluid.Program()
+        startup = fluid.Program()
+        with fluid.program_guard(main, startup):
+            loss = linear_fc(3)
+            opt = fluid.optimizer.Adam(learning_rate=0.001)
+            opt.minimize(loss)
+        place = fluid.CPUPlace()
+        graph = IrGraph(core.Graph(main.desc), for_test=False)
+        transform_pass = QuantizationTransformPassV2(
+            scope=fluid.global_scope(),
+            place=place,
+            activation_quantize_type=activation_quant_type,
+            weight_quantize_type=weight_quantize_type)
+        transform_pass.apply(graph)
+        if not for_ci:
+            marked_nodes = set()
+            for op in graph.all_op_nodes():
+                if op.name().find('quantize') > -1:
+                    marked_nodes.add(op)
+            graph.draw('.', 'quantize_fc_' + activation_quant_type,
+                       marked_nodes)
+        program = graph.to_program()
+        self.check_program(program)
+        val_graph = IrGraph(core.Graph(program.desc), for_test=False)
+        if not for_ci:
+            val_marked_nodes = set()
+            for op in val_graph.all_op_nodes():
+                if op.name().find('quantize') > -1:
+                    val_marked_nodes.add(op)
+            val_graph.draw('.', 'val_fc_' + activation_quant_type,
+                           val_marked_nodes)
+
+    def test_linear_fc_quant_abs_max(self):
+        self.linear_fc_quant('abs_max', 'abs_max', for_ci=True)
+
+    def test_linear_fc_quant_channel_wise_abs_max(self):
+        self.linear_fc_quant('abs_max', 'channel_wise_abs_max', for_ci=True)
+
+    def residual_block_quant(self,
+                             activation_quant_type,
+                             weight_quantize_type,
+                             quantizable_op_type,
+                             for_ci=True):
+        main = fluid.Program()
+        startup = fluid.Program()
+        with fluid.program_guard(main, startup):
+            loss = residual_block(2)
+            opt = fluid.optimizer.Adam(learning_rate=0.001)
+            opt.minimize(loss)
+        place = fluid.CPUPlace()
+        graph = IrGraph(core.Graph(main.desc), for_test=False)
+        transform_pass = QuantizationTransformPass(
+            scope=fluid.global_scope(),
+            place=place,
+            activation_quantize_type=activation_quant_type,
+            weight_quantize_type=weight_quantize_type,
+            quantizable_op_type=quantizable_op_type)
+        transform_pass.apply(graph)
+        if not for_ci:
+            marked_nodes = set()
+            for op in graph.all_op_nodes():
+                if op.name().find('quantize') > -1:
+                    marked_nodes.add(op)
+            graph.draw('.', 'quantize_residual_' + activation_quant_type,
+                       marked_nodes)
+        program = graph.to_program()
+        self.check_program(program)
+        val_graph = IrGraph(core.Graph(program.desc), for_test=False)
+        if not for_ci:
+            val_marked_nodes = set()
+            for op in val_graph.all_op_nodes():
+                if op.name().find('quantize') > -1:
+                    val_marked_nodes.add(op)
+            val_graph.draw('.', 'val_residual_' + activation_quant_type,
+                           val_marked_nodes)
+
+    def test_residual_block_abs_max(self):
+        quantizable_op_type = ['conv2d', 'depthwise_conv2d', 'mul', 'matmul']
+        self.residual_block_quant(
+            'abs_max', 'abs_max', quantizable_op_type, for_ci=True)
+
+    def test_residual_block_channel_wise_abs_max(self):
+        quantizable_op_type = ['conv2d', 'depthwise_conv2d', 'mul', 'matmul']
+        self.residual_block_quant(
+            'abs_max', 'channel_wise_abs_max', quantizable_op_type, for_ci=True)
 
 
 if __name__ == '__main__':

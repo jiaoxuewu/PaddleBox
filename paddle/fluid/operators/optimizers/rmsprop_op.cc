@@ -12,7 +12,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
-#include "paddle/fluid/operators/optimizers/rmsprop_op.h"
+#include "paddle/fluid/framework/op_registry.h"
+
+#include "paddle/fluid/framework/infershape_utils.h"
+#include "paddle/phi/core/infermeta_utils.h"
+#include "paddle/phi/infermeta/multiary.h"
 
 namespace paddle {
 namespace operators {
@@ -20,57 +24,6 @@ namespace operators {
 class RmspropOp : public framework::OperatorWithKernel {
  public:
   using framework::OperatorWithKernel::OperatorWithKernel;
-
-  void InferShape(framework::InferShapeContext *ctx) const override {
-    PADDLE_ENFORCE(ctx->HasInput("Param"),
-                   "Input(Param) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasInput("MeanSquare"),
-                   "Input(MeanSquare) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasInput("LearningRate"),
-                   "Input(LearningRate) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasInput("Grad"),
-                   "Input(Grad) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasInput("Moment"),
-                   "Input(Moment) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(
-        ctx->GetInputsVarType("Param").front() ==
-            framework::proto::VarType::LOD_TENSOR,
-        "The input var's type should be LoDTensor, but the received is %s",
-        ctx->Inputs("Param").front(), ctx->GetInputsVarType("Param").front());
-
-    PADDLE_ENFORCE(ctx->HasOutput("ParamOut"),
-                   "Output(param_out) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasOutput("MomentOut"),
-                   "Output(MomentOut) of RmspropOp should not be null.");
-    PADDLE_ENFORCE(ctx->HasOutput("MeanSquareOut"),
-                   "Output(MeanSquareOut) of RmspropOp should not be null.");
-    if (ctx->Attrs().Get<bool>("centered")) {
-      PADDLE_ENFORCE(ctx->HasOutput("MeanGradOut"),
-                     "Output(MeanGradOut) of RmspropOp should not be null.");
-    }
-
-    auto param_dim = ctx->GetInputDim("Param");
-    PADDLE_ENFORCE_EQ(
-        param_dim, ctx->GetInputDim("Grad"),
-        "Param and grad input of RmspropOp should have the same dimension.");
-    PADDLE_ENFORCE_EQ(param_dim, ctx->GetInputDim("Moment"),
-                      "Param and Momentum input of RmspropOp "
-                      "should have the same dimension.");
-    PADDLE_ENFORCE_EQ(param_dim, ctx->GetInputDim("MeanSquare"),
-                      "Param and Momentum input of RmspropOp "
-                      "should have the same dimension.");
-
-    auto lr_dim = ctx->GetInputDim("LearningRate");
-    PADDLE_ENFORCE_EQ(framework::product(lr_dim), 1,
-                      "Learning Rate should be a scalar.");
-
-    ctx->SetOutputDim("ParamOut", param_dim);
-    ctx->SetOutputDim("MomentOut", param_dim);
-    ctx->SetOutputDim("MeanSquareOut", param_dim);
-    if (ctx->Attrs().Get<bool>("centered")) {
-      ctx->SetOutputDim("MeanGradOut", param_dim);
-    }
-  }
 };
 
 class RmspropOpMaker : public framework::OpProtoAndCheckerMaker {
@@ -141,6 +94,7 @@ http://www.cs.toronto.edu/~tijmen/csc321/slides/lecture_slides_lec6.pdf)
 }  // namespace paddle
 
 namespace ops = paddle::operators;
-REGISTER_OP_WITHOUT_GRADIENT(rmsprop, ops::RmspropOp, ops::RmspropOpMaker);
-REGISTER_OP_CPU_KERNEL(
-    rmsprop, ops::RmspropOpKernel<paddle::platform::CPUDeviceContext, float>);
+DECLARE_INFER_SHAPE_FUNCTOR(rmsprop, RmspropInferShapeFunctor,
+                            PD_INFER_META(phi::RmspropInferMeta));
+REGISTER_OP_WITHOUT_GRADIENT(rmsprop, ops::RmspropOp, ops::RmspropOpMaker,
+                             RmspropInferShapeFunctor);

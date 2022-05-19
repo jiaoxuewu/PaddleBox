@@ -16,7 +16,7 @@ from __future__ import print_function
 
 import unittest
 import numpy as np
-from op_test import OpTest
+from op_test import OpTest, convert_float_to_uint16
 import paddle.fluid.core as core
 import paddle.fluid as fluid
 from paddle.fluid import compiler, Program, program_guard
@@ -55,7 +55,8 @@ class TestSoftmaxOp(OpTest):
         self.op_type = "softmax"
         self.use_cudnn = False
         self.use_mkldnn = False
-        self.dtype = np.float64
+        # explicilty use float32 for ROCm, as MIOpen does not yet support float64
+        self.dtype = np.float32 if core.is_compiled_with_rocm() else np.float64
         self.init_kernel_type()
         self.shape = self.get_x_shape()
         self.axis = self.get_axis()
@@ -267,22 +268,11 @@ class TestSoftmaxFP16Op(TestSoftmaxOp):
         pass
 
 
-@unittest.skip('disable TestSoftmaxFP16Op2')
-class TestSoftmaxFP16Op2(TestSoftmaxOp):
-    def init_kernel_type(self):
-        self.dtype = np.float16
-
-    def test_check_output(self):
-        if core.is_compiled_with_cuda():
-            place = core.CUDAPlace(0)
-            if core.is_float16_supported(place):
-                self.check_output_with_place(place, atol=1e-3)
-
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestSoftmaxFP16Op2(TestSoftmaxFP16Op):
     def get_x_shape(self):
-        return [2, 3, 4, 5]
-
-    def test_check_grad(self):
-        pass
+        return [2, 3, 4, 10]
 
 
 @unittest.skipIf(not core.is_compiled_with_cuda(),
@@ -306,17 +296,71 @@ class TestSoftmaxFP16CUDNNOp2(TestSoftmaxFP16CUDNNOp):
         return [2, 3, 4, 5]
 
 
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestSoftmaxBF16Op(OpTest):
+    def setUp(self):
+        self.op_type = "softmax"
+        self.use_cudnn = self.init_cudnn()
+        self.use_mkldnn = False
+        self.dtype = np.uint16
+        self.shape = [10, 10]
+        self.axis = -1
+
+        np.random.seed(0)
+        x = np.random.uniform(0.1, 1, self.shape).astype(np.float32)
+        out = np.apply_along_axis(stable_softmax, self.axis, x)
+
+        self.inputs = {
+            'X': OpTest.np_dtype_to_fluid_dtype(convert_float_to_uint16(x))
+        }
+        self.outputs = {'Out': convert_float_to_uint16(out)}
+        self.attrs = {
+            'axis': self.axis,
+            'use_cudnn': self.use_cudnn,
+            'use_mkldnn': self.use_mkldnn
+        }
+
+    def init_cudnn(self):
+        return False
+
+    def test_check_output(self):
+        place = core.CUDAPlace(0)
+        self.check_output_with_place(
+            place, check_dygraph=(self.use_mkldnn == False))
+
+    def test_check_grad(self):
+        place = core.CUDAPlace(0)
+        self.check_grad_with_place(
+            place, ["X"],
+            "Out",
+            numeric_grad_delta=0.05,
+            check_dygraph=(self.use_mkldnn == False))
+
+
+@unittest.skipIf(
+    not core.is_compiled_with_cuda() or core.cudnn_version() < 8100,
+    "core is not compiled with CUDA and cudnn version need larger than 8.1.0")
+class TestSoftmaxBF16CUDNNOp(TestSoftmaxBF16Op):
+    def init_cudnn(self):
+        return True
+
+
 class TestSoftmaxAPI(unittest.TestCase):
     def setUp(self):
         self.place = paddle.CUDAPlace(0) if core.is_compiled_with_cuda(
         ) else paddle.CPUPlace()
         self.x_np = np.random.uniform(-1., 1., [2, 3, 4, 5]).astype('float32')
         self.out_ref = np.apply_along_axis(stable_softmax, -1, self.x_np)
+        self.executed_api()
+
+    def executed_api(self):
+        self.softmax = F.softmax
 
     def test_static_check(self):
         with paddle.static.program_guard(paddle.static.Program()):
-            x = paddle.data('X', self.x_np.shape, 'float32')
-            out1 = F.softmax(x)
+            x = paddle.fluid.data('X', self.x_np.shape, 'float32')
+            out1 = self.softmax(x)
             m = paddle.nn.Softmax()
             out2 = m(x)
             exe = paddle.static.Executor(self.place)
@@ -329,22 +373,29 @@ class TestSoftmaxAPI(unittest.TestCase):
         paddle.disable_static(self.place)
 
         x = paddle.to_tensor(self.x_np)
-        out1 = F.softmax(x)
+        out1 = self.softmax(x)
+        x = paddle.to_tensor(self.x_np)
         m = paddle.nn.Softmax()
         out2 = m(x)
         out_ref = ref_softmax(self.x_np, axis=-1, dtype=None)
         for r in [out1, out2]:
             self.assertEqual(np.allclose(out_ref, r.numpy()), True)
 
-        out1 = F.softmax(x, axis=0)
+        out1 = self.softmax(x, axis=0)
+        x = paddle.to_tensor(self.x_np)
         m = paddle.nn.Softmax(axis=0)
         out2 = m(x)
         out_ref = ref_softmax(self.x_np, axis=0, dtype=None)
         for r in [out1, out2]:
             self.assertEqual(np.allclose(out_ref, r.numpy()), True)
 
-        out = F.softmax(x, dtype=np.float64)
-        out_ref = ref_softmax(self.x_np, axis=-1, dtype=np.float64)
+        # explicilty use float32 for ROCm, as MIOpen does not yet support float64
+        if core.is_compiled_with_rocm():
+            out = self.softmax(x, dtype=np.float32)
+            out_ref = ref_softmax(self.x_np, axis=-1, dtype=np.float32)
+        else:
+            out = self.softmax(x, dtype=np.float64)
+            out_ref = ref_softmax(self.x_np, axis=-1, dtype=np.float64)
         self.assertEqual(np.allclose(out_ref, out.numpy()), True)
 
         paddle.enable_static()
@@ -352,13 +403,20 @@ class TestSoftmaxAPI(unittest.TestCase):
     def test_error(self):
         with paddle.static.program_guard(paddle.static.Program()):
             # The input type must be Variable.
-            self.assertRaises(TypeError, F.softmax, 1)
+            self.assertRaises(TypeError, self.softmax, 1)
             # The input dtype must be float16, float32, float64.
-            x_int32 = paddle.data(name='x_int32', shape=[2, 3], dtype='int32')
-            self.assertRaises(TypeError, F.softmax, x_int32)
+            x_int32 = paddle.fluid.data(
+                name='x_int32', shape=[2, 3], dtype='int32')
+            self.assertRaises(TypeError, self.softmax, x_int32)
             # support the input dtype is float16
-            x_fp16 = paddle.data(name='x_fp16', shape=[2, 3], dtype='float16')
-            F.softmax(x_fp16)
+            x_fp16 = paddle.fluid.data(
+                name='x_fp16', shape=[2, 3], dtype='float16')
+            self.softmax(x_fp16)
+
+
+class TestSoftmaxInplaceAPI(TestSoftmaxAPI):
+    def executed_api(self):
+        self.softmax = F.softmax_
 
 
 if __name__ == "__main__":
