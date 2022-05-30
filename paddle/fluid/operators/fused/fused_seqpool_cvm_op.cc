@@ -41,6 +41,7 @@ class FusedSeqpoolCVMOp : public framework::OperatorWithKernel {
     outs_dims.resize(num_inputs);
     bool use_cvm = ctx->Attrs().Get<bool>("use_cvm");
     bool clk_filter = ctx->Attrs().Get<bool>("clk_filter");
+    const int embed_thres_size = ctx->Attrs().Get<int>("embed_thres_size");
 
     // need filter quant_ratio more than zero
     if (ctx->Attrs().Get<bool>("need_filter")) {
@@ -84,7 +85,7 @@ class FusedSeqpoolCVMOp : public framework::OperatorWithKernel {
           out_dim = {-1, dims[rank - 1]};
         }
       } else {
-        out_dim = {-1, dims[rank - 1] - cvm_offset};
+        out_dim = {-1, dims[rank - 1] - cvm_offset - embed_thres_size};
       }
       outs_dims[i] = framework::make_ddim(out_dim);
     }
@@ -132,6 +133,7 @@ class FusedSeqpoolCVMOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<int>("cvm_offset", "(int, default 2)").SetDefault(2);
     AddAttr<int>("quant_ratio", "(int, default 128)").SetDefault(0);
     AddAttr<bool>("clk_filter", "(bool, default false)").SetDefault(false);
+    AddAttr<int>("embed_thres_size", "(int, default 0)").SetDefault(0);
 
     AddComment(R"DOC(
 Fuse multiple pairs of Sequence Pool and CVM Operator.
@@ -151,6 +153,7 @@ class FusedSeqpoolCVMGradOp : public framework::OperatorWithKernel {
     const int cvm_offset = ctx->Attrs().Get<int>("cvm_offset");
     bool use_cvm = ctx->Attrs().Get<bool>("use_cvm");
     bool clk_filter = ctx->Attrs().Get<bool>("clk_filter");
+    const int embed_thres_size = ctx->Attrs().Get<int>("embed_thres_size");
 
     PADDLE_ENFORCE_EQ(
         cvm_dims.size(), 2,
@@ -179,7 +182,7 @@ class FusedSeqpoolCVMGradOp : public framework::OperatorWithKernel {
       } else {
         PADDLE_ENFORCE_EQ(
             og_dims[i][og_dims[i].size() - 1],
-            x_dims[i][og_dims[i].size() - 1] - cvm_offset,
+            x_dims[i][og_dims[i].size() - 1] - cvm_offset - embed_thres_size,
             platform::errors::InvalidArgument(
                 "The dimension mismatch between Input(OUT@GRAD) and "
                 "Input(X). Received Input(OUT@GRAD): input rank %u, "

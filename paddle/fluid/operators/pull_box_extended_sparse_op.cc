@@ -58,7 +58,7 @@ class PullBoxExtendedSparseOp : public framework::OperatorWithKernel {
         outs_dims.push_back(framework::make_ddim(out_dim));
         auto out_extended_dim = framework::vectorize(
             framework::slice_ddim(ids_dims, 0, ids_rank - 1));
-        out_extended_dim.push_back(emb_extended_size);
+        out_extended_dim.push_back(emb_size + emb_extended_size);
         outs_extended_dims.push_back(framework::make_ddim(out_extended_dim));
       }
       ctx->SetOutputsDim("Out", outs_dims);
@@ -87,7 +87,7 @@ class PullBoxExtendedSparseOp : public framework::OperatorWithKernel {
         if (flags[i] & 0x02) {
           auto out_extended_dim = framework::vectorize(
               framework::slice_ddim(ids_dims, 0, ids_rank - 1));
-          out_extended_dim.push_back(emb_extended_size);
+          out_extended_dim.push_back(emb_size + emb_extended_size);
           outs_extended_dims.push_back(framework::make_ddim(out_extended_dim));
         }
       }
