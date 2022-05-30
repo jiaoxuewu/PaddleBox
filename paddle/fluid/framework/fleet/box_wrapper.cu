@@ -175,6 +175,15 @@ __global__ void PullCopyBaseNNCross(
         dest_ptr[k] = src_ptr[k + skip_offset];
       }
     }
+
+    if (dest[x + slot_num] != 0) {
+      float* dest_ptr = dest[x + slot_num] + y * (hidden + expand_dim);
+      const float* src_ptr = reinterpret_cast<const float*>(&src_val.show);
+      for (int k = 0; k < cvm_offset; ++k) {
+        dest_ptr[k] = src_ptr[k];
+      }
+    }
+
     // embedx flags + expand flags   && *(keys[x] + y) != 0  && *(keys[x] + y)
     // != 0
     total_dims[i] = static_cast<int>(src_val.embedding_size > 0) +
@@ -205,16 +214,28 @@ __global__ void PullCopyExpandNNCross(
       } else {
         *(dest[x] + offset) = 0;
       }
+
+      if (dest[x + slot_num] == 0) {
+        return;
+      }
+      int offset_2 = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
+      if (total_dims[idx] & 0x02) {
+        *(dest[x + slot_num] + offset_2) = src_val.embedx[col] * scale;
+      } else {
+        *(dest[x + slot_num] + offset_2) = 0;
+      }
     } else {  // expand
       if (dest[x + slot_num] == 0) {
         return;
       }
-      int j = col - embedx_dim;
+      int offset = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
       if (total_dims[idx] & 0x02) {
-        *(dest[x + slot_num] + y * expand_dim + j) =
-            src_val.embed_expand[j] * scale;
+        *(dest[x + slot_num] + offset) =
+            src_val.embed_expand[col - embedx_dim] * scale;
       } else {
-        *(dest[x + slot_num] + y * expand_dim + j) = 0;
+        *(dest[x + slot_num] + offset) = 0;
       }
     }
   }  // end kernel loop
@@ -237,6 +258,15 @@ __global__ void PullDedupCopyBaseNNCross(
         dest_ptr[k] = src_ptr[k + skip_offset];
       }
     }
+
+    if (dest[x + slot_num] != 0) {
+      float* dest_ptr = dest[x + slot_num] + y * (hidden + expand_dim);
+      const float* src_ptr = reinterpret_cast<const float*>(&src_val.show);
+      for (int k = 0; k < cvm_offset; ++k) {
+        dest_ptr[k] = src_ptr[k];
+      }
+    }
+
     // embedx flags + expand flags   && *(keys[x] + y) != 0  && *(keys[x] + y)
     // != 0
     total_dims[i] = static_cast<int>(src_val.embedding_size > 0) +
@@ -268,16 +298,28 @@ __global__ void PullDedupCopyExpandNNCross(
       } else {
         *(dest[x] + offset) = 0;
       }
+
+      if (dest[x + slot_num] == 0) {
+        return;
+      }
+      int offset_2 = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
+      if (total_dims[idx] & 0x02) {
+        *(dest[x + slot_num] + offset_2) = src_val.embedx[col] * scale;
+      } else {
+        *(dest[x + slot_num] + offset_2) = 0;
+      }
     } else {  // expand
       if (dest[x + slot_num] == 0) {
         return;
       }
-      int j = col - embedx_dim;
+      int offset = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
       if (total_dims[idx] & 0x02) {
-        *(dest[x + slot_num] + y * expand_dim + j) =
-            src_val.embed_expand[j] * scale;
+        *(dest[x + slot_num] + offset) =
+            src_val.embed_expand[col - embedx_dim] * scale;
       } else {
-        *(dest[x + slot_num] + y * expand_dim + j) = 0;
+        *(dest[x + slot_num] + offset) = 0;
       }
     }
   }  // end kernel loop
@@ -739,12 +781,13 @@ __global__ void PushCopyExpandNNCross(
         dest_val.embedx_g[col] = 0;
       }
     } else {  // expand
-      int j = col - embedx_dim;
+      int offset = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
       if ((total_dims[idx] & 0x02) && src[x + slot_num] != 0) {
-        dest_val.embed_expand_g[j] =
-            *(src[x + slot_num] + y * expand_dim + j) * -1. * bs;
+        dest_val.embed_expand_g[col - embedx_dim] =
+            *(src[x + slot_num] + offset) * -1. * bs;
       } else {
-        dest_val.embed_expand_g[j] = 0;
+        dest_val.embed_expand_g[col - embedx_dim] = 0;
       }
     }
   }
@@ -832,17 +875,18 @@ __global__ void PushMergeCopyExpandNNCross(
       }
       dest_val.embedx_g[col] = val * -1. * bs;
     } else {                   // expand
-      col = col - embedx_dim;  // embedx + expand dim length
+      int offset = y * (embedx_dim + cvm_offset + expand_dim)
+                    + cvm_offset + col;
       double val = 0.0;
       for (uint32_t j = 0; j < count; ++j) {
         const uint32_t& pos = d_sort_idx[start + j];
         const int& x = key2slot[pos];
         if ((total_dims[pos] & 0x02) && src[x + slot_num] != 0) {
           y = pos - slot_lens[x];
-          val += *(src[x + slot_num] + y * expand_dim + col);
+          val += *(src[x + slot_num] + offset);
         }
       }
-      dest_val.embed_expand_g[col] = val * -1 * bs;
+      dest_val.embed_expand_g[col - embedx_dim] = val * -1 * bs;
     }
   }
 }
