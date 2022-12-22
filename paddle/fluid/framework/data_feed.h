@@ -839,10 +839,12 @@ struct SlotRecordObject {
     slot_uint64_feasigns_.clear(shrink);
     slot_float_feasigns_.clear(shrink);
   }
-  void debug(void) {
-    VLOG(0) << "ins:" << ins_id_
-            << ", uint64:" << slot_uint64_feasigns_.slot_values.size()
-            << ", float:" << slot_float_feasigns_.slot_values.size();
+  std::string debug(void) {
+    char szbuf[1024] = {0};
+    snprintf(szbuf, sizeof(szbuf), "ins: %s, uint64: %lu , float: %lu",
+             ins_id_.c_str(), slot_uint64_feasigns_.slot_values.size(),
+             slot_float_feasigns_.slot_values.size());
+    return szbuf;
   }
 };
 using SlotRecord = SlotRecordObject*;
@@ -1764,13 +1766,12 @@ paddle::framework::Archive<AR>& operator<<(paddle::framework::Archive<AR>& ar,
   ar << value_len;
   if (value_len > 0) {
     ar.Write(&r.slot_values[0], value_len * sizeof(T));
-
-    uint16_t slot_num = static_cast<uint16_t>(r.slot_offsets.size());
-    ar << slot_num;
-    if (slot_num > 2) {
-      // remove first 0 and end data len
-      ar.Write(&r.slot_offsets[1], (slot_num - 2) * sizeof(uint32_t));
-    }
+  }
+  uint16_t slot_num = static_cast<uint16_t>(r.slot_offsets.size());
+  ar << slot_num;
+  if (slot_num > 2) {
+    // remove first 0 and end data len
+    ar.Write(&r.slot_offsets[1], (slot_num - 2) * sizeof(uint32_t));
   }
   return ar;
 }
@@ -1782,12 +1783,11 @@ paddle::framework::Archive<AR>& operator>>(paddle::framework::Archive<AR>& ar,
   if (value_len > 0) {
     r.slot_values.resize(value_len);
     ar.Read(&r.slot_values[0], value_len * sizeof(T));
-
-    uint16_t slot_num = 0;
-    ar >> slot_num;
-    r.slot_offsets.resize(slot_num);
-    // fill first 0
-    r.slot_offsets[0] = 0;
+  }
+  uint16_t slot_num = 0;
+  ar >> slot_num;
+  if (slot_num > 0) {
+    r.slot_offsets.resize(slot_num, 0);
     if (slot_num > 2) {
       ar.Read(&r.slot_offsets[1], (slot_num - 2) * sizeof(uint32_t));
     }

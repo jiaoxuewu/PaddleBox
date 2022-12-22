@@ -297,6 +297,7 @@ void BoxPSAsynDenseTable::InitThreadGroup() {
 
 static const int DenseKStepNode = 1;
 static const int DenseKStepALL = 2;
+static const int DenseDataNormal = 3;
 void BoxPSWorker::Initialize(const TrainerDesc& desc) {
   dev_ctx_ = platform::DeviceContextPool::Instance().Get(place_);
   node_size_ = boxps::MPICluster::Ins().size();
@@ -313,23 +314,32 @@ int BoxPSWorker::CheckNeedParam(VarDesc* var) {
   }
 
   std::string name = var->Name();
-  size_t len = name.length();
-  const char* ext = name.c_str() + len - 4;
-  // .w_0  .b_0
-  if (strncmp(ext, ".w_0", 4) == 0 || strncmp(ext, ".b_0", 4) == 0) {
-    return 1;
-  }
-  if (FLAGS_enable_sync_dense_moment) {
-    if (len < 14) {
-      return 0;
+  if (sync_mode_ == DenseDataNormal) {
+    // data normal param
+    if (name.find(".batch_size") != std::string::npos ||
+        name.find(".batch_sum") != std::string::npos ||
+        name.find(".batch_square_sum") != std::string::npos) {
+      return 3;
     }
-    ext = name.c_str() + len - 14;
-    // .w_0_moment1_0  .b_0_moment2_0
-    if (strncmp(ext, ".w_0_moment1_0", 14) == 0 ||
-        strncmp(ext, ".w_0_moment2_0", 14) == 0 ||
-        strncmp(ext, ".b_0_moment1_0", 14) == 0 ||
-        strncmp(ext, ".b_0_moment2_0", 14) == 0) {
-      return 2;
+  } else {
+    size_t len = name.length();
+    const char* ext = name.c_str() + len - 4;
+    // .w_0  .b_0
+    if (strncmp(ext, ".w_0", 4) == 0 || strncmp(ext, ".b_0", 4) == 0) {
+      return 1;
+    }
+    if (FLAGS_enable_sync_dense_moment) {
+      if (len < 14) {
+        return 0;
+      }
+      ext = name.c_str() + len - 14;
+      // .w_0_moment1_0  .b_0_moment2_0
+      if (strncmp(ext, ".w_0_moment1_0", 14) == 0 ||
+          strncmp(ext, ".w_0_moment2_0", 14) == 0 ||
+          strncmp(ext, ".b_0_moment1_0", 14) == 0 ||
+          strncmp(ext, ".b_0_moment2_0", 14) == 0) {
+        return 2;
+      }
     }
   }
   return 0;
@@ -351,18 +361,17 @@ int64_t BoxPSWorker::AllocParamTensor(int64_t* pad_len) {
     }
     const LoDTensor& root_tensor = root_scope_->FindVar(name)->Get<LoDTensor>();
     int64_t numel = root_tensor.numel();
-    if (flag == 1) {
-      total_param_len += numel;
-      //        grad_params->insert(std::make_pair(name + "@GRAD", numel));
-    } else {
+    if (flag == 2) {  // moment
       total_moment_len += numel;
+    } else {
+      total_param_len += numel;
     }
-    //    VLOG(0) << "param name:" << name;
+    VLOG(1) << "param name:" << name << ", length:" << numel;
   }
 
   *pad_len = 0;
   int64_t all_sync_param_len = total_param_len + total_moment_len;
-  if (sync_mode_ == DenseKStepNode || (node_size_ > 1 && !one_ring_)) {
+  if ((node_size_ > 1 && !one_ring_)) {
     if ((all_sync_param_len % device_num_) != 0) {
       *pad_len = (device_num_ - (all_sync_param_len % device_num_));
       all_sync_param_len += *pad_len;
@@ -479,7 +488,8 @@ void BoxPSWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
   }
 }
 void BoxPSWorker::SyncParam(void) {
-  if (sync_mode_ == DenseKStepNode && node_size_ == 1) {
+  if (param_sync_.numel() == 0 ||
+      sync_mode_ == DenseKStepNode && node_size_ == 1) {
     return;
   }
 
@@ -494,9 +504,7 @@ void BoxPSWorker::SyncParam(void) {
   int64_t numel = param_sync_.numel();
   float* sendbuff = param_sync_.data<float>();
 
-  if (sync_mode_ == DenseKStepNode ||
-      (node_size_ > 1 && sync_mode_ == DenseKStepALL &&
-       !one_ring_)) {  // KStep Node
+  if ((node_size_ > 1 && !one_ring_)) {  // KStep Node
     int part_param_len = numel / device_num_;
     float* recv_ptr = &sendbuff[device_id_ * part_param_len];
 
@@ -509,10 +517,9 @@ void BoxPSWorker::SyncParam(void) {
     PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::ncclGroupEnd());
     PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::ncclAllGather(
         recv_ptr, sendbuff, part_param_len, ncclFloat32, comm->comm(), stream));
-  } else if (sync_mode_ == DenseKStepALL) {  // KStep ALL
+  } else {
     PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::ncclAllReduce(
         sendbuff, sendbuff, numel, ncclFloat32, ncclSum, comm->comm(), stream));
-  } else {
   }
   const float scale = 1.0 / (device_num_ * node_size_);
   TensorScaleValue(place_, param_sync_, &param_sync_, scale);
@@ -566,7 +573,7 @@ void BoxPSWorker::TrainFiles() {
 
     if (dense_table_) {
       dense_table_->PushDense(place_, &grad_async_);
-    } else if (sync_mode_ == DenseKStepNode || sync_mode_ == DenseKStepALL) {
+    } else if (sync_mode_ > 0) {
       if (step > param_sync_step_) {
         step = 0;
         SyncParam();
@@ -586,7 +593,7 @@ void BoxPSWorker::TrainFiles() {
     ++step;
   }
   // sync param step
-  if (sync_mode_ == DenseKStepNode || sync_mode_ == DenseKStepALL) {
+  if (sync_mode_ > 0) {
     SyncParam();
   }
   dev_ctx_->Wait();

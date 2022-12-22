@@ -433,6 +433,7 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   void CheckDownThreadPool(void);
   void DumpIntoDisk(const Channel<SlotRecord>& in, const std::string& path,
                     const int pass_num);
+  std::function<uint64_t(const SlotRecord&)> general_shuffle_func(void);
 
  protected:
   Channel<SlotRecord> shuffle_channel_ = nullptr;

@@ -1666,20 +1666,12 @@ void PadBoxSlotDataset::DumpIntoDisk(const Channel<SlotRecord>& in,
       platform::Timer timer;
       size_t num = 0;
       int fileid = 0;
+      auto idx_func = general_shuffle_func();
       std::vector<SlotRecord> datas;
       while ((num = in->ReadOnce(datas, OBJPOOL_BLOCK_SIZE)) > 0) {
         timer.Resume();
         for (auto& rec : datas) {
-          if (enable_pv_merge_ ||
-              FLAGS_enable_shuffle_by_searchid) {  // shuffle by pv
-            fileid = (rec->search_id / mpi_size_) % file_num;
-          } else if (merge_by_insid_) {  // shuffle by lineid
-            fileid = (XXH64(rec->ins_id_.data(), rec->ins_id_.length(), 0) /
-                      mpi_size_) %
-                     file_num;
-          } else {  // shuffle
-            fileid = (BoxWrapper::LocalRandomEngine()() / mpi_size_) % file_num;
-          }
+          fileid = (idx_func(rec) / mpi_size_) % file_num;
           // save to file
           CHECK(binary_files_[fileid]->write(rec));
         }
@@ -1912,6 +1904,23 @@ class ShuffleResultWaitGroup : public boxps::ResultCallback {
   std::condition_variable cond_;
   int counter_ = 0;
 };
+std::function<uint64_t(const SlotRecord&)>
+PadBoxSlotDataset::general_shuffle_func(void) {
+  if (enable_pv_merge_ || FLAGS_enable_shuffle_by_searchid) {  // shuffle by pv
+    return [this](const SlotRecord& t) { return t->search_id; };
+  }
+  if (merge_by_insid_) {  // shuffle by lineid
+    return [this](const SlotRecord& t) {
+      PADDLE_ENFORCE(t->ins_id_.length() >= 32,
+                     "log key need equal or more than 32, ins_id: [%s]",
+                     t->ins_id_.c_str());
+      return XXH64(t->ins_id_.data(), 32, 0);
+    };
+  }
+  return [this](const SlotRecord& /**t*/) {
+    return BoxWrapper::LocalRandomEngine()();
+  };
+}
 // shuffle data
 void PadBoxSlotDataset::ShuffleData(int thread_num) {
   CHECK_GT(thread_num, 0);
@@ -1927,20 +1936,15 @@ void PadBoxSlotDataset::ShuffleData(int thread_num) {
       std::vector<paddle::framework::BinaryArchive> ars(mpi_size_);
       PadBoxSlotDataConsumer* handler =
           reinterpret_cast<PadBoxSlotDataConsumer*>(data_consumer_);
+
+      // get hash function
+      auto idx_func = general_shuffle_func();
+
       ShuffleResultWaitGroup wg;
       while (input_channel_->Read(data)) {
         timer.Resume();
         for (auto& t : data) {
-          int client_id = 0;
-          if (enable_pv_merge_ ||
-              FLAGS_enable_shuffle_by_searchid) {  // shuffle by pv
-            client_id = t->search_id % mpi_size_;
-          } else if (merge_by_insid_) {  // shuffle by lineid
-            client_id =
-                XXH64(t->ins_id_.data(), t->ins_id_.length(), 0) % mpi_size_;
-          } else {  // shuffle
-            client_id = BoxWrapper::LocalRandomEngine()() % mpi_size_;
-          }
+          int client_id = idx_func(t) % mpi_size_;
           if (client_id == mpi_rank_) {
             loc_datas.push_back(std::move(t));
             continue;
