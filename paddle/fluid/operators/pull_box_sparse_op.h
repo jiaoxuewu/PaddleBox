@@ -33,11 +33,14 @@ static void PaddingZeros(const framework::ExecutionContext &ctx,
                          int hidden_size) {
   // set data
   data->Resize({1, hidden_size});
-  data->mutable_data<T>(ctx.GetPlace());
-
-  auto &dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
-  math::set_constant(dev_ctx, data, 0);
-
+  auto place = ctx.GetPlace();
+  T *value_ptr = data->mutable_data<T>(place);
+  if (platform::is_cpu_place(place)) {
+    memset(value_ptr, 0, sizeof(T) * hidden_size);
+  } else {
+    auto &dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
+    math::set_constant(dev_ctx, data, 0);
+  }
   //  auto data_eigen = framework::EigenVector<T>::Flatten(*data);
   //  auto &place = *ctx.template device_context<platform::CUDADeviceContext>()
   //                     .eigen_device();

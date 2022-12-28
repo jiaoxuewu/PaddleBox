@@ -99,7 +99,7 @@ void BindBoxWrapper(py::module* m) {
       .def("flip_phase", &framework::BoxWrapper::FlipPhase,
            py::call_guard<py::gil_scoped_release>())
       .def("set_phase", &framework::BoxWrapper::SetPhase,
-                    py::call_guard<py::gil_scoped_release>())
+           py::call_guard<py::gil_scoped_release>())
       .def("init_afs_api", &framework::BoxWrapper::InitAfsAPI,
            py::call_guard<py::gil_scoped_release>())
       .def("finalize", &framework::BoxWrapper::Finalize,
@@ -117,6 +117,8 @@ void BindBoxWrapper(py::module* m) {
       .def("shrink_resource", &framework::BoxWrapper::ShrinkResource,
            py::call_guard<py::gil_scoped_release>())
       .def("merge_model", &framework::BoxWrapper::MergeModel,
+           py::call_guard<py::gil_scoped_release>())
+      .def("print_device_info", &framework::BoxWrapper::PrintDeviceInfo,
            py::call_guard<py::gil_scoped_release>());
 }  // end BoxWrapper
 void BindBoxFileMgr(py::module* m) {

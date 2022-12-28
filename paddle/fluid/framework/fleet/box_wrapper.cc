@@ -85,7 +85,8 @@ void BasicAucCalculator::add_unlock_data(double pred, int label,
   _table[label][pos] += sample_scale;
 }
 
-void BasicAucCalculator::add_unlock_data_with_float_label(double pred, double label) {
+void BasicAucCalculator::add_unlock_data_with_float_label(double pred,
+                                                          double label) {
   PADDLE_ENFORCE_GE(pred, 0.0, platform::errors::PreconditionNotMet(
                                    "pred should be greater than 0"));
   PADDLE_ENFORCE_LE(pred, 1.0, platform::errors::PreconditionNotMet(
@@ -180,10 +181,9 @@ void BasicAucCalculator::add_mask_data(const float* d_pred,
 }
 
 // add float mask data
-void BasicAucCalculator::add_float_mask_data(const float* d_pred,
-                                             const float* d_label,
-                                             const int64_t* d_mask, int batch_size,
-                                             const paddle::platform::Place& place) {
+void BasicAucCalculator::add_float_mask_data(
+    const float* d_pred, const float* d_label, const int64_t* d_mask,
+    int batch_size, const paddle::platform::Place& place) {
   if (_mode_collect_in_gpu) {
     cuda_add_float_mask_data(place, d_label, d_pred, d_mask, batch_size);
   } else {
@@ -422,52 +422,12 @@ void BasicAucCalculator::compute() {
   calculate_bucket_error();
 }
 
-void BoxWrapper::CheckEmbedSizeIsValid(int embedx_dim, int expand_embed_dim) {
-  if (feature_type_ == static_cast<int>(boxps::FEATURE_SHARE_EMBEDDING)) {
-    PADDLE_ENFORCE_EQ((embedx_dim % expand_embed_dim), 0,
-                      platform::errors::InvalidArgument(
-                          "SetInstance(): invalid embedx_dim. "
-                          "embedx_dim % expand_embed_dim shoule be 0"));
-
-    embedx_dim = embedx_dim / expand_embed_dim;
-  } else if (feature_type_ == static_cast<int>(boxps::FEATURE_TRADE_MERGE)) {
-    PADDLE_ENFORCE_GE(embedx_dim, expand_embed_dim,
-                      platform::errors::InvalidArgument(
-                          "SetInstance(): invalid dim. When "
-                          "embedx_dim > expand_embed_dim, but got %d %d.",
-                          embedx_dim, expand_embed_dim));
-    embedx_dim = embedx_dim - expand_embed_dim;
-  } else if (feature_type_ == static_cast<int>(boxps::FEATURE_VARIABLE)) {
-    PADDLE_ENFORCE_EQ(expand_embed_dim_, (expand_embed_dim - cvm_offset_),
-                      platform::errors::InvalidArgument(
-                          "SetInstance(): invalid expand_embed_dim. When "
-                          "expand_embed_dim = %d, but got %d.",
-                          expand_embed_dim_, expand_embed_dim));
-  } else {
-    PADDLE_ENFORCE_EQ(expand_embed_dim_, expand_embed_dim,
-                      platform::errors::InvalidArgument(
-                          "SetInstance(): invalid expand_embed_dim. When "
-                          "expand_embed_dim = %d, but got %d.",
-                          expand_embed_dim_, expand_embed_dim));
-  }
-  // skip embedx dim zero
-  if (embedx_dim_ > 0) {
-    PADDLE_ENFORCE_EQ(
-        embedx_dim_, embedx_dim,
-        platform::errors::InvalidArgument("SetInstance(): invalid embedx_dim. "
-                                          "When embedx_dim = %d, but got %d.",
-                                          embedx_dim_, embedx_dim));
-  }
-}
-
 void BoxWrapper::PullSparse(const paddle::platform::Place& place,
                             const std::vector<const uint64_t*>& keys,
                             const std::vector<float*>& values,
                             const std::vector<int64_t>& slot_lengths,
                             const int hidden_size, const int expand_embed_dim,
                             const int skip_offset, bool expand_only) {
-  CheckEmbedSizeIsValid(hidden_size + skip_offset - cvm_offset_,
-                        expand_embed_dim);
   PullSparseCase(place, keys, values, slot_lengths, hidden_size,
                  expand_embed_dim, skip_offset, expand_only);
 }
@@ -480,8 +440,6 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
                                 const int expand_embed_dim,
                                 const int batch_size, const int skip_offset,
                                 bool expand_only) {
-  CheckEmbedSizeIsValid(hidden_size + skip_offset - cvm_offset_,
-                        expand_embed_dim);
   PushSparseGradCase(place, keys, grad_values, slot_lengths, hidden_size,
                      expand_embed_dim, batch_size, skip_offset, expand_only);
 }
@@ -1027,9 +985,9 @@ class MultiMaskMetricMsg : public MetricMsg {
 class FloatMaskMetricMsg : public MetricMsg {
  public:
   FloatMaskMetricMsg(const std::string& label_varname,
-                const std::string& pred_varname, int metric_phase,
-                const std::string& mask_varname, int bucket_size = 1000000,
-                bool mode_collect_in_gpu = false, int max_batch_size = 0) {
+                     const std::string& pred_varname, int metric_phase,
+                     const std::string& mask_varname, int bucket_size = 1000000,
+                     bool mode_collect_in_gpu = false, int max_batch_size = 0) {
     label_varname_ = label_varname;
     pred_varname_ = pred_varname;
     mask_varname_ = mask_varname;
@@ -1056,7 +1014,8 @@ class FloatMaskMetricMsg : public MetricMsg {
                           "the predict data length should be consistent with "
                           "the label data length"));
     auto cal = GetCalculator();
-    cal->add_float_mask_data(pred_data, label_data, mask_data, label_len, place);
+    cal->add_float_mask_data(pred_data, label_data, mask_data, label_len,
+                             place);
   }
 
  protected:
@@ -1224,12 +1183,13 @@ void BoxWrapper::InitMetric(const std::string& method, const std::string& name,
   } else if (method == "FloatMaskAucCalculator") {
     metric_lists_.emplace(
         name, new FloatMaskMetricMsg(label_varname, pred_varname, metric_phase,
-                                     mask_varname, bucket_size, mode_collect_in_gpu,
-                                     max_batch_size));
+                                     mask_varname, bucket_size,
+                                     mode_collect_in_gpu, max_batch_size));
   } else {
     PADDLE_THROW(platform::errors::Unimplemented(
         "PaddleBox only support AucCalculator, MultiTaskAucCalculator, "
-        "CmatchRankAucCalculator, MaskAucCalculator, FloatMaskAucCalculator and "
+        "CmatchRankAucCalculator, MaskAucCalculator, FloatMaskAucCalculator "
+        "and "
         "CmatchRankMaskAucCalculator"));
   }
   metric_name_list_.emplace_back(name);
@@ -1266,6 +1226,7 @@ void BoxWrapper::PrintSyncTimer(int device, double train_span) {
                << ", dedup span: " << dev.pull_dedup_timer.ElapsedSec()
                << ", boxps span: " << dev.boxps_pull_timer.ElapsedSec()
                << ", push span: " << dev.all_push_timer.ElapsedSec()
+               << ", copy span:" << dev.copy_push_timer.ElapsedSec()
                << ", boxps span:" << dev.boxps_push_timer.ElapsedSec()
                << ", dense nccl:" << dev.dense_nccl_timer.ElapsedSec()
                << ", sync stream:" << dev.dense_sync_timer.ElapsedSec()
@@ -1398,7 +1359,7 @@ void BoxWrapper::Finalize() {
     psagents_.clear();
   }
   if (device_caches_ != nullptr) {
-    delete device_caches_;
+    delete[] device_caches_;
     device_caches_ = nullptr;
   }
   s_instance_ = nullptr;

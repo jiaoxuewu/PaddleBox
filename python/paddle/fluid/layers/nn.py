@@ -192,6 +192,7 @@ __all__ = [
     'uniform_random',
     'unbind',
     'mask_mean',
+    'alias_method',
 ]
 
 
@@ -15253,4 +15254,112 @@ def unbind(input, axis=0):
         inputs={"X": input},
         outputs={"Out": outs},
         attrs={"axis": axis})
+    return outs
+
+
+def alias_method(weight, num, no_ids):
+    """
+    Alias method sampling
+
+    Example:
+        .. code-block:: python
+            import os
+            import numpy as np
+
+            import paddle
+            paddle.enable_static()
+
+            from paddle.fluid.layers.nn import alias_method
+
+            print('test alias method')
+            place = paddle.CUDAPlace(0)
+            exe = paddle.static.Executor(place)
+
+            sample_num = 100
+            sample_neg_rate = 0.5
+            sample_pos_num = 5
+
+            weight = np.random.dirichlet(np.ones(sample_num),size=1)[0]
+            noids = paddle.static.data(name='noids', shape=[-1], dtype='float32')
+
+            output = alias_method(weight, int(sample_num*sample_neg_rate), noids)
+            paddle.static.Print(output, summarize=-1, message='alias_method output')
+
+            exe.run(paddle.static.default_startup_program())
+
+            if not os.path.exists('pbtxt'):
+                os.makedirs('pbtxt')
+            with open("pbtxt/start_prog.pb", "w") as fout:
+                print >> fout, paddle.static.default_startup_program()
+            with open("pbtxt/main_prog.pb", "w") as fout:
+                print >> fout, paddle.static.default_main_program()
+
+            feed_noids = np.random.randint(sample_num, size=sample_pos_num).astype(np.float32)
+            res, = exe.run(paddle.static.default_main_program(),
+                        feed={'noids':feed_noids},
+                        fetch_list=[output])
+
+            print('res: ', res)
+    """
+    helper = LayerHelper('alias_method', **locals())
+
+    #
+    N = len(weight)
+    accept, alias = [0] * N, [0] * N
+    small, large = [], []
+    weight_ = np.array(weight) * N
+
+    for i, prob in enumerate(weight_):
+        if prob < 1.0:
+            small.append(i)
+        else:
+            large.append(i)
+
+    while small and large:
+        small_idx, large_idx = small.pop(), large.pop()
+        accept[small_idx] = weight_[small_idx]
+        alias[small_idx] = large_idx
+        weight_[large_idx] = weight_[large_idx] - \
+            (1 - weight_[small_idx])
+        if weight_[large_idx] < 1.0:
+            small.append(large_idx)
+        else:
+            large.append(large_idx)
+
+    while large:
+        large_idx = large.pop()
+        accept[large_idx] = 1
+    while small:
+        small_idx = small.pop()
+        accept[small_idx] = 1
+
+    #
+    accept_var = helper.create_global_variable(
+        persistable=True,
+        dtype='float32',
+        shape=[N],
+        name='accept',
+        stop_gradient=True)
+    helper.set_variable_initializer(
+        accept_var, initializer=NumpyArrayInitializer(value=np.array(accept)))
+
+    alias_var = helper.create_global_variable(
+        persistable=True,
+        dtype='float32',
+        shape=[N],
+        name='alias',
+        stop_gradient=True)
+    helper.set_variable_initializer(
+        alias_var, initializer=NumpyArrayInitializer(value=np.array(alias)))
+
+    outs = helper.create_variable_for_type_inference(dtype=no_ids.dtype)
+
+    helper.append_op(
+        type="alias_method",
+        inputs={"Accept": accept_var,
+                "Alias": alias_var,
+                "Noids": no_ids},
+        outputs={"Out": outs},
+        attrs={"Num": num})
+
     return outs

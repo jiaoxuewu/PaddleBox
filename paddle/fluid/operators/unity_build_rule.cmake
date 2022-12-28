@@ -188,6 +188,7 @@ register_unity_group(cc
     psroi_pool_op.cc
     pull_box_extended_sparse_op.cc
     pull_box_sparse_op.cc
+    alias_method_op.cc
     pull_sparse_op.cc
     pull_sparse_v2_op.cc)
 register_unity_group(cc
@@ -424,7 +425,8 @@ register_unity_group(cu
     prelu_op.cu
     prroi_pool_op.cu
     pull_box_extended_sparse_op.cu
-    pull_box_sparse_op.cu)
+    pull_box_sparse_op.cu
+    alias_method_op.cu)
 register_unity_group(cu
     randint_op.cu
     random_crop_op.cu
