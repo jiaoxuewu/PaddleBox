@@ -756,13 +756,16 @@ class BoxWrapper {
                   const std::string& mask_varname,
                   int metric_phase,
                   const std::string& cmatch_rank_group,
+                  const std::string& uid_varname,
                   bool ignore_rank,
                   int bucket_size = 1000000,
                   bool mode_collect_in_gpu = false,
                   int max_batch_size = 0,
-                  const std::string& sample_scale_varname = "");
+                  const std::string& sample_scale_varname = "",
+                  double pkg_ins_threshold=0);
   const std::vector<double> GetMetricMsg(const std::string& name);
   const std::vector<double> GetContinueMetricMsg(const std::string& name);
+  const std::vector<double> GetWuAucMetricMsg(const std::string& name);
   // pcoc qvalue tensor
   LoDTensor& GetQTensor(int device) { return device_caches_[device].qvalue; }
   void PrintSyncTimer(int device, double train_span);

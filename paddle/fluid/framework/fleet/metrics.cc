@@ -239,9 +239,10 @@ void BasicAucCalculator::add_continue_mask_data(
   }
 }
 
-void BasicAucCalculator::init(int table_size, int max_batch_size) {
+void BasicAucCalculator::init(int table_size, int max_batch_size, double pkg_ins_threshold) {
   set_table_size(table_size);
   set_max_batch_size(max_batch_size);
+  set_pkg_ins_threshold(pkg_ins_threshold);
   // init CPU memory
   for (int i = 0; i < 2; i++) {
     _table[i] = std::vector<double>();
@@ -378,6 +379,9 @@ void BasicAucCalculator::reset_records() {
   _size = 0;
   _uauc = 0;
   _wuauc = 0;
+  _ucopc = 0;
+  _wucopc = 0;
+  _filter_ins = 0;
 }
 
 // add uid data
@@ -411,6 +415,41 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
     }
   }
 }
+void BasicAucCalculator::add_uid_mask_data(const float* d_pred,
+                                      const int64_t* d_label,
+                                      const int64_t* d_uid,
+                                      const int64_t* d_mask,
+                                      int batch_size,
+                                      const paddle::platform::Place& place) {
+  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
+    thread_local std::vector<float> h_pred;
+    thread_local std::vector<int64_t> h_label;
+    thread_local std::vector<uint64_t> h_uid;
+    thread_local std::vector<int64_t> h_mask;
+    h_pred.resize(batch_size);
+    h_label.resize(batch_size);
+    h_uid.resize(batch_size);
+    h_mask.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size);
+    SyncCopyD2H(h_mask.data(), d_mask, batch_size);
+    SyncCopyD2H(h_uid.data(), reinterpret_cast<const uint64_t *>(d_uid), batch_size);
+
+    std::lock_guard<std::mutex> lock(_table_mutex);
+    for (int i = 0; i < batch_size; ++i) {
+      if(h_mask[i])
+        add_uid_unlock_data(h_pred[i], h_label[i],
+            static_cast<uint64_t>(h_uid[i]));
+    }
+  } else {
+    std::lock_guard<std::mutex> lock(_table_mutex);
+    for (int i = 0; i < batch_size; ++i) {
+      if(d_mask[i])
+        add_uid_unlock_data(d_pred[i], d_label[i],
+            static_cast<uint64_t>(d_uid[i]));
+    }
+  }
+}
 
 void BasicAucCalculator::add_uid_unlock_data(double pred,
                                              int label,
@@ -437,6 +476,7 @@ void BasicAucCalculator::add_uid_unlock_data(double pred,
 }
 
 void BasicAucCalculator::computeWuAuc() {
+  // LOG(INFO) << "==========compute WuAuc==========="
   std::sort(wuauc_records_.begin(),
             wuauc_records_.end(),
             [](const WuaucRecord& lhs, const WuaucRecord& rhs) {
@@ -465,6 +505,10 @@ void BasicAucCalculator::computeWuAuc() {
         _size += ins_num;
         _uauc += roc_data.auc_;
         _wuauc += roc_data.auc_ * ins_num;
+        _ucopc += roc_data.copc_;
+        _wucopc += roc_data.copc_ * ins_num;
+      } else {
+        _filter_ins += (roc_data.tp_ + roc_data.fp_);
       }
 
       prev_uid = wuauc_records_[i].uid_;
@@ -481,11 +525,15 @@ void BasicAucCalculator::computeWuAuc() {
     _size += ins_num;
     _uauc += roc_data.auc_;
     _wuauc += roc_data.auc_ * ins_num;
+    _ucopc += roc_data.copc_;
+    _wucopc += roc_data.copc_ * ins_num;
   }
 }
 
+
 BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
     const std::vector<WuaucRecord>& records) {
+  // LOG(INFO) << "=========compute single user auc=========" <<"\n";
   double tp = 0.0;
   double fp = 0.0;
   double newtp = 0.0;
@@ -493,8 +541,10 @@ BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
   double area = 0.0;
   double auc = -1;
   size_t i = 0;
-
+  double upred = 0;
+  double caln = 0;
   while (i < records.size()) {
+    upred += records[i].pred_;
     newtp = tp;
     newfp = fp;
     if (records[i].label_ == 1) {
@@ -504,6 +554,7 @@ BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
     }
     // check i+1
     while (i < records.size() - 1 && records[i].pred_ == records[i + 1].pred_) {
+      upred += records[i].pred_;
       if (records[i + 1].label_ == 1) {
         newtp += 1;
       } else {
@@ -516,12 +567,15 @@ BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
     fp = newfp;
     i += 1;
   }
-  if (tp > 0 && fp > 0) {
+  if (tp > 0 && fp > 0 && upred > 0.0 && (tp + fp) >= _pkg_ins_threshold) {
     auc = area / (fp * tp + 1e-9);
+    double actr = tp / (fp + tp + 1e-10);
+    double pctr = upred / (fp + tp + 1e-10);
+    caln = abs(actr/ (pctr + 1e-10) - 1.0);
   } else {
     auc = -1;
   }
-  return {tp, fp, auc};
+  return {tp, fp, auc, caln};
 }
 
 void BasicAucCalculator::computeContinueMsg() {

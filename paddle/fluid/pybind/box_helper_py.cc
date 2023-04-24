@@ -106,17 +106,22 @@ void BindBoxWrapper(py::module* m) {
            py::arg("mask_varname"),
            py::arg("metric_phase"),
            py::arg("cmatch_rank_group"),
+           py::arg("uid_varname"),
            py::arg("ignore_rank"),
            py::arg("bucket_size") = 1000000,
            py::arg("mode_collect_in_gpu") = false,
            py::arg("max_batch_size") = 0,
            py::arg("sample_scale_varnam") = "",
+           py::arg("pkg_ins_threshold")=0,
            py::call_guard<py::gil_scoped_release>())
       .def("get_metric_msg",
            &framework::BoxWrapper::GetMetricMsg,
            py::call_guard<py::gil_scoped_release>())
       .def("get_continue_metric_msg",
            &framework::BoxWrapper::GetContinueMetricMsg,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_wuauc_metric_msg",
+           &framework::BoxWrapper::GetWuAucMetricMsg,
            py::call_guard<py::gil_scoped_release>())
       .def("get_metric_name_list",
            &framework::BoxWrapper::GetMetricNameList,

@@ -666,6 +666,98 @@ class FloatMaskMetricMsg : public MetricMsg {
   std::string mask_varname_;
 };
 
+class WuAucMetricMsg : public MetricMsg {
+  public:
+  WuAucMetricMsg(const std::string& label_varname,
+                  const std::string& pred_varname,
+                  const std::string& uid_varname,
+                  int metric_phase,
+                  bool mode_collect_in_gpu = false,
+                  int bucket_size = 1000000,
+                  int max_batch_size = 0,
+                  double pkg_ins_threshold=0) {
+    label_varname_ = label_varname;
+    pred_varname_ = pred_varname;
+    uid_varname_ = uid_varname;
+    metric_phase_ = metric_phase;
+    calculator = new BasicAucCalculator(mode_collect_in_gpu);
+    calculator->init(bucket_size, max_batch_size, pkg_ins_threshold);
+  }
+  virtual ~WuAucMetricMsg() {}
+  void add_data(const Scope* exe_scope,
+                const paddle::platform::Place& place) override {
+    int label_len = 0;
+    const int64_t* label_data = NULL;
+    get_data<int64_t>(exe_scope, label_varname_, &label_data, &label_len);
+
+    int pred_len = 0;
+    const float* pred_data = NULL;
+    get_data<float>(exe_scope, pred_varname_, &pred_data, &pred_len);
+
+    int uid_len = 0;
+    const int64_t* uid_data = NULL;
+    get_data<int64_t>(exe_scope, uid_varname_, &uid_data, &uid_len);
+    PADDLE_ENFORCE_EQ(label_len,
+                      uid_len,
+                      platform::errors::PreconditionNotMet(
+                          "the predict data length should be consistent with "
+                          "the label data length"));
+    auto cal = GetCalculator();
+    cal->add_uid_data(pred_data, label_data, uid_data, label_len, place);
+  }
+
+  protected:
+  std::string uid_varname_;
+};
+class WuAucMaskMetricMsg : public MetricMsg {
+  public:
+  WuAucMaskMetricMsg(const std::string& label_varname,
+                  const std::string& pred_varname,
+                  const std::string& uid_varname,
+                  const std::string& mask_varname,
+                  int metric_phase,
+                  bool mode_collect_in_gpu = false,
+                  int bucket_size = 0,
+                  int max_batch_size = 0,
+                  double pkg_ins_threshold=0) {
+    label_varname_ = label_varname;
+    pred_varname_ = pred_varname;
+    uid_varname_ = uid_varname;
+    metric_phase_ = metric_phase;
+    mask_varname_ = mask_varname;
+    calculator = new BasicAucCalculator(mode_collect_in_gpu);
+    calculator->init(bucket_size, max_batch_size, pkg_ins_threshold);
+  }
+  virtual ~WuAucMaskMetricMsg() {}
+  void add_data(const Scope* exe_scope,
+                const paddle::platform::Place& place) override {
+    int label_len = 0;
+    const int64_t* label_data = NULL;
+    get_data<int64_t>(exe_scope, label_varname_, &label_data, &label_len);
+
+    int pred_len = 0;
+    const float* pred_data = NULL;
+    get_data<float>(exe_scope, pred_varname_, &pred_data, &pred_len);
+
+    int uid_len = 0;
+    const int64_t* uid_data = NULL;
+    get_data<int64_t>(exe_scope, uid_varname_, &uid_data, &uid_len);
+    int mask_len = 0;
+    const int64_t* mask_data = NULL;
+    get_data<int64_t>(exe_scope, mask_varname_, &mask_data, &mask_len);
+    PADDLE_ENFORCE_EQ(label_len,
+                      uid_len,
+                      platform::errors::PreconditionNotMet(
+                          "the predict data length should be consistent with "
+                          "the label data length"));
+    auto cal = GetCalculator();
+    cal->add_uid_mask_data(pred_data, label_data, uid_data, mask_data, label_len, place);
+  }
+
+  protected:
+  std::string uid_varname_;
+  std::string mask_varname_;
+};
 class ContinueMaskMetricMsg : public MetricMsg {
  public:
   ContinueMaskMetricMsg(const std::string& label_varname,
@@ -845,11 +937,13 @@ void BoxWrapper::InitMetric(const std::string& method,
                             const std::string& mask_varname,
                             int metric_phase,
                             const std::string& cmatch_rank_group,
+                            const std::string& uid_varname,
                             bool ignore_rank,
                             int bucket_size,
                             bool mode_collect_in_gpu,
                             int max_batch_size,
-                            const std::string& sample_scale_varname) {
+                            const std::string& sample_scale_varname,
+                            double pkg_ins_threshold) {
   if (method == "AucCalculator") {
     metric_lists_.emplace(name,
                           new MetricMsg(label_varname,
@@ -923,11 +1017,34 @@ void BoxWrapper::InitMetric(const std::string& method,
                                                     bucket_size,
                                                     mode_collect_in_gpu,
                                                     max_batch_size));
+  } else if (method == "FieledCalculator"){
+    metric_lists_.emplace(name,
+                      new WuAucMetricMsg(label_varname,
+                                                pred_varname,
+                                                uid_varname,
+                                                metric_phase,
+                                                mode_collect_in_gpu,
+                                                bucket_size,
+                                                max_batch_size,
+                                                pkg_ins_threshold));
+  } else if (method == "FieldMaskCalculator"){
+    metric_lists_.emplace(name,
+                      new WuAucMaskMetricMsg(label_varname,
+                                                pred_varname,
+                                                uid_varname,
+                                                mask_varname,
+                                                metric_phase,
+                                                mode_collect_in_gpu,
+                                                bucket_size,
+                                                max_batch_size,
+                                                pkg_ins_threshold));
   } else {
     PADDLE_THROW(platform::errors::Unimplemented(
         "PaddleBox only support AucCalculator, MultiTaskAucCalculator, "
         "CmatchRankAucCalculator, MaskAucCalculator, "
         "ContinueMaskCalculator, "
+        "FieledCalculator,"
+        "FieldMaskCalculator,"
         "FloatMaskAucCalculator and CmatchRankMaskAucCalculator"));
   }
   metric_name_list_.emplace_back(name);
@@ -972,7 +1089,61 @@ const std::vector<double> BoxWrapper::GetContinueMetricMsg(
   continue_cal_->reset();
   return metric_return_values_;
 }
-
+  const std::vector<double> BoxWrapper::GetWuAucMetricMsg(const std::string& name) {
+    const auto iter = metric_lists_.find(name);
+    PADDLE_ENFORCE_NE(iter,
+                      metric_lists_.end(),
+                      platform::errors::InvalidArgument(
+                          "The metric name you provided is not registered."));
+    VLOG(0) << "begin GetWuAucMetricMsg";
+    std::vector<double> metric_return_values_(11, 0.0);
+    auto* auc_cal_ = iter->second->GetCalculator();
+    auc_cal_->computeWuAuc();
+    metric_return_values_[0] = auc_cal_->user_cnt();
+    metric_return_values_[1] = auc_cal_->size();
+    metric_return_values_[2] = auc_cal_->uauc();
+    metric_return_values_[3] = auc_cal_->wuauc();
+    metric_return_values_[4] =
+        metric_return_values_[2] / (metric_return_values_[0] + 1e-10);
+    metric_return_values_[5] =
+        metric_return_values_[3] / (metric_return_values_[1] + 1e-10);
+    metric_return_values_[6] = auc_cal_->ucopc();
+    metric_return_values_[7] = auc_cal_->wucopc();
+    
+    metric_return_values_[8] =
+       metric_return_values_[6] / (metric_return_values_[0] + 1e-10);
+    metric_return_values_[9] =
+        metric_return_values_[7]/ (metric_return_values_[1] + 1e-10);
+    metric_return_values_[10] = auc_cal_->error_ins();
+#if defined(PADDLE_WITH_GLOO)
+    auto gloo_wrapper = paddle::framework::GlooWrapper::GetInstance();
+    if (gloo_wrapper->Size() > 1) {
+      auto global_metric_return_values_ =
+          gloo_wrapper->AllReduce(metric_return_values_, "sum");
+      global_metric_return_values_[4] =
+          global_metric_return_values_[2] /
+          (global_metric_return_values_[0] + 1e-10);
+      global_metric_return_values_[5] =
+          global_metric_return_values_[3] /
+          (global_metric_return_values_[1] + 1e-10);
+      global_metric_return_values_[8] =
+          global_metric_return_values_[6] /
+          (global_metric_return_values_[0] + 1e-10);
+      global_metric_return_values_[9] =
+          global_metric_return_values_[7] /
+          (global_metric_return_values_[1] + 1e-10);
+      
+      auc_cal_->reset_records();
+      return global_metric_return_values_;
+    } else {
+      auc_cal_->reset_records();
+      return metric_return_values_;
+    }
+#else
+    auc_cal_->reset_records();
+    return metric_return_values_;
+#endif
+  }
 void BoxWrapper::PrintSyncTimer(int device, double train_span) {
   auto& dev = device_caches_[device];
 #if defined(PADDLE_WITH_CUDA)

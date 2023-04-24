@@ -54,9 +54,10 @@ class BasicAucCalculator {
     double tp_;
     double fp_;
     double auc_;
+    double copc_;
   };
   explicit BasicAucCalculator(bool mode_collect_in_gpu = false) {}
-  void init(int table_size, int max_batch_size = 0);
+  void init(int table_size, int max_batch_size = 0, double pkg_ins_threshold=0);
   void reset();
   // add single data in CPU with LOCK, deprecated
   void add_unlock_data(double pred, int label);
@@ -98,6 +99,12 @@ class BasicAucCalculator {
                     const int64_t* d_uid,
                     int batch_size,
                     const paddle::platform::Place& place);
+  void add_uid_mask_data(const float* d_pred,
+                  const int64_t* d_label,
+                  const int64_t* d_uid,
+                  const int64_t* d_mask,
+                  int batch_size,
+                  const paddle::platform::Place& place);
   void compute();
   void computeContinueMsg();
   int table_size() const { return _table_size; }
@@ -127,8 +134,10 @@ class BasicAucCalculator {
   double uauc() const { return _uauc; }
   double wuauc() const { return _wuauc; }
   double user_cnt() const { return _user_cnt; }
+  double ucopc() const {return _ucopc; }
+  double wucopc() const {return _wucopc;}
   double size() const { return _size; }
-
+  int64_t error_ins() const {return _filter_ins;}
  private:
   void cuda_add_data(const paddle::platform::Place& place,
                      const int64_t* label,
@@ -160,6 +169,10 @@ class BasicAucCalculator {
   double _user_cnt = 0;
   double _uauc = 0;
   double _wuauc = 0;
+  double _ucopc = 0;
+  double _wucopc = 0;
+  int64_t _filter_ins = 0;
+  double _pkg_ins_threshold = 0; 
   std::vector<WuaucRecord> wuauc_records_;
 
  private:
@@ -167,6 +180,7 @@ class BasicAucCalculator {
   void set_max_batch_size(int max_batch_size) {
     _max_batch_size = max_batch_size;
   }
+  void set_pkg_ins_threshold(double th) {_pkg_ins_threshold = th;}
   void collect_data_nccl();
   void copy_data_d2h(int device);
   int _table_size = 0;
@@ -760,7 +774,7 @@ class Metric {
                       platform::errors::InvalidArgument(
                           "The metric name you provided is not registered."));
     VLOG(0) << "begin GetWuAucMetricMsg";
-    std::vector<float> metric_return_values_(6, 0.0);
+    std::vector<float> metric_return_values_(10, 0.0);
     auto* auc_cal_ = iter->second->GetCalculator();
     auc_cal_->computeWuAuc();
     metric_return_values_[0] = auc_cal_->user_cnt();
@@ -771,7 +785,14 @@ class Metric {
         metric_return_values_[2] / (metric_return_values_[0] + 1e-10);
     metric_return_values_[5] =
         metric_return_values_[3] / (metric_return_values_[1] + 1e-10);
-
+    metric_return_values_[6] = auc_cal_->ucopc();
+    metric_return_values_[7] = auc_cal_->wucopc();
+    
+    metric_return_values_[8] =
+       metric_return_values_[6] / (metric_return_values_[0] + 1e-10);
+    metric_return_values_[9] =
+        metric_return_values_[7]/ (metric_return_values_[1] + 1e-10);
+    
 #if defined(PADDLE_WITH_GLOO)
     auto gloo_wrapper = paddle::framework::GlooWrapper::GetInstance();
     if (gloo_wrapper->Size() > 1) {
@@ -783,6 +804,13 @@ class Metric {
       global_metric_return_values_[5] =
           global_metric_return_values_[3] /
           (global_metric_return_values_[1] + 1e-10);
+      global_metric_return_values_[8] =
+          global_metric_return_values_[6] /
+          (global_metric_return_values_[0] + 1e-10);
+      global_metric_return_values_[9] =
+          global_metric_return_values_[7] /
+          (global_metric_return_values_[1] + 1e-10);
+      
       auc_cal_->reset_records();
       return global_metric_return_values_;
     } else {
