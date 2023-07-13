@@ -161,6 +161,14 @@ bool AnalysisPredictor::Init(
   // Get the feed_target_names and fetch_target_names
   PrepareFeedFetch();
 
+  if (config_.use_gpu()) {
+    paddle::platform::DeviceContextPool &pool =
+        paddle::platform::DeviceContextPool::Instance();
+    auto *dev_ctx = reinterpret_cast<paddle::platform::CUDADeviceContext *>(
+        pool.Get(place_));
+    VLOG(0) << (void*)dev_ctx;
+  }
+
   return true;
 }
 
