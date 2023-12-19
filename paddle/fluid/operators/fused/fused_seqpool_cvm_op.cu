@@ -177,7 +177,7 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
     size_t **lods_values, const int batch_size, const int embedding_size,
     const float pad_value, const int cvm_offset, const float show_coeff,
     const float clk_coeff, const float threshold, const int quant_ratio,
-    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter
+    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter,
     bool fill_zero) {
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / embedding_size;
