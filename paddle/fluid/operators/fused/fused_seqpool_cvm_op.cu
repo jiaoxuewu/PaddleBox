@@ -177,7 +177,7 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
     size_t **lods_values, const int batch_size, const int embedding_size,
     const float pad_value, const int cvm_offset, const float show_coeff,
     const float clk_coeff, const float threshold, const int quant_ratio,
-    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter,
+    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter
     bool fill_zero) {
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / embedding_size;
@@ -230,6 +230,7 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
                         quant_ratio +
                     0.5)) /
                 static_cast<float>(quant_ratio));
+        }
       }
       if (concate_index == embedx_concate_size) {
         *(seqpool_output_values[x] + y * embedding_size * embedx_concate_size + (embedx_concate_size-1) * embedding_size + offset) += val;
@@ -370,8 +371,7 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                      float clk_coeff, float threshold, float embed_threshold,
                      const int quant_ratio, const bool clk_filter,
                      const int embed_thres_size, const int embedx_concate_size,
-                     bool embedx_concate_filter,
-                     bool fill_zero) {
+                     bool embedx_concate_filter, bool fill_zero) {
   auto stream = dynamic_cast<phi::GPUContext*>(
               platform::DeviceContextPool::Instance().Get(place))
               ->stream();
@@ -757,7 +757,7 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
                     embedding_size, padding_value, use_cvm, cvm_offset,
                     need_filter, embed_threshold_filter, show_coeff, clk_coeff,
                     threshold, embed_threshold, quant_ratio, clk_filter,
-                    embed_thres_size, embedx_concate_size, embedx_concate_filter, 
+                    embed_thres_size, embedx_concate_size, embedx_concate_filter
                     fill_zero);
   }
 };
