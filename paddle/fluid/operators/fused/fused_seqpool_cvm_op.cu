@@ -757,7 +757,7 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
                     embedding_size, padding_value, use_cvm, cvm_offset,
                     need_filter, embed_threshold_filter, show_coeff, clk_coeff,
                     threshold, embed_threshold, quant_ratio, clk_filter,
-                    embed_thres_size, embedx_concate_size, embedx_concate_filter
+                    embed_thres_size, embedx_concate_size, embedx_concate_filter,
                     fill_zero);
   }
 };
