@@ -177,7 +177,7 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
     size_t **lods_values, const int batch_size, const int embedding_size,
     const float pad_value, const int cvm_offset, const float show_coeff,
     const float clk_coeff, const float threshold, const int quant_ratio,
-    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter) {
+    const float embed_threshold, const int embedx_concate_size, bool embedx_concate_filter, bool fill_zero) {
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / embedding_size;
     int offset = i % embedding_size;  // embedx id
@@ -188,11 +188,17 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
 
     double val = pad_value;
     int concate_index = 0;
+    bool val_use_zero = false;
     for (auto k = start; k < end; ++k) {
+      val_use_zero = false;
       T &show = *(input_values[x] + k * embedding_size);
       T &click = *(input_values[x] + k * embedding_size + 1);
       if (embedx_concate_filter && (show - click) * show_coeff + click * clk_coeff < threshold) {
-        continue;
+        if (fill_zero) {
+          val_use_zero = true;
+        } else {
+          continue;
+        }
       }
       T &embedw = *(input_values[x] + k * embedding_size + cvm_offset);
       T embedx_weight_score = 0.0;
@@ -202,16 +208,28 @@ __global__ void FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate(
       }
       embedx_weight_score = std::sqrt(embedx_weight_score) + std::abs(embedw);
       if (embedx_concate_filter && embedx_weight_score < embed_threshold) {
-        continue;
+        if (fill_zero) {
+          val_use_zero = true;
+        } else {
+          continue;
+        }
       }
       if (offset < cvm_offset) {  // show & click
-        val = *(input_values[x] + k * embedding_size + offset);
+        if (val_use_zero) {
+          val = pad_value;
+        } else {
+          val = *(input_values[x] + k * embedding_size + offset);
+        }
       } else {
-        val = ((static_cast<int>(
+        if (val_use_zero) {
+          val = pad_value;
+        } else {
+          val = ((static_cast<int>(
                     *(input_values[x] + k * embedding_size + offset) *
                         quant_ratio +
                     0.5)) /
                 static_cast<float>(quant_ratio));
+        }
       }
       if (concate_index == embedx_concate_size) {
         *(seqpool_output_values[x] + y * embedding_size * embedx_concate_size + (embedx_concate_size-1) * embedding_size + offset) += val;
@@ -352,7 +370,8 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                      float clk_coeff, float threshold, float embed_threshold,
                      const int quant_ratio, const bool clk_filter,
                      const int embed_thres_size, const int embedx_concate_size,
-                     bool embedx_concate_filter) {
+                     bool embedx_concate_filter,
+                     bool fill_zero) {
   auto stream = dynamic_cast<phi::GPUContext*>(
               platform::DeviceContextPool::Instance().Get(place))
               ->stream();
@@ -395,7 +414,7 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                                          0, stream>>>(
         N, gpu_input_values, gpu_seqpool_output_values, lods_values, batch_size,
         embedding_size, padding_value, cvm_offset, show_coeff, clk_coeff,
-        threshold, quant_ratio, embed_threshold, embedx_concate_size, embedx_concate_filter);
+        threshold, quant_ratio, embed_threshold, embedx_concate_size, embedx_concate_filter, fill_zero);
     }
   } else if (need_filter) {  // quant need filter
     FusedSeqpoolKernelQuantFilter<<<GET_BLOCK(N), PADDLE_CUDA_NUM_THREADS, 0,
@@ -690,6 +709,7 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
     const int embed_thres_size = ctx.Attr<int>("embed_thres_size");
     const int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
     bool embedx_concate_filter = ctx.Attr<bool>("embedx_concate_filter");
+    bool fill_zero = ctx.Attr<bool>("fill_zero");
 
     framework::GPULodVector gpu_lods[slot_size];
     auto place = ctx.GetPlace();
@@ -737,7 +757,7 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
                     embedding_size, padding_value, use_cvm, cvm_offset,
                     need_filter, embed_threshold_filter, show_coeff, clk_coeff,
                     threshold, embed_threshold, quant_ratio, clk_filter,
-                    embed_thres_size, embedx_concate_size, embedx_concate_filter);
+                    embed_thres_size, embedx_concate_size, embedx_concate_filter, fill_zero);
   }
 };
 
