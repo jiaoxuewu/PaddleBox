@@ -21,7 +21,7 @@
 #include "xpu/runtime.h"
 #include "xpu/runtime_ex.h"
 #include "xpu/xdnn.h"
-#include "xpu/xctr.h"
+#include "xctr/xctr.h"
 
 namespace xpu = baidu::xpu::api;
 

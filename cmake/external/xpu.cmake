@@ -85,13 +85,15 @@ set(XPU_XRE_URL
 set(XPU_XCCL_URL
     "${XPU_XCCL_BASE_URL}/${XPU_XCCL_DIR_NAME}.tar.gz"
     CACHE STRING "" FORCE)
+#https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20240312/xctr.tar.gz
+#https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20221130/xctr.tar.gz
 set(XPU_XCTR_URL
-    https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20221130/xctr.tar.gz
+    https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20240312/xctr.tar.gz
     CACHE STRING "" FORCE)
 
 #"data-im.baidu.com:/home/work/var/CI_DATA/im/static/pack_paddle_depence.sh/pack_paddle_depence.sh"
 set(XPU_PACK_DEPENCE_URL
-    "https://baidu-kunlun-public.su.bcebos.com/paddle_depence/pack_paddle_box_depence.sh"
+    "https://baidu-kunlun-public.su.bcebos.com/paddle_depence/pack_paddle_box_depence_v2.sh"
     CACHE STRING "" FORCE)
 # if(WITH_BOX_PS)
 if (WITH_BOX_PS OR WITH_XPU_KP)
