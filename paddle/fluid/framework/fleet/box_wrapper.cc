@@ -1237,7 +1237,7 @@ void BoxWrapper::GetFeatureOffsetInfo(void) {
 
 #ifdef PADDLE_WITH_XPU_KP
 void BoxWrapper::SetDataFuncForCacheManager(int batch_num,
-    std::function<void(int, std::vector<std::pair<uint64_t*, int>>*)> data_func) {
+    std::function<void(int, std::vector<std::vector<std::pair<uint64_t*, int>>>*)> data_func) {
   boxps_ptr_->SetDataFuncForCacheManager(batch_num, data_func, &fid2sign_map_);
 }
 

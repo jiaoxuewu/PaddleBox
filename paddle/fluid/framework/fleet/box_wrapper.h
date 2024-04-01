@@ -682,7 +682,7 @@ class BoxWrapper {
 
 #ifdef PADDLE_WITH_XPU_KP
   void SetDataFuncForCacheManager(int batch_num,
-      std::function<void(int, std::vector<std::pair<uint64_t*, int>>*)> data_func);
+      std::function<void(int, std::vector<std::vector<std::pair<uint64_t*, int>>>*)> data_func);
   int PrepareNextBatch(int dev_id);
   std::vector<uint64_t> * GetFid2SginMap() { return fid2sign_map_; }
 #endif

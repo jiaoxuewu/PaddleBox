@@ -2808,18 +2808,23 @@ void PadBoxSlotDataset::PrepareTrain(void) {
           ->AddBatchOffset(offset[i]);
     }
 #ifdef PADDLE_WITH_XPU_KP
-    using BatchData = std::vector<std::pair<uint64_t*, int>>;
+    using BatchData = std::vector<std::vector<std::pair<uint64_t*, int>>>; // devid -> dev_batch_data
+
     VLOG(0) << "PadBoxSlotDataset::PrepareTrain with pv_merge offset size:" << offset.size()
             << ", thread_num:" << thread_num_;
     auto data_func = [this, offset] (int batch_idx, BatchData * out_data) {
       BatchData & batch_data = *out_data;
       batch_data.clear();
+      batch_data.resize(thread_num_);
+
       int offset_idx = batch_idx * thread_num_;
       CHECK(offset_idx + thread_num_ <= (int)offset.size())
               << "offset_idx:" << offset_idx
               << ", thread_num_:" << thread_num_
               << "offset.size:" << offset.size();
       for (int j = 0; j < thread_num_; j++) {
+        int dev_id = j;
+        auto & dev_batch_data = batch_data[dev_id];
         auto & offset_pair = offset[offset_idx + j];
         for (int k = 0; k < offset_pair.second; k++) {
           auto & pv_ins = input_pv_ins_[offset_pair.first + k]->ads;
@@ -2827,7 +2832,7 @@ void PadBoxSlotDataset::PrepareTrain(void) {
           for (auto & rec : pv_ins) {
             for (auto& idx : used_fea_index_) {
               uint64_t* feas = rec->slot_uint64_feasigns_.get_values(idx, &num);
-              batch_data.push_back(std::make_pair(feas, num));
+              dev_batch_data.push_back(std::make_pair(feas, num));
             }
           }
         }
@@ -2857,25 +2862,30 @@ void PadBoxSlotDataset::PrepareTrain(void) {
           ->AddBatchOffset(offset[i]);
     }
 #ifdef PADDLE_WITH_XPU_KP
-    using BatchData = std::vector<std::pair<uint64_t*, int>>;
+    using BatchData = std::vector<std::vector<std::pair<uint64_t*, int>>>; // devid -> dev_batch_data
     VLOG(0) << "PadBoxSlotDataset::PrepareTrain offset size:" << offset.size()
             << ", thread_num:" << thread_num_;
     auto data_func = [this, offset] (int batch_idx, BatchData * out_data) {
       BatchData & batch_data = *out_data;
       batch_data.clear();
+      batch_data.resize(thread_num_);
+
       int offset_idx = batch_idx * thread_num_;
       CHECK(offset_idx + thread_num_ <= (int)offset.size())
               << "offset_idx:" << offset_idx
               << ", thread_num_:" << thread_num_
               << "offset.size:" << offset.size();
       for (int j = 0; j < thread_num_; j++) {
+        int dev_id = j;
+        auto & dev_batch_data = batch_data[dev_id];
+
         auto & offset_pair = offset[offset_idx + j];
         for (int k = 0; k < offset_pair.second; k++) {
           auto & rec = input_records_[offset_pair.first + k];
           size_t num = 0;
           for (auto& idx : used_fea_index_) {
             uint64_t* feas = rec->slot_uint64_feasigns_.get_values(idx, &num);
-            batch_data.push_back(std::make_pair(feas, num));
+            dev_batch_data.push_back(std::make_pair(feas, num));
           }
         }
       }

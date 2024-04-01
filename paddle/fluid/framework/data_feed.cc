@@ -36,7 +36,7 @@ limitations under the License. */
 
 USE_INT_STAT(STAT_total_feasign_num_in_mem);
 DECLARE_bool(enable_ins_parser_file);
-DECLARE_bool(enable_async_datafeed_batch);
+
 #ifdef PADDLE_WITH_BOX_PS
 #include <dlfcn.h>
 extern "C" {
@@ -3541,6 +3541,9 @@ void SlotPaddleBoxDataFeed::PutToFeedSlotVec(const SlotRecord* ins_vec,
       feed_vec_[j]->ShareDataWith(bufferd_feed_vec[j]);
       feed_vec_[j]->set_lod(*(bufferd_feed_vec[j].mutable_lod()));
     }
+    batch_ins_num_ = num;
+    ins_record_ptr_ = ins_vec;
+
   } else {
     pack_->pack_instance(ins_vec, num);
     BuildSlotBatchGPU(pack_->ins_num());

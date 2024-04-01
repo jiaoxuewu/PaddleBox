@@ -63,6 +63,7 @@ DECLARE_bool(padbox_auc_runner_mode);
 DECLARE_bool(enable_slotpool_wait_release);
 DECLARE_bool(enable_slotrecord_reset_shrink);
 DECLARE_bool(enable_ins_parser_add_file_path);
+DECLARE_bool(enable_async_datafeed_batch);
 
 namespace paddle {
 namespace framework {
@@ -2195,14 +2196,23 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   }
   virtual const std::string& GetLineId(int idx) const {
 #if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
-    return pack_->get_lineid(idx);
+    if (FLAGS_enable_async_datafeed_batch) {
+      return ins_record_ptr_[idx]->ins_id_;
+    } else {
+      return pack_->get_lineid(idx);
+    }    
+    
 #else
     return ins_record_ptr_[idx]->ins_id_;
 #endif
   }
   virtual int GetCurBatchSize() {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
-    return pack_->ins_num();
+    if (FLAGS_enable_async_datafeed_batch) {
+      return batch_ins_num_;
+    } else {
+      return pack_->ins_num();
+    }
 #else
     return batch_ins_num_;
 #endif
@@ -2305,11 +2315,10 @@ class SlotPaddleBoxDataFeed : public DataFeed {
 
 #if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
   MiniBatchGpuPack* pack_ = nullptr;
-#else
+#endif
   std::vector<SlotRecord> pv_ins_vec_;
   const SlotRecord *ins_record_ptr_ = nullptr;
   int batch_ins_num_ = 0;
-#endif
   
   std::shared_ptr<MiniBatchSlotPvTensorBuffer> slot_pv_tensor_buf_ = nullptr;
   std::shared_ptr<MiniBatchSlotPvTensorBuffer> slot_pv_tensor_buf_next_ = nullptr;
