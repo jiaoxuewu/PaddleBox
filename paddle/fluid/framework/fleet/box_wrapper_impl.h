@@ -353,6 +353,176 @@ void BoxWrapper::PullSparseCaseCPU(const paddle::platform::Place& place,
   all_timer.Pause();
 }
 
+#ifdef PADDLE_WITH_XPU_KP
+void CheckValPtr(
+    int dev_id,
+    const std::vector<float*>& values,
+    const std::vector<int64_t>& slot_lengths,
+    uint32_t hidden_size,
+    int expand_embed_dim,
+    std::string prefix,
+    int err_idx) {
+  int slot_num = slot_lengths.size();
+  for (uint32_t j = 0; j < slot_lengths.size(); ++j) {
+    fprintf(stderr,
+            "[%s-erridx:%d] dev: %d, pull_copy values[%d]:%p, slot_lengths[%d]:%d, " \
+            "next_prt: %p, expand_grad_values[%d]:%p, next_prt: %p\n",
+            prefix.c_str(), err_idx, dev_id, j, values[j],
+            j, (int)slot_lengths[j],
+            values[j] + slot_lengths[j] * hidden_size,
+            j + slot_num, values[j + slot_num],
+            values[j + slot_num] + slot_lengths[j] * expand_embed_dim);
+  }
+}
+
+void CheckPullValue(
+    int dev_id,
+    const std::vector<float*>& values,
+    const std::vector<int64_t>& slot_lengths,
+    boxps::FeaturePullOffset * pull_info,
+    uint32_t hidden_size,
+    int cvm_offset,
+    int expand_embed_dim) {
+  int val_len = 0;
+  for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
+    val_len += slot_lengths[i];
+  }
+  int fixed_float_len = val_len * hidden_size;
+  std::vector<float> h_values(fixed_float_len);
+  int expand_float_len = val_len * expand_embed_dim;
+  std::vector<float> h_expand_values(expand_float_len);
+  if (expand_float_len > 0) {
+    memset(&(h_expand_values[0]), 0, sizeof(float) * expand_float_len);
+  }
+  std::vector<int> val_2_slot(val_len);
+  std::vector<bool> has_expand(val_len);
+
+  int offset = 0;
+  int xpu_ret = 0;
+  PADDLE_ENFORCE_EQ(
+      slot_lengths.size() * 2, values.size(),
+      platform::errors::PreconditionNotMet("CheckPullValue slot_length vs values.size error."));
+
+  int slot_num = slot_lengths.size();
+  for (int i = 0; i < slot_num; ++i) {
+    if (values[i] == nullptr) {
+      if (slot_lengths[i] != 0) {
+        VLOG(0) << "CheckPullValue found slot[" << i << "] dval_ptr is null, while slot_length != 0:" << slot_lengths[i];
+      }
+      PADDLE_ENFORCE_EQ(
+          slot_lengths[i], 0,
+          platform::errors::PreconditionNotMet("CheckPullValue slot_length error."));
+          continue;
+    }
+    if (slot_lengths[i] == 0) {
+      continue;
+    }
+    val_2_slot[offset] = i;
+    // copy show/clk/embed/embedx
+    xpu_ret = xpu_memcpy(&(h_values[offset * hidden_size]), values[i],
+        sizeof(float) * hidden_size * slot_lengths[i], XPU_DEVICE_TO_HOST);
+    if (xpu_ret != 0) {
+      VLOG(0) << "CheckPullValue xpu_memcpy for emb error: hidden_size:" << hidden_size
+              << ", cvm_offset:" << cvm_offset << ", errslotidx:" << i;
+      CheckValPtr(dev_id, values, slot_lengths, hidden_size, expand_embed_dim, "copyemberr", i);
+    }
+    PADDLE_ENFORCE_EQ(xpu_ret, 0,
+      platform::errors::PreconditionNotMet("CheckPullValue xpu_memcpy for emb error."));
+
+    // copy expand emb
+    has_expand[offset] = false;
+    if (expand_embed_dim > 0 && values[i + slot_num] != nullptr) {
+      has_expand[offset] = true;
+      xpu_ret = xpu_memcpy(&(h_expand_values[offset * expand_embed_dim]), values[i + slot_num],
+          sizeof(float) * expand_embed_dim * slot_lengths[i], XPU_DEVICE_TO_HOST);
+      PADDLE_ENFORCE_EQ(xpu_ret, 0,
+          platform::errors::PreconditionNotMet("CheckPullValue xpu_memcpy error."));
+    }
+    if (xpu_ret != 0) {
+      VLOG(0) << "CheckPullValue xpu_memcpy for expand error: hidden_size:" << hidden_size
+              << ", cvm_offset:" << cvm_offset << ", errslotidx:" << i;
+      CheckValPtr(dev_id, values, slot_lengths, hidden_size, expand_embed_dim, "copyexpanderr", i);
+    }
+    PADDLE_ENFORCE_EQ(xpu_ret, 0,
+        platform::errors::PreconditionNotMet("CheckPullValue xpu_memcpy for expand error."));
+    offset += slot_lengths[i];
+  }
+  int ret = 0;
+  for (int i = 0; i < val_len; ++i) {
+    for (int j = 0; j < cvm_offset - 1; ++j) {
+      float & v = h_values[i * hidden_size + j];
+      if (v < 0 || std::isnan(v) || std::isinf(v)) {
+        VLOG(0) << "error-PullValue-cvm in Paddle:" << i << ":" << v;
+        ret = -1;
+        break;
+      }
+    }
+    if (ret == 0) {
+      for (int j = cvm_offset - 1; j < (int)hidden_size; ++j) {
+        float & v = h_values[i * hidden_size + j];
+        if (std::isnan(v) || std::isinf(v)) {
+          VLOG(0) << "error-PullValue-w in Paddle:" << i << ":" << v;
+          ret = -1;
+          break;
+        }
+      }
+    }
+    if (ret == 0 && expand_embed_dim > 0 && has_expand[i]) {
+      for (int j = 0; j < expand_embed_dim; ++j) {
+        float & v = h_expand_values[i * expand_embed_dim + j];
+        if (std::isnan(v) || std::isinf(v)) {
+          VLOG(0) << "error-PullValue-expand in Paddle:" << i << ":" << v;
+          ret = -1;
+          break;
+        }
+      }
+    }
+    if (ret != 0) {
+      break;
+    }
+  }
+  if (ret != 0) {
+    auto now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    struct tm* ptm = localtime(&now_time);
+    char date[100] = {0};
+    snprintf(date, 100, "%d%02d%02d%02d%02d%02d",
+            (int)ptm->tm_year + 1900, (int)ptm->tm_mon + 1, (int)ptm->tm_mday,
+            (int)ptm->tm_hour, (int)ptm->tm_min, (int)ptm->tm_sec);
+    std::stringstream name_ss;
+    name_ss << "paddle-pull-val.dev-" << dev_id << "-" << date << ".dump";
+    std::ofstream ofs;
+    ofs.open(name_ss.str(), std::ios::app);
+
+    ofs << "slot-length: ";
+    for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
+      ofs << i << ":" << slot_lengths[i] << ",";
+    }
+    ofs << "\n";
+
+    for (int i = 0; i < val_len; ++i) {
+      ofs << "slot:" << val_2_slot[i] << "," << i<< "\t";
+      ofs << hidden_size << ":";
+      for (int k = 0; k < (int)hidden_size; ++k) {
+        ofs << h_values[i * hidden_size + k] << ",";
+      }
+      ofs << "\t";
+      ofs << expand_embed_dim << ":";
+      if (expand_embed_dim > 0 && has_expand[i]) {
+        for (int k = 0; k < expand_embed_dim; ++k) {
+          ofs << h_expand_values[i * expand_embed_dim + k] << ",";
+        }
+      }
+      ofs << "\n";
+    }
+
+    ofs.close();
+  }
+
+  PADDLE_ENFORCE_EQ(ret, 0,
+      platform::errors::PreconditionNotMet("CheckPullValue detect error value."));
+}
+#endif
+
 void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
                                    const std::vector<const uint64_t*>& keys,
                                    const std::vector<float*>& values,
@@ -364,11 +534,11 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
 #ifdef PADDLE_WITH_XPU_KP
   auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
   auto ctx_xpu = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context();
-  static bool use_l3_tensor = std::getenv("XPU_PADDLE_L3_TENSOR")!=NULL ?
+  static bool use_l3_tensor = std::getenv("XPU_PADDLE_L3_TENSOR") != NULL ?
                     (std::strcmp(std::getenv("XPU_PADDLE_L3_TENSOR"), "1") == 0 ? true:false) :
                     false;
   phi::Place l3_place =
-   static_cast<platform::XPUDeviceContext*>(dev_ctx)->GetL3Place();
+    static_cast<platform::XPUDeviceContext*>(dev_ctx)->GetL3Place();
   int device_id = place.GetDeviceId();
   DeviceBoxData& dev = device_caches_[device_id];
 
@@ -382,8 +552,6 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
 
   VLOG(3) << "Begine BoxPs PullSparse";
   xpu::ctx_guard RAII_GUARD(ctx_xpu);
-
-
 
 #ifdef TRACE_PROFILE
   TRACE_SCOPE_START("copy keys", xpu_wait(ctx_xpu->xpu_stream));
@@ -537,6 +705,13 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
                                    pull_offset, slot_lengths_lod.data(), slot_num, key2slot, d_res_idx, hidden_size,
                                    expand_embed_dim, total_length, total_dims, skip_offset,
                                    expand_only, d_merged_idx, d_merged_offsets, pull_size);
+
+  if (check_xpu_nan_) {
+    xpu_wait(ctx_xpu->xpu_stream);
+    CheckPullValue(
+        device_id, values, slot_lengths, &pull_info_,
+        hidden_size, pull_info_.embedx_size - pull_info_.show, expand_embed_dim);
+  }
 #ifdef TRACE_PROFILE
   TRACE_SCOPE_END("CopyForPull", xpu_wait(ctx_xpu->xpu_stream));
   TRACE_SCOPE_END("pull copy", xpu_wait(ctx_xpu->xpu_stream));
@@ -734,6 +909,202 @@ void BoxWrapper::PushSparseGradCaseGPU(
 #endif
 }
 
+#ifdef PADDLE_WITH_XPU_KP
+void CheckPushValue(
+    int dev_id,
+    const std::vector<const float*>& grad_values,
+    const std::vector<int64_t>& slot_lengths,
+    boxps::FeaturePushOffset * push_info,
+    uint32_t hidden_size,
+    int cvm_offset,
+    int expand_embed_dim) {
+  int val_len = 0;
+  for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
+    val_len += slot_lengths[i];
+  }
+  int fixed_float_len = val_len * hidden_size;
+  std::vector<float> h_values(fixed_float_len);
+  int expand_float_len = val_len * expand_embed_dim;
+  std::vector<float> h_expand_values(expand_float_len);
+  if (expand_float_len > 0) {
+    memset(&(h_expand_values[0]), 0, sizeof(float) * expand_float_len);
+  }
+  std::vector<int> val_2_slot(val_len);
+  std::vector<bool> has_expand(val_len);
+
+  int offset = 0;
+  PADDLE_ENFORCE_EQ(
+     slot_lengths.size() * 2, grad_values.size(),
+     platform::errors::PreconditionNotMet("CheckPushValue slot_length vs grad_values  error."));
+
+  int slot_num = slot_lengths.size();
+  for (int i = 0; i < slot_num; ++i) {
+    if (grad_values[i] == nullptr) {
+      if (slot_lengths[i] != 0) {
+        VLOG(0) << "CheckPushValue found slot[" << i << "] dval_ptr is null, while slot_length != 0:" << slot_lengths[i];
+      }
+      PADDLE_ENFORCE_EQ(slot_lengths[i], 0,
+          platform::errors::PreconditionNotMet("CheckPushValue slot_length error."));
+      continue;
+    }
+    if (slot_lengths[i] == 0) {
+      continue;
+    }
+    val_2_slot[offset] = i;
+    // copy show/clk/embed/embedx
+    xpu_memcpy(&(h_values[offset * hidden_size]), grad_values[i],
+        sizeof(float) * hidden_size * slot_lengths[i], XPU_DEVICE_TO_HOST);
+    // copy expand emb
+    has_expand[offset] = false;
+    if (expand_embed_dim > 0 && grad_values[i + slot_num] != nullptr) {
+        has_expand[offset] = true;
+        xpu_memcpy(&(h_expand_values[offset * expand_embed_dim]), grad_values[i + slot_num],
+                    sizeof(float) * expand_embed_dim * slot_lengths[i], XPU_DEVICE_TO_HOST);
+    }
+    offset += slot_lengths[i];
+  }
+  int ret = 0;
+  for (int i = 0; i < val_len; ++i) {
+    for (int j = 0; j < cvm_offset - 1; ++j) {
+      float & v = h_values[i * hidden_size + j];
+      if (v < 0 || std::isnan(v) || std::isinf(v)) {
+        VLOG(0) << "error-PushValue-cvm in Paddle:" << i << ":" << v;
+        ret = -1;
+        break;
+      }
+    }
+    if (ret == 0) {
+      for (int j = cvm_offset - 1; j < (int)hidden_size; ++j) {
+        float & v = h_values[i * hidden_size + j];
+        if (std::isnan(v) || std::isinf(v)) {
+          VLOG(0) << "error-PushValue-w in Paddle:" << i << ":" << v;
+          ret = -1;
+          break;
+        }
+      }
+    }
+    if (ret == 0 && expand_embed_dim > 0 && has_expand[i]) {
+      for (int j = 0; j < expand_embed_dim; ++j) {
+        float & v = h_expand_values[i * expand_embed_dim + j];
+        if (std::isnan(v) || std::isinf(v)) {
+          VLOG(0) << "error-PushValue-expand in Paddle:" << i << ":" << v;
+          ret = -1;
+          break;
+        }
+      }
+    }
+    if (ret != 0) {
+      break;
+    }
+  }
+
+  if (ret != 0) {
+    auto now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    struct tm* ptm = localtime(&now_time);
+    char date[100] = {0};
+    snprintf(date, 100, "%d%02d%02d%02d%02d%02d",
+            (int)ptm->tm_year + 1900, (int)ptm->tm_mon + 1, (int)ptm->tm_mday,
+            (int)ptm->tm_hour, (int)ptm->tm_min, (int)ptm->tm_sec);
+    std::stringstream name_ss;
+    name_ss << "paddle-push-val.dev-" << dev_id << "-" << date << ".dump";
+    std::ofstream ofs;
+    ofs.open(name_ss.str(), std::ios::app);
+
+    ofs << "slot-length: ";
+    for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
+      ofs << i << ":" << slot_lengths[i] << ",";
+    }
+    ofs << "\n";
+
+    for (int i = 0; i < val_len; ++i) {
+      ofs << "slot:" << val_2_slot[i] << "," << i<< "\t";
+      ofs << hidden_size << ":";
+      for (int k = 0; k < (int)hidden_size; ++k) {
+        ofs << h_values[i * hidden_size + k] << ",";
+      }
+      ofs << "\t";
+      ofs << expand_embed_dim << ":";
+      if (expand_embed_dim > 0 && has_expand[i]) {
+        for (int k = 0; k < expand_embed_dim; ++k) {
+          ofs << h_expand_values[i * expand_embed_dim + k] << ",";
+        }
+      }
+      ofs << "\n";
+    }
+    ofs.close();
+  }
+
+  PADDLE_ENFORCE_EQ(ret, 0,
+      platform::errors::PreconditionNotMet("CheckPushValue detect error value."));
+}
+
+void CheckPushValue(
+    int dev_id,
+    float * grad_values,
+    int val_len,
+    boxps::FeaturePushOffset * push_info,
+    int cvm_offset,
+    int push_float_num) {
+  int float_len = val_len * push_float_num;
+  std::vector<float> h_values(float_len);
+  xpu_memcpy(&(h_values[0]), grad_values, sizeof(float) * float_len, XPU_DEVICE_TO_HOST);
+  int ret = 0;
+  for (int i = 0; i < val_len; ++i) {
+    for (int j = push_info->show; j < push_info->embed_g; ++j) {
+      float & v = h_values[i * push_float_num + j];
+      if (v < 0 || std::isnan(v) || std::isinf(v)) {
+        VLOG(0) << "error-PushValue-cvm in Paddle-preboxps:" << i << ":" << v;
+        ret = -1;
+        break;
+      }
+    }
+    if (ret == 0) {
+      for (int j = push_info->embed_g; j < push_float_num; ++j) {
+        float & v = h_values[i * push_float_num + j];
+        if (std::isnan(v) || std::isinf(v)) {
+          VLOG(0) << "error-PushValue-w in Paddle-preboxps:" << i << ":" << v;
+          ret = -1;
+          break;
+        }
+      }
+    }
+    if (ret != 0) {
+      break;
+    }
+  }
+
+  if (ret != 0) {
+    auto now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    struct tm* ptm = localtime(&now_time);
+    char date[100] = {0};
+    snprintf(date, 100, "%d%02d%02d%02d%02d%02d",
+            (int)ptm->tm_year + 1900, (int)ptm->tm_mon + 1, (int)ptm->tm_mday,
+            (int)ptm->tm_hour, (int)ptm->tm_min, (int)ptm->tm_sec);
+    std::stringstream name_ss;
+    name_ss << "paddlepreboxps-push-val.dev-" << dev_id << "-" << date << ".dump";
+    std::ofstream ofs;
+    ofs.open(name_ss.str(), std::ios::app);
+
+    for (int i = 0; i < val_len; ++i) {
+      ofs << i << "\t" << *(int *)&(h_values[push_info->slot]) << "\t";
+      for (int j = push_info->show; j < push_info->embed_g; ++j) {
+        float & v = h_values[i * push_float_num + j];
+        ofs << v << "\t";
+      }
+      for (int j = push_info->embed_g; j < push_float_num; ++j) {
+        float & v = h_values[i * push_float_num + j];
+        ofs << v << ",";
+      }
+      ofs << "\n";
+    }
+    ofs.close();
+  }
+
+  PADDLE_ENFORCE_EQ(ret, 0,
+      platform::errors::PreconditionNotMet("CheckPushValue-preboxps detect error value."));
+}
+#endif
+
 void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
     const std::vector<const uint64_t*>& keys,
     const std::vector<const float*>& grad_values,
@@ -751,6 +1122,13 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
   platform::Timer& push_boxps_timer = dev.boxps_push_timer;
 
   all_timer.Resume();
+
+  if (check_xpu_nan_) {
+    xpu_wait(ctx_xpu->xpu_stream);
+    CheckPushValue(
+      device_id, grad_values, slot_lengths, &push_info_, hidden_size,
+      pull_info_.embedx_size - pull_info_.show, expand_embed_dim);
+  }
 
 #ifdef TRACE_PROFILE
   TRACE_SCOPE_START("push copy", xpu_wait(ctx_xpu->xpu_stream));
@@ -833,6 +1211,13 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
 
   TRACE_SCOPE_START("PushSparseXPU", xpu_wait(ctx_xpu->xpu_stream));
 #endif
+
+  if (check_xpu_nan_) {
+    xpu_wait(ctx_xpu->xpu_stream);
+    CheckPushValue(
+        device_id, (float *)total_grad_values_xpu, static_cast<int>(total_length),
+        &push_info_, pull_info_.embedx_size - pull_info_.show, push_float_num_); 
+  }
 
   int ret = boxps_ptr_->PushSparseXPU(total_keys,
       reinterpret_cast<void*>(total_grad_values_xpu),

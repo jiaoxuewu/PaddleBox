@@ -456,8 +456,16 @@ class BoxWrapper {
     use_xpu_sparse_map_ = false;
     auto env_str = std::getenv("USE_XPU_SPARSE_MAP");
     if (env_str != nullptr && (strcmp(env_str, "true") == 0 || strcmp(env_str, "1") == 0)) {
-        use_xpu_sparse_map_ = true;
+      use_xpu_sparse_map_ = true;
     }
+
+    check_xpu_nan_ = false;
+    env_str = std::getenv("CHECK_XPU_BOXPS_NAN");
+    if (env_str != nullptr && (strcmp(env_str, "true") == 0 || strcmp(env_str, "1") == 0)) {
+      check_xpu_nan_ = true;
+      VLOG(0) << "CHECK_XPU_BOXPS_NAN has been set to check paddle pull&push";
+    }
+
 #endif
 #if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
     // Client side to produce the tracepoints.
@@ -968,6 +976,7 @@ class BoxWrapper {
   size_t input_table_dim_ = 0;
   int gpu_num_ = GetDeviceCount();
 #ifdef PADDLE_WITH_XPU_KP
+  bool check_xpu_nan_;
   bool use_xpu_sparse_map_;
   std::vector<uint64_t> * fid2sign_map_ = nullptr;
   std::unique_ptr<BoxWrapperKernel> box_wrapper_kernel_;

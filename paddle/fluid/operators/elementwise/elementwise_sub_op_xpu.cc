@@ -68,7 +68,8 @@ class ElementwiseSubGradXPUKernel : public ElemwiseGradKernel<T> {
 namespace ops = paddle::operators;
 REGISTER_OP_XPU_KERNEL(elementwise_sub,
                        ops::ElementwiseSubXPUKernel<float>,
-                       ops::ElementwiseSubXPUKernel<paddle::platform::float16>);
+                       ops::ElementwiseSubXPUKernel<paddle::platform::float16>,
+                       ops::ElementwiseSubXPUKernel<int64_t>);
 REGISTER_OP_XPU_KERNEL(
     elementwise_sub_grad,
     ops::ElementwiseSubGradXPUKernel<float>,

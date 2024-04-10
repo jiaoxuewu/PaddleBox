@@ -417,6 +417,17 @@ const char *ParseSignalErrorString(const std::string &str) {
 
 // Handle SIGSEGV, SIGILL, SIGFPE, SIGABRT, SIGBUS, and SIGTERM.
 void SignalHandle(const char *data, int size) {
+  if (std::getenv("USE_SIMPLE_ABT_INFO") != nullptr ||
+      std::getenv("CHECK_XPU_BOXPS_NAN") != nullptr ||
+      std::getenv("FLAGS_check_nan_inf") != nullptr) {
+    const int pd_buf_size = 10240;
+    char pd_buf[pd_buf_size] = {0};
+    size = size >= pd_buf_size ? pd_buf_size - 1 : size;
+    memcpy(pd_buf, data, size);
+    pd_buf[size] = 0;
+    fprintf(stderr, "SignalHandle:%s\n", pd_buf);
+    return;
+  }
   try {
     // NOTE1: The glog FailureSignalHandler dumped messages
     //   are deal with line by line

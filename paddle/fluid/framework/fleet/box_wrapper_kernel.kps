@@ -251,7 +251,7 @@ __global__ void PullCopyNNCross(const TEmbedxOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int buf_length = 5;
+  const int buf_length = 1500 / (pull_float_num + hidden_size + expand_embed_dim + 3);
   int per_thread_len = roundup_div(total_length, nthreads);
   int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
   int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
@@ -1068,6 +1068,7 @@ __global__ void PullCopyMerged(const TEmbedxOp* op,
         lm_dst_vals[j * hidden_size + cvm_offset + k] = 0;
       }
 
+      mfence();
       // fill each undedup val
       int same_key_len = lm_merged_offset[j + 1] - lm_merged_offset[j];
       for (int k = 0; k < same_key_len; k += same_key_idx_buf_len) { // handle each same key of lm_dst_vals[j]
@@ -1283,7 +1284,7 @@ __global__ void PushCopyNNCross(const TExpandPushGetOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int buf_length = 5;
+  const int buf_length = 1500 / (push_float_num + hidden_size + expand_embed_dim + 3);
   int per_thread_len = roundup_div(total_length, nthreads);
   int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
   int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
@@ -1397,6 +1398,7 @@ __global__ void PushCopyNNCross(const TExpandPushGetOp* op,
         }
       }
     }
+    mfence();
     LM2GM(lm_dst_vals, dst_vals + gm_offset * push_float_num,len * push_float_num * sizeof(float));
   }
 }

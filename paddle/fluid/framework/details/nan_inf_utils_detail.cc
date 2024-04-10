@@ -18,9 +18,6 @@
 #include "paddle/fluid/framework/op_proto_maker.h"
 #include "paddle/fluid/framework/scope.h"
 
-#ifdef PADDLE_WITH_XPU
-#include "xpu/refactor/math.h"
-#endif
 #ifdef PADDLE_WITH_ASCEND_CL
 #include "paddle/fluid/platform/device/npu/npu_op_runner.h"
 #endif
@@ -665,16 +662,6 @@ static unsigned int* get_device_num_ptr(const platform::Place& place) {
         gpu_tensor->ptr(), 0, sizeof(unsigned int), dev_ctx->stream()));
   }
   return reinterpret_cast<unsigned int*>(gpu_tensor->ptr());
-#elif PADDLE_WITH_XPU
-    thread_local unsigned int* local_device_num_ptr = nullptr;
-    if (local_device_num_ptr == nullptr) {
-          xpu_malloc(reinterpret_cast<void**>(&local_device_num_ptr),
-                     sizeof(unsigned int));
-         unsigned int cur_device_num = 0;
-         xpu_memcpy(&local_device_num_ptr, &cur_device_num, sizeof(unsigned int),
-                   XPU_HOST_TO_DEVICE); 
-    }
-    return local_device_num_ptr;
 #else
   PADDLE_THROW(platform::errors::Unimplemented("get_device_num_ptr not support."));
   return nullptr;
@@ -734,7 +721,7 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
         proto::VarType::FP32) {
       return;
     }
-    /*
+
     float* cpu_data = new float[tensor->numel()];
     memory::Copy(platform::CPUPlace(),
                  static_cast<void*>(cpu_data),
@@ -749,11 +736,6 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
       }
     }
     delete[] cpu_data;
-    */
-     unsigned int* dnum = get_device_num_ptr(place);
-     paddle::platform::XPUDeviceContext xpu_dev_ctx(place);
-     auto xpu_context = xpu_dev_ctx.x_context();
-     xpu::count_nan_or_inf(xpu_context, tensor->data<float>(), reinterpret_cast<int*>(dnum), tensor->numel());
 #endif
   }
 #if defined(PADDLE_WITH_CUDA)
@@ -762,37 +744,22 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
 #endif
 }
 bool CheckBatchNanOrInfRet(const platform::Place& place) {
-  if (platform::is_cpu_place(place)) {
+  if (!platform::is_gpu_place(place)) {
     return (get_cpu_nan_inf_num() > 0);
   }
 #ifdef PADDLE_WITH_CUDA
-  else if (platform::is_gpu_place(place)) {
-      auto* dev_ctx = reinterpret_cast<phi::GPUContext*>(
-           platform::DeviceContextPool::Instance().Get(place));
-      auto stream = dev_ctx->stream();
-      unsigned int* num_ptr = get_device_num_ptr(place);
-      thread_local unsigned int nan_inf_num = 0;
-      PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpyAsync(&nan_inf_num, num_ptr,
+  auto* dev_ctx = reinterpret_cast<phi::GPUContext*>(
+      platform::DeviceContextPool::Instance().Get(place));
+  auto stream = dev_ctx->stream();
+  unsigned int* num_ptr = get_device_num_ptr(place);
+  thread_local unsigned int nan_inf_num = 0;
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpyAsync(&nan_inf_num, num_ptr,
                                               sizeof(unsigned int),
                                               cudaMemcpyDeviceToHost, stream));
-      PADDLE_ENFORCE_GPU_SUCCESS(cudaStreamSynchronize(stream));
-      if ((nan_inf_num + get_cpu_nan_inf_num()) > 0) {
-          return true;
-      }
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaStreamSynchronize(stream));
+  if ((nan_inf_num + get_cpu_nan_inf_num()) > 0) {
+    return true;
   }
-#elif PADDLE_WITH_XPU
-  else if (platform::is_xpu_place(place) || platform::is_xpul3_place(place)) {
-        //paddle::platform::XPUDeviceContext xpu_dev_ctx(place);
-        //auto xpu_context = xpu_dev_ctx.x_context();
-        unsigned int* num_ptr = get_device_num_ptr(place);
-        thread_local unsigned int nan_inf_num = 0;
-        xpu_memcpy(&nan_inf_num, num_ptr, sizeof(unsigned int),
-                   XPU_DEVICE_TO_HOST);
-      
-        if ((nan_inf_num + get_cpu_nan_inf_num()) > 0) {
-            return true;
-        }
-   }
 #endif
   return false;
 }
@@ -864,7 +831,7 @@ void DumpTensorToFile(const std::string& path, const std::string& prefix,
 }
 void DumpAllScope(const Scope& exec_scope, const platform::Place& place) {
   int device_id = 0;
-#if (defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU)) && !defined(_WIN32)
+#if defined(PADDLE_WITH_CUDA) && !defined(_WIN32)
   device_id = place.GetDeviceId();
 #endif
   VLOG(0) << "begin dump scope all tensor data, device id=" << device_id;
