@@ -382,7 +382,8 @@ void CheckPullValue(
     boxps::FeaturePullOffset * pull_info,
     uint32_t hidden_size,
     int cvm_offset,
-    int expand_embed_dim) {
+    int expand_embed_dim,
+    int * total_dims) {
   int val_len = 0;
   for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
     val_len += slot_lengths[i];
@@ -394,15 +395,25 @@ void CheckPullValue(
   if (expand_float_len > 0) {
     memset(&(h_expand_values[0]), 0, sizeof(float) * expand_float_len);
   }
+  std::vector<int> h_total_dims(val_len);
+  int copy_dim_ret = xpu_memcpy(&(h_total_dims[0]), total_dims, sizeof(int) * val_len, XPU_DEVICE_TO_HOST);
+  PADDLE_ENFORCE_EQ(
+       copy_dim_ret, 0,
+       platform::errors::PreconditionNotMet("CheckPullValue copy total_dim error."));
+
   std::vector<int> val_2_slot(val_len);
-  std::vector<bool> has_expand(val_len);
 
   int offset = 0;
   int xpu_ret = 0;
-  PADDLE_ENFORCE_EQ(
-      slot_lengths.size() * 2, values.size(),
-      platform::errors::PreconditionNotMet("CheckPullValue slot_length vs values.size error."));
-
+  if (expand_embed_dim > 0) {
+    PADDLE_ENFORCE_EQ(
+        slot_lengths.size() * 2, values.size(),
+        platform::errors::PreconditionNotMet("CheckPullValue slot_length vs values.size error."));
+  } else {
+    PADDLE_ENFORCE_EQ(
+        slot_lengths.size(), values.size(),
+        platform::errors::PreconditionNotMet("CheckPullValue slot_length vs values.size error."));
+  }
   int slot_num = slot_lengths.size();
   for (int i = 0; i < slot_num; ++i) {
     if (values[i] == nullptr) {
@@ -417,7 +428,9 @@ void CheckPullValue(
     if (slot_lengths[i] == 0) {
       continue;
     }
-    val_2_slot[offset] = i;
+    for (int j = 0; j < slot_lengths[i]; ++j) {
+        val_2_slot[offset + j] = i;
+    }
     // copy show/clk/embed/embedx
     xpu_ret = xpu_memcpy(&(h_values[offset * hidden_size]), values[i],
         sizeof(float) * hidden_size * slot_lengths[i], XPU_DEVICE_TO_HOST);
@@ -430,9 +443,7 @@ void CheckPullValue(
       platform::errors::PreconditionNotMet("CheckPullValue xpu_memcpy for emb error."));
 
     // copy expand emb
-    has_expand[offset] = false;
     if (expand_embed_dim > 0 && values[i + slot_num] != nullptr) {
-      has_expand[offset] = true;
       xpu_ret = xpu_memcpy(&(h_expand_values[offset * expand_embed_dim]), values[i + slot_num],
           sizeof(float) * expand_embed_dim * slot_lengths[i], XPU_DEVICE_TO_HOST);
       PADDLE_ENFORCE_EQ(xpu_ret, 0,
@@ -457,7 +468,7 @@ void CheckPullValue(
         break;
       }
     }
-    if (ret == 0) {
+    if (ret == 0 && (h_total_dims[i] & 0x01)) {
       for (int j = cvm_offset - 1; j < (int)hidden_size; ++j) {
         float & v = h_values[i * hidden_size + j];
         if (std::isnan(v) || std::isinf(v)) {
@@ -467,7 +478,7 @@ void CheckPullValue(
         }
       }
     }
-    if (ret == 0 && expand_embed_dim > 0 && has_expand[i]) {
+    if (ret == 0 && expand_embed_dim > 0 && (h_total_dims[i] & 0x02)) {
       for (int j = 0; j < expand_embed_dim; ++j) {
         float & v = h_expand_values[i * expand_embed_dim + j];
         if (std::isnan(v) || std::isinf(v)) {
@@ -502,12 +513,14 @@ void CheckPullValue(
     for (int i = 0; i < val_len; ++i) {
       ofs << "slot:" << val_2_slot[i] << "," << i<< "\t";
       ofs << hidden_size << ":";
-      for (int k = 0; k < (int)hidden_size; ++k) {
-        ofs << h_values[i * hidden_size + k] << ",";
+      if (h_total_dims[i] & 0x01) {
+        for (int k = 0; k < (int)hidden_size; ++k) {
+          ofs << h_values[i * hidden_size + k] << ",";
+        }
       }
       ofs << "\t";
       ofs << expand_embed_dim << ":";
-      if (expand_embed_dim > 0 && has_expand[i]) {
+      if (expand_embed_dim > 0 && (h_total_dims[i] & 0x02)) {
         for (int k = 0; k < expand_embed_dim; ++k) {
           ofs << h_expand_values[i * expand_embed_dim + k] << ",";
         }
@@ -710,7 +723,7 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
     xpu_wait(ctx_xpu->xpu_stream);
     CheckPullValue(
         device_id, values, slot_lengths, &pull_info_,
-        hidden_size, pull_info_.embedx_size - pull_info_.show, expand_embed_dim);
+        hidden_size, pull_info_.embedx_size - pull_info_.show, expand_embed_dim, total_dims);
   }
 #ifdef TRACE_PROFILE
   TRACE_SCOPE_END("CopyForPull", xpu_wait(ctx_xpu->xpu_stream));
@@ -917,7 +930,8 @@ void CheckPushValue(
     boxps::FeaturePushOffset * push_info,
     uint32_t hidden_size,
     int cvm_offset,
-    int expand_embed_dim) {
+    int expand_embed_dim,
+    int * total_dims) {
   int val_len = 0;
   for (uint32_t i = 0; i < slot_lengths.size(); ++i) {
     val_len += slot_lengths[i];
@@ -929,14 +943,24 @@ void CheckPushValue(
   if (expand_float_len > 0) {
     memset(&(h_expand_values[0]), 0, sizeof(float) * expand_float_len);
   }
+  std::vector<int> h_total_dims(val_len);
+  int copy_dim_ret = xpu_memcpy(&(h_total_dims[0]), total_dims, sizeof(int) * val_len, XPU_DEVICE_TO_HOST);
+  PADDLE_ENFORCE_EQ(
+       copy_dim_ret, 0,
+       platform::errors::PreconditionNotMet("CheckPushValue copy total_dim error."));
+
   std::vector<int> val_2_slot(val_len);
-  std::vector<bool> has_expand(val_len);
 
   int offset = 0;
-  PADDLE_ENFORCE_EQ(
-     slot_lengths.size() * 2, grad_values.size(),
-     platform::errors::PreconditionNotMet("CheckPushValue slot_length vs grad_values  error."));
-
+  if (expand_embed_dim > 0) {
+    PADDLE_ENFORCE_EQ(
+       slot_lengths.size() * 2, grad_values.size(),
+       platform::errors::PreconditionNotMet("CheckPushValue slot_length vs grad_values  error."));
+  } else {
+    PADDLE_ENFORCE_EQ(
+       slot_lengths.size(), grad_values.size(),
+       platform::errors::PreconditionNotMet("CheckPushValue slot_length vs grad_values  error."));
+  }
   int slot_num = slot_lengths.size();
   for (int i = 0; i < slot_num; ++i) {
     if (grad_values[i] == nullptr) {
@@ -950,14 +974,14 @@ void CheckPushValue(
     if (slot_lengths[i] == 0) {
       continue;
     }
-    val_2_slot[offset] = i;
+    for (int j = 0; j < slot_lengths[i]; ++j) {
+        val_2_slot[offset + j] = i;
+    }
     // copy show/clk/embed/embedx
     xpu_memcpy(&(h_values[offset * hidden_size]), grad_values[i],
         sizeof(float) * hidden_size * slot_lengths[i], XPU_DEVICE_TO_HOST);
     // copy expand emb
-    has_expand[offset] = false;
     if (expand_embed_dim > 0 && grad_values[i + slot_num] != nullptr) {
-        has_expand[offset] = true;
         xpu_memcpy(&(h_expand_values[offset * expand_embed_dim]), grad_values[i + slot_num],
                     sizeof(float) * expand_embed_dim * slot_lengths[i], XPU_DEVICE_TO_HOST);
     }
@@ -973,7 +997,7 @@ void CheckPushValue(
         break;
       }
     }
-    if (ret == 0) {
+    if (ret == 0 && (h_total_dims[i] & 0x01)) {
       for (int j = cvm_offset - 1; j < (int)hidden_size; ++j) {
         float & v = h_values[i * hidden_size + j];
         if (std::isnan(v) || std::isinf(v)) {
@@ -983,7 +1007,7 @@ void CheckPushValue(
         }
       }
     }
-    if (ret == 0 && expand_embed_dim > 0 && has_expand[i]) {
+    if (ret == 0 && expand_embed_dim > 0 && (h_total_dims[i] & 0x02)) {
       for (int j = 0; j < expand_embed_dim; ++j) {
         float & v = h_expand_values[i * expand_embed_dim + j];
         if (std::isnan(v) || std::isinf(v)) {
@@ -1019,12 +1043,14 @@ void CheckPushValue(
     for (int i = 0; i < val_len; ++i) {
       ofs << "slot:" << val_2_slot[i] << "," << i<< "\t";
       ofs << hidden_size << ":";
-      for (int k = 0; k < (int)hidden_size; ++k) {
-        ofs << h_values[i * hidden_size + k] << ",";
+      if (h_total_dims[i] & 0x01) {
+        for (int k = 0; k < (int)hidden_size; ++k) {
+          ofs << h_values[i * hidden_size + k] << ",";
+        }
       }
       ofs << "\t";
       ofs << expand_embed_dim << ":";
-      if (expand_embed_dim > 0 && has_expand[i]) {
+      if (expand_embed_dim > 0 && (h_total_dims[i] & 0x02)) {
         for (int k = 0; k < expand_embed_dim; ++k) {
           ofs << h_expand_values[i * expand_embed_dim + k] << ",";
         }
@@ -1125,9 +1151,10 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
 
   if (check_xpu_nan_) {
     xpu_wait(ctx_xpu->xpu_stream);
+    int * tmp_dims = reinterpret_cast<int*>(dev.dims_tensor.data<int>());
     CheckPushValue(
       device_id, grad_values, slot_lengths, &push_info_, hidden_size,
-      pull_info_.embedx_size - pull_info_.show, expand_embed_dim);
+      pull_info_.embedx_size - pull_info_.show, expand_embed_dim, tmp_dims);
   }
 
 #ifdef TRACE_PROFILE
