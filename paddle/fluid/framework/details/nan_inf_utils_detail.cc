@@ -23,6 +23,10 @@
 #endif
 #include "paddle/fluid/framework/convert_utils.h"
 
+#ifdef PADDLE_WITH_XPU
+#include "xpu/refactor/math.h"
+#endif
+
 namespace paddle {
 namespace framework {
 namespace details {
@@ -391,22 +395,48 @@ void CheckVarHasNanOrInf(const std::string& op_type,
       return;
     }
 
-    float* cpu_data = new float[tensor->numel()];
+    // float* cpu_data = new float[tensor->numel()];
+    // memory::Copy(platform::CPUPlace(),
+    //              static_cast<void*>(cpu_data),
+    //              tensor->place(),
+    //              static_cast<const void*>(tensor->data<float>()),
+    //              tensor->numel() * sizeof(float));
+    // bool flag = false;
+    // for (int i = 0; i < tensor->numel(); i++) {
+    //   if (isnan(cpu_data[i]) || isinf(cpu_data[i])) {
+    //     flag = true;
+    //     break;
+    //   }
+    // }
+    // delete[] cpu_data;
+
+    using XPUType = typename XPUTypeTrait<float>::Type;
+    platform::XPUDeviceContext* dev_ctx = dynamic_cast<platform::XPUDeviceContext*>(
+        platform::DeviceContextPool::Instance().Get(tensor->place()));
+    const XPUType* x = reinterpret_cast<const XPUType*>(tensor->data<float>());
+
+    Tensor y_tensor;
+    bool* y_ptr = y_tensor.mutable_data<bool>({1}, place);
+    int r = xpu::check_nan_or_inf<XPUType>(dev_ctx->x_context(), 
+                              x, 
+                              y_ptr,
+                              tensor->numel());
+    PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
+            platform::errors::External(
+               "The check_nan_or_inf XPU OP return wrong value[%d %s]",
+               r, XPUAPIErrorMsg[r]));
+    dev_ctx->Wait();
+
+    bool check_res = false;
+    bool* res_ptr = &check_res;
     memory::Copy(platform::CPUPlace(),
-                 static_cast<void*>(cpu_data),
-                 tensor->place(),
-                 static_cast<const void*>(tensor->data<float>()),
-                 tensor->numel() * sizeof(float));
-    bool flag = false;
-    for (int i = 0; i < tensor->numel(); i++) {
-      if (isnan(cpu_data[i]) || isinf(cpu_data[i])) {
-        flag = true;
-        break;
-      }
-    }
-    delete[] cpu_data;
+                 static_cast<void*>(res_ptr),
+                 y_tensor.place(),
+                 static_cast<const void*>(y_tensor.data<bool>()),
+                 y_tensor.numel() * sizeof(bool));
+    VLOG(3) << "CheckVarHasNanOrInfRet check_res = " << check_res;
     PADDLE_ENFORCE_NE(
-        flag,
+        check_res,
         true,
         platform::errors::Fatal(
             "Operator %s output Tensor %s contains Inf.", op_type, var_name));
@@ -719,23 +749,54 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
 #ifdef PADDLE_WITH_XPU
     if (framework::TransToProtoVarType(tensor->dtype()) !=
         proto::VarType::FP32) {
+      LOG(WARNING) << "skip check_nan_inf, tensor type:" << tensor->dtype() << " not float32!";
       return;
     }
 
-    float* cpu_data = new float[tensor->numel()];
+    // float* cpu_data = new float[tensor->numel()];
+    // memory::Copy(platform::CPUPlace(),
+    //              static_cast<void*>(cpu_data),
+    //              tensor->place(),
+    //              static_cast<const void*>(tensor->data<float>()),
+    //              tensor->numel() * sizeof(float));
+    // // bool flag = false;
+    // for (int64_t i = 0; i < tensor->numel(); i++) {
+    //   if (isnan(cpu_data[i]) || isinf(cpu_data[i])) {
+    //     get_cpu_nan_inf_num() ++;
+    //     break;
+    //   }
+    // }
+    // delete[] cpu_data;
+
+    using XPUType = typename XPUTypeTrait<float>::Type;
+    platform::XPUDeviceContext* dev_ctx = dynamic_cast<platform::XPUDeviceContext*>(
+        platform::DeviceContextPool::Instance().Get(tensor->place()));
+    const XPUType* x = reinterpret_cast<const XPUType*>(tensor->data<float>());
+
+    Tensor y_tensor;
+    bool* y_ptr = y_tensor.mutable_data<bool>({1}, place);
+    int r = xpu::check_nan_or_inf<XPUType>(dev_ctx->x_context(), 
+                              x, 
+                              y_ptr,
+                              tensor->numel());
+    PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
+            platform::errors::External(
+               "The check_nan_or_inf XPU OP return wrong value[%d %s]",
+               r, XPUAPIErrorMsg[r]));
+    dev_ctx->Wait();
+
+    bool check_res = false;
+    bool* res_ptr = &check_res;
     memory::Copy(platform::CPUPlace(),
-                 static_cast<void*>(cpu_data),
-                 tensor->place(),
-                 static_cast<const void*>(tensor->data<float>()),
-                 tensor->numel() * sizeof(float));
-    // bool flag = false;
-    for (int64_t i = 0; i < tensor->numel(); i++) {
-      if (isnan(cpu_data[i]) || isinf(cpu_data[i])) {
-        get_cpu_nan_inf_num() ++;
-        break;
-      }
+                 static_cast<void*>(res_ptr),
+                 y_tensor.place(),
+                 static_cast<const void*>(y_tensor.data<bool>()),
+                 y_tensor.numel() * sizeof(bool));
+    VLOG(3) << "CheckVarHasNanOrInfRet check_res = " << check_res;
+    if (check_res) {
+      get_cpu_nan_inf_num() ++;
     }
-    delete[] cpu_data;
+    return;
 #endif
   }
 #if defined(PADDLE_WITH_CUDA)
@@ -743,6 +804,7 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
   CudaTensorCheckNanInf(*tensor, dnum);
 #endif
 }
+
 bool CheckBatchNanOrInfRet(const platform::Place& place) {
   if (!platform::is_gpu_place(place)) {
     return (get_cpu_nan_inf_num() > 0);
@@ -829,9 +891,10 @@ void DumpTensorToFile(const std::string& path, const std::string& prefix,
   out.write(s.c_str(), s.length());
   out.close();
 }
+
 void DumpAllScope(const Scope& exec_scope, const platform::Place& place) {
   int device_id = 0;
-#if defined(PADDLE_WITH_CUDA) && !defined(_WIN32)
+#if (defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU)) && !defined(_WIN32)
   device_id = place.GetDeviceId();
 #endif
   VLOG(0) << "begin dump scope all tensor data, device id=" << device_id;

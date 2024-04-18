@@ -776,7 +776,7 @@ void BoxPSWorker::TrainFiles() {
         SyncParam();
       }
     }
-#if defined(PADDLE_WITH_CUDA)
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU)
     if (FLAGS_check_nan_inf) {
       // check nan result
       if (framework::details::CheckBatchNanOrInfRet(place_)) {
@@ -892,7 +892,7 @@ void BoxPSWorker::TrainFilesWithProfiler() {
     TRACE_SCOPE_END("ops run",);
 #endif
     cal_timer.Pause();
-#if defined(PADDLE_WITH_CUDA)
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU)
     if (FLAGS_check_nan_inf) {
       // check nan result
       if (framework::details::CheckBatchNanOrInfRet(place_)) {
