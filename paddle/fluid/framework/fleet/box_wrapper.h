@@ -465,6 +465,12 @@ class BoxWrapper {
       check_xpu_nan_ = true;
       VLOG(0) << "CHECK_XPU_BOXPS_NAN has been set to check paddle pull&push";
     }
+    check_xpu_continuous_memory_ = true;
+    env_str = std::getenv("CHECK_XPU_CONTINUOUS_MEMORY");
+    if (env_str != nullptr && (strcmp(env_str, "false") == 0 || strcmp(env_str, "0") == 0)) {
+      check_xpu_continuous_memory_ = false;
+      VLOG(0) << "CHECK_XPU_CONTINUOUS_MEMORY has been unset to check paddle pull&push";
+    }
 
 #endif
 #if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
@@ -977,6 +983,7 @@ class BoxWrapper {
   int gpu_num_ = GetDeviceCount();
 #ifdef PADDLE_WITH_XPU_KP
   bool check_xpu_nan_;
+  bool check_xpu_continuous_memory_;
   bool use_xpu_sparse_map_;
   std::vector<uint64_t> * fid2sign_map_ = nullptr;
   std::unique_ptr<BoxWrapperKernel> box_wrapper_kernel_;

@@ -145,6 +145,9 @@ static void PullBoxExtendedSparseFunctor(
         }
         auto *output = outputs[embedx_offset]->mutable_data<T>(ctx.GetPlace());
         all_values[i] = reinterpret_cast<float*>(output);
+        if (outputs[embedx_offset]->numel() == 0) {
+          all_values[i] = nullptr;
+        }
         ++embedx_offset;
       } else {
         all_values[i] = 0;
@@ -159,6 +162,9 @@ static void PullBoxExtendedSparseFunctor(
         }
         auto *output_extend = outputs_extend[expand_offset]->mutable_data<T>(ctx.GetPlace());
         all_values[i + slot_size] = reinterpret_cast<float*>(output_extend);
+        if(outputs_extend[expand_offset]->numel() == 0) {
+          all_values[i] = nullptr;
+        }
         ++expand_offset;
       } else {
         all_values[i + slot_size] = 0;

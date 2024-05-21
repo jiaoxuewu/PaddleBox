@@ -56,6 +56,19 @@ PADDLE_DEFINE_EXPORTED_int32(paddle_num_threads,
 
 /**
  * Operator related FLAG
+ * Name: FLAGS_check_fused_negative_nan_inf
+ * Since Version: 0.13.0
+ * Value Range: bool, default=false
+ * Example:
+ * Note: Used to debug. Checking whether operator produce NAN/INF or not.
+ */
+PADDLE_DEFINE_EXPORTED_bool(
+    check_fused_negative_nan_inf,
+    false,
+    "Checking whether fused's op's input/output have NAN/INF or not. It will be "
+    "extremely slow so please use this flag wisely.");
+/**
+ * Operator related FLAG
  * Name: FLAGS_check_nan_inf
  * Since Version: 0.13.0
  * Value Range: bool, default=false

@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_op.h"
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_utils_xpu.h"
 #ifdef PADDLE_WITH_BOX_PS
 #include "paddle/fluid/framework/fleet/box_wrapper.h"
 #else
@@ -28,6 +29,7 @@ limitations under the License. */
 #include <scalopus_general/endpoint_manager_poll.h>
 #include <scalopus_general/general_provider.h>
 #include <scalopus_tracing/native_trace_provider.h>
+DECLARE_bool(check_fused_negative_nan_inf);
 namespace paddle {
 namespace operators {
 
@@ -144,6 +146,11 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
 #ifdef TRACE_PROFILE
     TRACE_SCOPE_START("xpu::sequence_sum_pool_cvm", xpu_wait(xpu_context->xpu_stream););
 #endif
+
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, ins, "fused-x");
+    }
     int r = xpu::sequence_sum_pool_cvm<T>(xpu_context,
                                           cpu_x_addr_vec,
                                           cpu_y_addr_vec,
@@ -168,6 +175,10 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
                      platform::errors::External(
                          "The sequence_sum_pool_cvm XPU OP return wrong value[%d %s]",
                          r, XPUAPIErrorMsg[r]));
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, out, "fused-y");
+    }
     TRACE_SCOPE_END("xpu::sequence_sum_pool_cvm", xpu_wait(xpu_context->xpu_stream););
     TRACE_SCOPE_END("FusedSeqpoolCVMOpXPUKernel Compute", xpu_wait(xpu_context->xpu_stream));
   }
@@ -235,6 +246,11 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
         start_index += lod_size;
     }
 
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_negative(place, xpu_context, cvm_data, cvm->numel());
+      check_tensors_nan(place, xpu_context, dOut, "fused-dy");
+    }
     int r = xpu::sequence_sum_pool_cvm_grad<T>(xpu_context,
                                                cpu_dy_list,
                                                cvm_data,
@@ -252,6 +268,10 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
             platform::errors::External(
                "The sequence_pool_cvm_grad XPU OP return wrong value[%d %s]",
                r, XPUAPIErrorMsg[r]));
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, dxs, "fused-dx");
+    }
     TRACE_SCOPE_END("FusedSeqpoolCVMGradOpXPUKernel Compute", xpu_wait(xpu_context->xpu_stream));
   }
 };

@@ -534,6 +534,162 @@ void CheckPullValue(
   PADDLE_ENFORCE_EQ(ret, 0,
       platform::errors::PreconditionNotMet("CheckPullValue detect error value."));
 }
+
+void check_continuous_memory_pull(int dev_id,
+                                  const std::vector<float*>& values,
+                                  const std::vector<int64_t>& slot_lengths,
+                                  uint32_t hidden_size,
+                                  int expand_embed_dim,
+                                  int total_length) {
+  int slot_num = slot_lengths.size();
+
+  bool ret = true;
+  uint32_t error_idx = -1;
+  float* head_ptr = nullptr;
+  for (int i = 0; i < slot_num; i++) {
+    if (values[i] != nullptr && slot_lengths[i]) {
+      head_ptr = values[i];
+      break;
+    }
+  }
+  float* next_ptr = head_ptr;
+  for (int i = 0; i < slot_num; i++) {
+    if (values[i] && slot_lengths[i]) {
+      if (next_ptr != values[i]) {
+        ret = false;
+        error_idx = i;
+        break;
+      }
+      next_ptr = values[i] + slot_lengths[i] * hidden_size;
+    }
+  }
+
+  if (expand_embed_dim > 0 && ret != false) {
+    float* virtual_expand = head_ptr + hidden_size * total_length;
+    for (int i = 0; i < slot_num; i++) {
+      if (values[slot_num + i] && slot_lengths[i]) {
+        if (virtual_expand != values[slot_num + i]) {
+          ret = false;
+          error_idx = i;
+          break;
+        }
+      }
+      virtual_expand += slot_lengths[i] * expand_embed_dim;
+    }
+  }
+  if (ret == false) {
+    float* virtual_expand = head_ptr + hidden_size * total_length;
+    VLOG(0) << "dev: " << dev_id << ", error_idx: " << error_idx;
+    for (int i = 0; i < slot_num; i++) {
+      VLOG(0) << "dev: "
+              << dev_id
+              << ", pull_copy values["
+              << i
+              << "]: "
+              << values[i]
+              << ", slot_lengths["
+              << i
+              << "]: "
+              << (int)slot_lengths[i]
+              << ", next_prt: "
+              << values[i] + slot_lengths[i] * hidden_size
+              << ", expand_values["
+              << slot_num + i
+              << "]: "
+              << values[i + slot_num]
+              << ", virtual_expand_values["
+              << slot_num + i
+              << "]: "
+              << virtual_expand
+              << ", next_prt: "
+              << virtual_expand + slot_lengths[i] * expand_embed_dim;
+      virtual_expand += slot_lengths[i] * expand_embed_dim;
+    }
+  }
+  PADDLE_ENFORCE_EQ(
+      ret,
+      true,
+      platform::errors::PreconditionNotMet(
+          "Check Memory Continuous failed before CopyForPull, make sure no "
+          "layer between pull and fused_seqpool_cvm"));
+}
+
+void check_continuous_memory_push(int dev_id,
+                                  const std::vector<const float*>& grad_values,
+                                  const std::vector<int64_t>& slot_lengths,
+                                  uint32_t hidden_size,
+                                  int expand_embed_dim) {
+  int slot_num = slot_lengths.size();
+
+  bool ret = true;
+  float* head_ptr = nullptr;
+  for (int i = 0; i < slot_num; i++) {
+    if (grad_values[i] != nullptr && slot_lengths[i]) {
+      head_ptr = (float*)grad_values[i];
+      break;
+    }
+  }
+  float* next_ptr = head_ptr;
+  for (int i = 0; i < slot_num; i++) {
+    if (grad_values[i] && slot_lengths[i]) {
+      if (next_ptr != grad_values[i]) {
+        ret = false;
+        break;
+      }
+      next_ptr = (float*)grad_values[i] + slot_lengths[i] * hidden_size;
+    }
+  }
+
+  if (expand_embed_dim > 0 && ret != false) {
+    float* expand_head_ptr = nullptr;
+    for (int i = 0; i < slot_num; i++) {
+      if (grad_values[slot_num + i] != nullptr && slot_lengths[i]) {
+        expand_head_ptr = (float*)grad_values[slot_num + i];
+        break;
+      }
+    }
+    float* expand_next_ptr = expand_head_ptr;
+    for (int i = 0; i < slot_num; i++) {
+      if (grad_values[slot_num + i] && slot_lengths[i]) {
+        if (expand_next_ptr != grad_values[slot_num + i]) {
+          ret = false;
+          break;
+        }
+        expand_next_ptr = (float*)grad_values[slot_num + i] +
+                          slot_lengths[i] * expand_embed_dim;
+      }
+    }
+  }
+  if (ret == false) {
+    for (int i = 0; i < slot_num; i++) {
+      VLOG(0) << "dev: "
+              << dev_id
+              << ", push_copy grad_values["
+              << i
+              << "]: "
+              << grad_values[i]
+              << ", slot_lengths["
+              << i
+              << "]: "
+              << (int)slot_lengths[i]
+              << ", next_prt: "
+              << grad_values[i] + slot_lengths[i] * hidden_size
+              << ", expand_grad_values["
+              << slot_num + i
+              << "]: "
+              << grad_values[i + slot_num]
+              << ", next_prt: "
+              << grad_values[i + slot_num] + slot_lengths[i] * expand_embed_dim;
+    }
+  }
+
+  PADDLE_ENFORCE_EQ(
+      ret,
+      true,
+      platform::errors::PreconditionNotMet(
+          "Check Memory Continuous failed before CopyForPush, make sure no "
+          "layer between pull and fused_seqpool_cvm"));
+}
 #endif
 
 void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
@@ -714,6 +870,14 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
     thread_get_restore_idx.join();
   }
 
+  if(check_xpu_continuous_memory_) {
+    check_continuous_memory_pull(device_id,
+                                 values,
+                                 slot_lengths,
+                                 hidden_size,
+                                 expand_embed_dim,
+                                 total_length);
+  }
   box_wrapper_kernel_->CopyForPull(place, xpu_keys, (float**)values.data(), total_values_xpu,
                                    pull_offset, slot_lengths_lod.data(), slot_num, key2slot, d_res_idx, hidden_size,
                                    expand_embed_dim, total_length, total_dims, skip_offset,
@@ -1223,6 +1387,14 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                platform::CPUPlace(),
                slot_inner_offset.data(),
                total_length * sizeof(int));
+
+  if(check_xpu_continuous_memory_) {
+    check_continuous_memory_push(device_id,
+                                 grad_values,
+                                 slot_lengths,
+                                 hidden_size,
+                                 expand_embed_dim);
+  }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,
       push_offset, total_length, slot_vector, (int*)d_slot_inner_offset, slot_lens, slot_num,

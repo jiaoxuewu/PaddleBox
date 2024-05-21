@@ -117,7 +117,7 @@ void TensorCopyImpl(const TENSOR& src,
     memory::Copy(dst_place, dst_ptr, src_place, src_ptr, size);
   } else if ((platform::is_xpu_place(src_place) || platform::is_xpul3_place(src_place)) &&
              (platform::is_xpu_place(dst_place) || platform::is_xpul3_place(dst_place))) {
-    if (src_ptr == dst_ptr) {
+    if (src_ptr == dst_ptr && src_place == dst_place) {
       VLOG(3) << "Skip copy the same data async from " << src_place << " to "
               << dst_place;
       return;

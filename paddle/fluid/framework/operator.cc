@@ -1763,11 +1763,14 @@ void OperatorWithKernel::RunImpl(const Scope& scope,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU) || defined(PADDLE_WITH_XPU_KP)
     if (framework::details::CheckOpHasNanOrInfRet(*this, exec_scope, place)) {
       framework::details::DumpAllScope(exec_scope, place);
+      VLOG(0) << "op_type: " << Type() << ", CheckOpHasNanOrInf failed!!";
       // dump current op data
       for (auto& iname : InputVars()) {
         auto* var = exec_scope.FindVar(iname);
         if (var == nullptr) continue;
+        VLOG(0) << "op_input: " << iname;
         std::ostringstream os;
+        os << "op type: " << type_ << "\n";
         os << "input name:" << iname << ", ";
         if (var->IsType<framework::LoDTensor>()) {
           os << var->Get<framework::LoDTensor>();
@@ -1780,7 +1783,9 @@ void OperatorWithKernel::RunImpl(const Scope& scope,
       for (auto& iname : OutputVars(true)) {
         auto* var = exec_scope.FindVar(iname);
         if (var == nullptr) continue;
+        VLOG(0) << "op_output: " << iname;
         std::ostringstream os;
+        os << "op type: " << type_ << "\n";
         os << "output name:" << iname << ", ";
         if (var->IsType<framework::LoDTensor>()) {
           os << var->Get<framework::LoDTensor>();
