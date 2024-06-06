@@ -1414,9 +1414,7 @@ __global__ void PushCopyNNCross(const TExpandPushGetOp* op,
       if((lm_total_dims[j] & 0x02) && sm_src_expand_vals_ptr[lm_key2slot[j]] !=0) {
         lm_src_expand_vals_ptr[0] = sm_src_expand_vals_ptr[lm_key2slot[j]];
         mfence();
-        GM2LM(((__global_ptr__ float*)lm_src_expand_vals_ptr[0] + lm_slot_inner_offset[j] * (expand_embed_dim + hidden_size)), 
-              lm_src_expand_vals, 
-              (expand_embed_dim + hidden_size) * sizeof(float));
+        GM2LM(((__global_ptr__ float*)lm_src_expand_vals_ptr[0] + lm_slot_inner_offset[j] * expand_embed_dim), lm_src_expand_vals, expand_embed_dim * sizeof(float));
         mfence();
         for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
           lm_dst_vals[j * push_float_num + k] = lm_op[0].get(lm_src_expand_vals,
