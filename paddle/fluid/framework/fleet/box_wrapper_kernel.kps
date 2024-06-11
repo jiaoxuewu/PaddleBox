@@ -1016,8 +1016,9 @@ __global__ void PullCopyMerged(const TEmbedxOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int buf_length = 30;
-  const int same_key_idx_buf_len = 30;
+  const int total_local_mem = 7000;
+  const int buf_length = total_local_mem / ((hidden_size + pull_float_num + 3) * 4);
+  const int same_key_idx_buf_len = buf_length;
   int per_thread_len = roundup_div(merged_length, nthreads);
   int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
   int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
