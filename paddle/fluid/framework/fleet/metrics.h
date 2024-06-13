@@ -124,6 +124,8 @@ class BasicAucCalculator {
   double mae() const { return _mae; }
   double nan_rate() const { return _nan_rate; }
   double inf_rate() const { return _inf_rate; }
+  double nan_cnt() const { return _nan_cnt; }
+  double inf_cnt() const { return _inf_cnt; }
   double nan_inf_rate() const { return _nan_inf_rate; }
   double actual_ctr() const { return _actual_ctr; }
   double predicted_ctr() const { return _predicted_ctr; }

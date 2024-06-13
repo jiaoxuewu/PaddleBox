@@ -417,6 +417,7 @@ void CheckVarHasNanOrInf(const std::string& op_type,
 
     Tensor y_tensor;
     bool* y_ptr = y_tensor.mutable_data<bool>({1}, place);
+
     int r = xpu::check_nan_or_inf<XPUType>(dev_ctx->x_context(),
                               x,
                               y_ptr,
@@ -780,6 +781,7 @@ void CheckVarHasNanOrInfRet(const std::string& op_type,
 
     Tensor y_tensor;
     bool* y_ptr = y_tensor.mutable_data<bool>({1}, place);
+
     VLOG(1) << "Check its output indeed:" << var_name;
     int r = xpu::check_nan_or_inf<XPUType>(dev_ctx->x_context(),
                               x,

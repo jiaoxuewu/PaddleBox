@@ -326,6 +326,7 @@ class RankAttentionGradOpMaker : public framework::SingleGradOpMaker<T> {
     op->SetAttrMap(this->Attrs());
   }
 };
+
 DECLARE_NO_NEED_BUFFER_VARS_INFERER(RankAttentionGradOpNoNeedBufferVarsInference,
                                     "X",
                                     "RankOffset",

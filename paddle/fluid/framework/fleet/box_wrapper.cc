@@ -1115,8 +1115,8 @@ const std::vector<double> BoxWrapper::GetNanInfMetricMsg(
   std::vector<double> metric_return_values_(4, 0.0);
   auto* naninf_cal_ = iter->second->GetCalculator();
   naninf_cal_->computeNanInfMsg();
-  metric_return_values_[0] = naninf_cal_->nan_rate();
-  metric_return_values_[1] = naninf_cal_->inf_rate();
+  metric_return_values_[0] = naninf_cal_->nan_cnt();
+  metric_return_values_[1] = naninf_cal_->inf_cnt();
   metric_return_values_[2] = naninf_cal_->nan_inf_rate();
   metric_return_values_[3] = naninf_cal_->size();
   naninf_cal_->reset_nan_inf();

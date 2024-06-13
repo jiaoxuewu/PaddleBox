@@ -12,10 +12,12 @@ limitations under the License. */
 
 #ifdef PADDLE_WITH_XPU
 #include <vector>
+#include <mutex>
 
 #include "paddle/fluid/platform/place.h"
 #include "paddle/phi/backends/xpu/xpu_info.h"
 #include "xpu/runtime.h"
+#include "xpu/xpuml.h"
 
 namespace paddle {
 
@@ -105,6 +107,48 @@ void XPUStreamSync(xpuStream stream);
 using XPUDeviceGuard = phi::backends::xpu::XPUDeviceGuard;
 
 phi::backends::xpu::XPUVersion get_xpu_version(int dev_id);
+
+class XPUMLHandler {
+public:
+    XPUMLHandler();
+    // total, used, free
+    bool getMemoryUsageInfo(int dev_id, unsigned long long *total, unsigned long long* used, unsigned long long *free);
+    bool getL3UsageInfo(int dev_id, unsigned long long *total, unsigned long long *used, unsigned long long *free);
+
+    // (total, used, free)
+    std::tuple<unsigned long long, unsigned long long, unsigned long long> getMemoryUsageTuple(int dev_id);
+    std::tuple<unsigned long long, unsigned long long, unsigned long long> getL3UsageTuple(int dev_id);
+
+private:
+    static void init_ml();
+
+    static std::once_flag init_flag_;
+
+    std::vector<xpumlDevice_t> device_handlers_;
+    std::vector<xpumlMemory_t> mem_infos_;
+    unsigned int device_nums_;
+};
+
+XPUError_t RecordedXpuMalloc(void **ptr, size_t size, int dev_id, bool malloc_managed_memory = false);
+
+void RecordedXpuFree(void *p, size_t size, int dev_id);
+
+bool RecordedXpuMemGetInfo(size_t *avail,
+                           size_t *total,
+                           size_t *actual_avail,
+                           size_t *actual_total,
+                           int dev_id);
+
+size_t XpuMinChunkSize();
+size_t XpuMaxChunkSize();
+
+size_t XpuInitAllocSize();
+size_t XpuReallocSize();
+size_t XpuMaxAllocSize();
+
+// for calculate malloc times
+int get_malloc_cnt(int dev_id);
+int inc_malloc_cnt(int dev_id);
 
 }  // namespace platform
 }  // namespace paddle

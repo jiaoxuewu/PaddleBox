@@ -719,6 +719,18 @@ void BindTensor(pybind11::module &m) {  // NOLINT
              }
              return dst;
            })
+      .def("copy_from",
+           [](framework::Tensor &self, const framework::Tensor &src) {
+             // follow fetch_op's inplementation
+             if (src.IsInitialized() && src.numel() > 0) {
+               TensorCopySync(src, src.place(), &self);
+             } else {
+               // Not copy, if the src tensor is empty.
+               self.clear();
+               self.Resize({0});
+             }
+             self.set_lod(src.lod());
+           })
       .def("_copy",
            [](const framework::Tensor &self, const platform::Place &place) {
              // follow fetch_op's inplementation

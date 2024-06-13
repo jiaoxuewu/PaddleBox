@@ -133,6 +133,9 @@ class ThreadPool {
     }
     // VLOG(0) << "binding read ins thread_id = " << tid << ", cpunum = " <<
   }
+  int GetThreadNum(void) {
+    return static_cast<int>(threads_.size());
+  }
 
  private:
   DISABLE_COPY_AND_ASSIGN(ThreadPool);
@@ -183,7 +186,7 @@ std::future<void> AsyncIO(Callback callback) {
 inline paddle::framework::ThreadPool* get_thread_pool(int thread_num) {
   thread_local std::shared_ptr<paddle::framework::ThreadPool> thread_pool =
       nullptr;
-  if (thread_pool == nullptr) {
+  if (thread_pool == nullptr || thread_pool->GetThreadNum() < thread_num) {
     thread_pool.reset(new paddle::framework::ThreadPool(thread_num));
   }
   return thread_pool.get();
@@ -231,6 +234,22 @@ inline void parallel_run_dynamic(size_t n, THREAD_FUNC&& func, int thread_num = 
         func(i);
         i = counter++;
       }
+    }));
+  }
+  for (int i = 0; i < thread_num; ++i) {
+    wait_futures[i].get();
+  }
+}
+template <class THREAD_FUNC>
+inline void parallel_run_range(size_t n, THREAD_FUNC&& func, paddle::framework::ThreadPool* thrgrp) {
+  int thread_num = thrgrp->GetThreadNum();
+  std::vector<std::future<void>> wait_futures;
+  for (int tid = 0; tid < thread_num; ++tid) {
+    wait_futures.emplace_back(thrgrp->Run([n, tid, thread_num, &func](void) {
+      size_t start = 0;
+      size_t end = 0;
+      split_region(n, thread_num, tid, &start, &end);
+      func(tid, start, end);
     }));
   }
   for (int i = 0; i < thread_num; ++i) {

@@ -3122,6 +3122,7 @@ void SlotPaddleBoxDataFeed::GetUsedSlotIndex(
   // get feasigns that FeedPass doesn't need
   const std::unordered_set<std::string>& slot_name_omited_in_feedpass_ =
       boxps_ptr->GetOmitedSlot();
+
   if (used_slot_index != nullptr) {
     used_slot_index->clear();
   }
@@ -3694,9 +3695,11 @@ void SlotPaddleBoxDataFeed::BuildSlotBatchGPU(const int ins_num) {
                         slot_total_num * sizeof(size_t),
                         cudaMemcpyDeviceToHost, stream));
   cudaStreamSynchronize(stream);
+
 #elif defined(PADDLE_WITH_XPU_KP)
   platform::MemcpySyncD2H(offsets.data(), d_slot_offsets, slot_total_num * sizeof(size_t), this->place_);
 #endif
+
   copy_timer_.Pause();
   data_timer_.Resume();
 
@@ -3762,6 +3765,7 @@ void SlotPaddleBoxDataFeed::BuildSlotBatchGPU(const int ins_num) {
 
   trans_timer_.Resume();
   void** dest_gpu_p = reinterpret_cast<void**>(pack_->slot_buf_ptr());
+
 #if defined(PADDLE_WITH_CUDA)
   CUDA_CHECK(cudaMemcpyAsync(dest_gpu_p, h_tensor_ptrs.data(),
                         use_slot_size_ * sizeof(void*),

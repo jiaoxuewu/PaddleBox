@@ -147,8 +147,9 @@ limitations under the License. */
 #endif
 
 #ifdef PADDLE_WITH_XPU
-#include "paddle/fluid/platform/device/xpu/xpu_info.h"
-#include "paddle/fluid/platform/device/xpu/xpu_op_list.h"
+// #include "paddle/fluid/platform/device/xpu/xpu_info.h"
+// #include "paddle/fluid/platform/device/xpu/xpu_op_list.h"
+#include "paddle/fluid/pybind/xpu_info_py.h"
 #endif
 
 #ifdef PADDLE_WITH_CUSTOM_DEVICE
@@ -529,6 +530,10 @@ static int GetNCCLVersion() {
 PYBIND11_MODULE(core_avx, m) {
 #else
 PYBIND11_MODULE(core_noavx, m) {
+#endif
+
+#ifdef PADDLE_WITH_XPU
+  BindXPUInfo(&m);
 #endif
 
   BindImperative(&m);
@@ -2420,7 +2425,10 @@ All parameter, weight, gradient are variables in Paddle.
   BindNeighborSampleResult(&m);
   BindGraphGpuWrapper(&m);
 #endif
+
 #endif
 }
+
+
 }  // namespace pybind
 }  // namespace paddle

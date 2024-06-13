@@ -58,16 +58,20 @@ void InitGpuProperties(Place place,
   *runtime_version = backends::gpu::GetGPURuntimeVersion(place.GetDeviceId());
 
   // TODO(wilber): glog may be replaced in the future?
-  LOG_FIRST_N(WARNING, 1) << "Please NOTE: device: "
-                          << static_cast<int>(place.device)
-                          << ", GPU Compute Capability: "
-                          << *compute_capability / 10 << "."
-                          << *compute_capability % 10
-                          << ", Driver API Version: " << *driver_version / 1000
-                          << "." << (*driver_version % 100) / 10
-                          << ", Runtime API Version: "
-                          << *runtime_version / 1000 << "."
-                          << (*runtime_version % 100) / 10;
+  LOG_FIRST_N(WARNING, 1)
+      << "Please NOTE: device: " << static_cast<int>(place.device)
+      << ", GPU Compute Capability: " << *compute_capability / 10 << "."
+      << *compute_capability % 10
+      << ", Driver API Version: " << *driver_version / 1000 << "."
+      << (*driver_version % 100) / 10
+      << ", Runtime API Version: " << *runtime_version / 1000 << "."
+      << (*runtime_version % 100) / 10 << ", Build Date "
+#ifdef PADDLE_BRANCH_NAME
+      << __DATE__ << " Time " << __TIME__
+      << ", Git Version: " PADDLE_BRANCH_NAME ":" PADDLE_COMMIT_HASH;
+#else
+      << __DATE__ << " Time " << __TIME__;
+#endif
 #ifdef PADDLE_WITH_HIP
   size_t miopen_major, miopen_minor, miopen_patch;
   PADDLE_ENFORCE_GPU_SUCCESS(

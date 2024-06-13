@@ -478,11 +478,23 @@ void MatMulFunction(const Context& dev_ctx,
                     DenseTensor* Out,
                     bool trans_x,
                     bool trans_y,
-                    bool flag = false) {
+                    bool flag) {
   const std::vector<std::int64_t> x_dims = vectorize(X.dims());
   const std::vector<std::int64_t> y_dims = vectorize(Y.dims());
   MatMulFunction<Context, T>(
       dev_ctx, X, Y, x_dims, y_dims, Out, trans_x, trans_y, flag);
+}
+template <typename Context, typename T>
+void MatMulFunction(const Context& dev_ctx,
+                    const DenseTensor& X,
+                    const DenseTensor& Y,
+                    DenseTensor* Out,
+                    bool trans_x,
+                    bool trans_y) {
+  const std::vector<std::int64_t> x_dims = vectorize(X.dims());
+  const std::vector<std::int64_t> y_dims = vectorize(Y.dims());
+  MatMulFunction<Context, T>(
+      dev_ctx, X, Y, x_dims, y_dims, Out, trans_x, trans_y, false);
 }
 
 template <typename T, typename Context>

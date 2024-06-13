@@ -23,6 +23,9 @@ limitations under the License. */
     defined(PADDLE_WITH_MLU) || defined(PADDLE_WITH_ASCEND_CL)
 #define USE_DEVICE
 DECLARE_uint64(reallocate_gpu_memory_in_mb);
+#elif defined(PADDLE_WITH_XPU)
+#define USE_DEVICE
+DECLARE_uint64(reallocate_xpu_memory_in_mb);
 #endif
 
 #include "paddle/fluid/platform/device/device_wrapper.h"
@@ -55,8 +58,11 @@ BuddyAllocator::BuddyAllocator(
     };
   } else {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    init_allocate_size_func_ = &platform::GpuInitAllocSize;
+    init_allocate_size_func_ = &platform::GpuInitAllocSize; 
     re_allocate_size_func_ = &platform::GpuReallocSize;
+#elif defined(PADDLE_WITH_XPU)
+    init_allocate_size_func_ = &platform::XpuInitAllocSize; 
+    re_allocate_size_func_ = &platform::XpuReallocSize;
 #elif defined(PADDLE_WITH_ASCEND_CL)
     init_allocate_size_func_ = &platform::NPUInitAllocSize;
     re_allocate_size_func_ = &platform::NPUReallocSize;
@@ -97,7 +103,8 @@ void* BuddyAllocator::Alloc(size_t unaligned_size) {
   VLOG(10) << "alloc: " << unaligned_size
            << ", padding for desc: " << sizeof(MemoryBlock::Desc)
            << ", extra padding: " << extra_padding_size_
-           << ", alignment: " << min_chunk_size_;
+           << ", alignment: " << min_chunk_size_
+           << ", max_chunk_size: " << max_chunk_size_;
   // acquire the allocator lock
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -263,6 +270,8 @@ BuddyAllocator::PoolSet::iterator BuddyAllocator::RefillPool(
 #elif defined(PADDLE_WITH_MLU)
   allocate_bytes = DeviceAllocateSize(
       &platform::MLUInitAllocSize, &platform::MLUReallocSize, request_bytes);
+#elif defined(PADDLE_WITH_XPU)
+  allocate_bytes = DeviceAllocateSize(&platform::XpuInitAllocSize, &platform::XpuReallocSize, request_bytes);
 #endif
 #endif
 
@@ -357,7 +366,12 @@ size_t BuddyAllocator::DeviceAllocateSize(
     } else {
       // Compute the re-allocation size, we store the re-allocation size when
       // user set FLAGS_reallocate_gpu_memory_in_mb to fix value.
-      if (realloc_size_ == 0 || FLAGS_reallocate_gpu_memory_in_mb == 0ul) {
+#if defined(PADDLE_WITH_XPU)
+     auto flag_realloc_size = FLAGS_reallocate_xpu_memory_in_mb;
+#else
+     auto flag_realloc_size = FLAGS_reallocate_gpu_memory_in_mb;
+#endif
+      if (realloc_size_ == 0 || flag_realloc_size == 0ul) {
         realloc_size_ = re_allocate_size_func();
       }
       allocate_bytes = std::max(realloc_size_, request_bytes);

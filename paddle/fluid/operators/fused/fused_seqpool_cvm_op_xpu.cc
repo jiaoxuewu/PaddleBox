@@ -81,21 +81,38 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
     bool embed_threshold_filter = ctx.Attr<bool>("embed_threshold_filter");
     float embed_threshold = ctx.Attr<float>("embed_threshold");
     int embed_thres_size = ctx.Attr<int>("embed_thres_size");
+    int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
+    bool embedx_concate_filter = ctx.Attr<bool>("embedx_concate_filter");
     bool fix_ctr_to_click = ctx.Attr<bool>("fix_ctr_to_click");
+
+    if (embedx_concate_size != 1 && embed_thres_size != 0) {
+      CHECK(1 == 0) << "embedx_concate_size: " << embedx_concate_size
+                    << "embed_thres_size: " << embed_thres_size;
+    }
 
     auto x0_lod = ins[0]->lod();
     auto x0_dims = ins[0]->dims();
     auto y_dims = out[0]->dims();
+    int embedding_size = ins[0]->numel() / ins[0]->dims()[0];
     auto xpu_context = ctx.template device_context<DeviceContext>().x_context();
-    size_t bs = x0_lod[0].size() - 1;
+    int bs = x0_lod[0].size() - 1;
     int slot_num = static_cast<int>(ins.size());
     framework::LoD y_lod(1);
     y_lod[0].resize(bs + 1);
-    for (size_t i = 0; i <= bs; ++i) {
+    for (int i = 0; i <= bs; ++i) {
         y_lod[0][i] = i;
     }
     for (int i = 0; i < slot_num; i++) {
-      out[i]->Resize({static_cast<int64_t>(bs), y_dims[1]});
+      // out[i]->Resize({static_cast<int64_t>(bs), y_dims[1]});
+      if (use_cvm) {
+        if (clk_filter) {
+          out[i]->Resize({bs, (embedding_size - 1) * embedx_concate_size});
+        } else {
+          out[i]->Resize({bs, embedding_size});
+        }
+      } else {
+        out[i]->Resize({bs, (embedding_size - cvm_offset - embed_thres_size) * embedx_concate_size});
+      }
     }
     //TODO:r480 l3 have some thing wrong
     static bool use_l3_tensor = std::getenv("XPU_PADDLE_L3_TENSOR")!=NULL ?
@@ -170,6 +187,8 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
                                           embed_threshold_filter,
                                           embed_threshold,
                                           embed_thres_size,
+                                          embedx_concate_size, 
+                                          embedx_concate_filter,
                                           fix_ctr_to_click);
     PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
                      platform::errors::External(
@@ -199,6 +218,7 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
     bool clk_filter = ctx.Attr<bool>("clk_filter");
     auto cvm_offset = ctx.Attr<int>("cvm_offset");
     int embed_thres_size = ctx.Attr<int>("embed_thres_size");
+    int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
 
     int slot_num = dxs.size();
     auto xpu_context = ctx.template device_context<DeviceContext>().x_context();
@@ -262,7 +282,8 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
                                                item_size,
                                                batch_size,
                                                slot_num,
-                                               embed_thres_size);
+                                               embed_thres_size,
+                                               embedx_concate_size);
 
      PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
             platform::errors::External(

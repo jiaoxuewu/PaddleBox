@@ -557,10 +557,14 @@ if '${WITH_XPU}' == 'ON':
     shutil.copy('${XPU_RT_LIB}', libs_path)
     shutil.copy('${XPU_API_PLUGIN}', libs_path)
     shutil.copy('${XPU_RT_ALIAS_LIB}', libs_path)
+    shutil.copy('${XPU_ML_LIB}', libs_path)
+    shutil.copy('${XPU_ML_ALIAS_LIB}', libs_path)
     package_data['paddle.libs']+=['${XPU_API_LIB_NAME}',
                                   '${XPU_RT_LIB_NAME}',
                                   '${XPU_RT_ALIAS_LIB_NAME}',
-                                  '${XPU_API_PLUGIN_NAME}']
+                                  '${XPU_API_PLUGIN_NAME}',
+                                  '${XPU_ML_LIB_NAME}',
+                                  '${XPU_ML_ALIAS_LIB_NAME}']
 
 if '${WITH_XPU_BKCL}' == 'ON':
     shutil.copy('${XPU_BKCL_LIB}', libs_path)

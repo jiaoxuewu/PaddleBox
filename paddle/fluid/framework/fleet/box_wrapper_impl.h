@@ -272,8 +272,10 @@ void BoxWrapper::PullSparseCaseCPU(const paddle::platform::Place& place,
     slot_lens[i + 1] = total_length;
   }
   dev.total_key_length = total_length;
+
   uint64_t* total_keys = dev.keys_tensor.mutable_data<uint64_t>(
     static_cast<int64_t>(total_length * 2) * sizeof(int64_t), place);
+
   int* key2slot = dev.keys2slot.mutable_data<int>(
       static_cast<int64_t>(total_length * 5) * sizeof(int), place);
   int* total_dims =
@@ -1298,8 +1300,11 @@ void CheckPushValue(
 void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
     const std::vector<const uint64_t*>& keys,
     const std::vector<const float*>& grad_values,
-    const std::vector<int64_t>& slot_lengths, const int hidden_size,
-    const int expand_embed_dim, const int batch_size, const int skip_offset,
+    const std::vector<int64_t>& slot_lengths,
+    const int hidden_size,
+    const int expand_embed_dim,
+    const int batch_size,
+    const int skip_offset,
     bool expand_only) {
 #ifdef PADDLE_WITH_XPU_KP
   int device_id = place.GetDeviceId();
@@ -1516,6 +1521,7 @@ void BoxWrapper::PushSparseGradCase(
     const int batch_size,
     const int skip_offset,
     bool expand_only) {
+
   if (platform::is_cpu_place(place)) {
     PushSparseGradCaseCPU(place,
                           keys,
