@@ -537,7 +537,7 @@ void CheckPullValue(
       platform::errors::PreconditionNotMet("CheckPullValue detect error value."));
 }
 
-void check_continuous_memory_pull(int dev_id,
+bool check_continuous_memory_pull(int dev_id,
                                   const std::vector<float*>& values,
                                   const std::vector<int64_t>& slot_lengths,
                                   uint32_t hidden_size,
@@ -546,7 +546,7 @@ void check_continuous_memory_pull(int dev_id,
   int slot_num = slot_lengths.size();
 
   bool ret = true;
-  uint32_t error_idx = -1;
+  int error_idx = -1;
   float* head_ptr = nullptr;
   for (int i = 0; i < slot_num; i++) {
     if (values[i] != nullptr && slot_lengths[i]) {
@@ -614,9 +614,10 @@ void check_continuous_memory_pull(int dev_id,
       platform::errors::PreconditionNotMet(
           "Check Memory Continuous failed before CopyForPull, make sure no "
           "layer between pull and fused_seqpool_cvm"));
+  return ret;
 }
 
-void check_continuous_memory_push(int dev_id,
+bool check_continuous_memory_push(int dev_id,
                                   const std::vector<const float*>& grad_values,
                                   const std::vector<int64_t>& slot_lengths,
                                   uint32_t hidden_size,
@@ -624,6 +625,7 @@ void check_continuous_memory_push(int dev_id,
   int slot_num = slot_lengths.size();
 
   bool ret = true;
+  int error_idx = -1;
   float* head_ptr = nullptr;
   for (int i = 0; i < slot_num; i++) {
     if (grad_values[i] != nullptr && slot_lengths[i]) {
@@ -636,6 +638,7 @@ void check_continuous_memory_push(int dev_id,
     if (grad_values[i] && slot_lengths[i]) {
       if (next_ptr != grad_values[i]) {
         ret = false;
+        error_idx = i;
         break;
       }
       next_ptr = (float*)grad_values[i] + slot_lengths[i] * hidden_size;
@@ -655,6 +658,7 @@ void check_continuous_memory_push(int dev_id,
       if (grad_values[slot_num + i] && slot_lengths[i]) {
         if (expand_next_ptr != grad_values[slot_num + i]) {
           ret = false;
+          error_idx = i;
           break;
         }
         expand_next_ptr = (float*)grad_values[slot_num + i] +
@@ -663,6 +667,7 @@ void check_continuous_memory_push(int dev_id,
     }
   }
   if (ret == false) {
+    VLOG(0) << "dev: " << dev_id << ", error_idx: " << error_idx;
     for (int i = 0; i < slot_num; i++) {
       VLOG(0) << "dev: "
               << dev_id
@@ -685,12 +690,13 @@ void check_continuous_memory_push(int dev_id,
     }
   }
 
-  PADDLE_ENFORCE_EQ(
-      ret,
-      true,
-      platform::errors::PreconditionNotMet(
-          "Check Memory Continuous failed before CopyForPush, make sure no "
-          "layer between pull and fused_seqpool_cvm"));
+  // PADDLE_ENFORCE_EQ(
+  //     ret,
+  //     true,
+  //     platform::errors::PreconditionNotMet(
+  //         "Check Memory Continuous failed before CopyForPush, make sure no "
+  //         "layer between pull and fused_seqpool_cvm"));
+  return ret;
 }
 #endif
 
@@ -872,12 +878,12 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
     thread_get_restore_idx.join();
   }
 
-  if(check_xpu_continuous_memory_) {
-    check_continuous_memory_pull(device_id,
+  if (is_xpu_continuous_memory_pull_ == -1) {
+    is_xpu_continuous_memory_pull_ = check_continuous_memory_pull(device_id,
                                  values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_embed_dim,
+                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size,
                                  total_length);
   }
   box_wrapper_kernel_->CopyForPull(place, xpu_keys, (float**)values.data(), total_values_xpu,
@@ -1358,7 +1364,7 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
   for (size_t i = 1; i < slot_lengths_lod.size(); i++) {
     slot_lengths_lod[i] += slot_lengths_lod[i - 1];
   }
-  const int64_t* slot_lens =
+  const int64_t* slot_len_lod =
       reinterpret_cast<int64_t*>(dev.slot_lens.data<int64_t>());
   const int* slot_vector = dev.d_slot_vector.data<int>();
   const int* key2slot = reinterpret_cast<int*>(dev.keys2slot.data<int>());
@@ -1393,20 +1399,21 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                slot_inner_offset.data(),
                total_length * sizeof(int));
 
-  if(check_xpu_continuous_memory_) {
-    check_continuous_memory_push(device_id,
+  if (is_xpu_continuous_memory_push_ == -1) {
+    is_xpu_continuous_memory_push_ = check_continuous_memory_push(device_id,
                                  grad_values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_embed_dim);
+                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size);
   }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,
-      push_offset, total_length, slot_vector, (int*)d_slot_inner_offset, slot_lens, slot_num,
+      push_offset, total_length, slot_vector, (int*)d_slot_inner_offset, slot_len_lod, slot_num,
       hidden_size, batch_size, total_dims, skip_offset, key2slot,
       expand_embed_dim,
       push_float_num_,
-      expand_only);
+      expand_only,
+      (bool)is_xpu_continuous_memory_push_);
 
   push_boxps_timer.Resume();
 #ifdef TRACE_PROFILE

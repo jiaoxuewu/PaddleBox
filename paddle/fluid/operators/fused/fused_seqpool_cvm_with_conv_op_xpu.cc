@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_kernel.h"
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_with_conv_op.h"
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_utils_xpu.h"
 #ifdef PADDLE_WITH_BOX_PS
@@ -123,7 +124,8 @@ class FusedSeqpoolCVMWithConvOpXPUKernel : public framework::OpKernel<T> {
       xpu_wait(xpu_context->xpu_stream);
       check_tensors_nan(place, xpu_context, ins, "fused_with_conv-x");
     }
-    int r = xpu::sequence_sum_pool_cvm_with_conv<T>(xpu_context,
+    // int r = xpu::sequence_sum_pool_cvm_with_conv<T>(xpu_context,
+    int r = paddle::framework::sequence_sum_pool_cvm_with_conv<T>(xpu_context,
                                           cpu_x_addr_vec,
                                           cpu_y_addr_vec,
                                           cpu_lodx,
@@ -218,7 +220,8 @@ class FusedSeqpoolCVMWithConvGradOpXPUKernel : public framework::OpKernel<T> {
       check_negative(place, xpu_context, cvm_data, cvm->numel());
       check_tensors_nan(place, xpu_context, dOut, "fused_with_conv-dy");
     }
-    int r = xpu::sequence_sum_pool_cvm_with_conv_grad<T>(xpu_context,
+    // int r = xpu::sequence_sum_pool_cvm_with_conv_grad<T>(xpu_context,
+    int r = paddle::framework::sequence_sum_pool_cvm_with_conv_grad<T>(xpu_context,
                                                cpu_dy_list,
                                                cvm_data,
                                                cpu_dx_list,
