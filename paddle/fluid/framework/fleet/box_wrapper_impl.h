@@ -546,7 +546,7 @@ bool check_continuous_memory_pull(int dev_id,
   int slot_num = slot_lengths.size();
 
   bool ret = true;
-  uint32_t error_idx = -1;
+  int error_idx = -1;
   float* head_ptr = nullptr;
   for (int i = 0; i < slot_num; i++) {
     if (values[i] != nullptr && slot_lengths[i]) {
@@ -625,7 +625,7 @@ bool check_continuous_memory_push(int dev_id,
   int slot_num = slot_lengths.size();
 
   bool ret = true;
-  uint32_t error_idx = -1;
+  int error_idx = -1;
   float* head_ptr = nullptr;
   for (int i = 0; i < slot_num; i++) {
     if (grad_values[i] != nullptr && slot_lengths[i]) {
