@@ -537,7 +537,7 @@ void CheckPullValue(
       platform::errors::PreconditionNotMet("CheckPullValue detect error value."));
 }
 
-void check_continuous_memory_pull(int dev_id,
+bool check_continuous_memory_pull(int dev_id,
                                   const std::vector<float*>& values,
                                   const std::vector<int64_t>& slot_lengths,
                                   uint32_t hidden_size,
@@ -614,6 +614,7 @@ void check_continuous_memory_pull(int dev_id,
       platform::errors::PreconditionNotMet(
           "Check Memory Continuous failed before CopyForPull, make sure no "
           "layer between pull and fused_seqpool_cvm"));
+  return ret;
 }
 
 bool check_continuous_memory_push(int dev_id,
@@ -877,8 +878,8 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
     thread_get_restore_idx.join();
   }
 
-  if(check_xpu_continuous_memory_) {
-    check_continuous_memory_pull(device_id,
+  if (is_xpu_continuous_memory_pull_ == -1) {
+    is_xpu_continuous_memory_pull_ = check_continuous_memory_pull(device_id,
                                  values,
                                  slot_lengths,
                                  hidden_size,
@@ -1398,15 +1399,12 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                slot_inner_offset.data(),
                total_length * sizeof(int));
 
-  static bool is_continuous = true;
-  static uint32_t check_continuous_count = 0;
-  if (check_xpu_continuous_memory_ && check_continuous_count == 0) {
-    is_continuous = check_continuous_memory_push(device_id,
+  if (is_xpu_continuous_memory_push_ == -1) {
+    is_xpu_continuous_memory_push_ = check_continuous_memory_push(device_id,
                                  grad_values,
                                  slot_lengths,
                                  hidden_size,
                                  expand_only ? expand_embed_dim : expand_embed_dim + hidden_size);
-    check_continuous_count ++;
   }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,
@@ -1415,7 +1413,7 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
       expand_embed_dim,
       push_float_num_,
       expand_only,
-      is_continuous);
+      (bool)is_xpu_continuous_memory_push_);
 
   push_boxps_timer.Resume();
 #ifdef TRACE_PROFILE
