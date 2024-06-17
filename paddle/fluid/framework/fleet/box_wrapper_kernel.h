@@ -56,7 +56,7 @@ void CopyForPush(
     const int64_t total_length,
     const int* slots,
     const int* slot_inner_offset,
-    const int64_t* slot_lens,
+    const int64_t* slot_len_lod,
     const int slot_num,
     const int hidden_size,
     const int batch_size,
@@ -65,7 +65,8 @@ void CopyForPush(
     const int* key2slot,
     const int expand_embed_dim,
     const int push_float_num,
-    bool expand_only);
+    bool expand_only,
+    bool is_continuous);
 
 public:
   const static int MAX_SLOT_SIZE = 10240;

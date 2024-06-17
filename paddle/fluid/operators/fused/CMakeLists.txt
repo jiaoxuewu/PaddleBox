@@ -3,7 +3,18 @@ if(WITH_UNITY_BUILD)
   # Load Unity Build rules for operators in paddle/fluid/operators/fused.
   include(unity_build_rule.cmake)
 endif()
+
+if(WITH_XPU)
+  op_library(resnet_basic_block_op)
+  op_library(resnet_unit_op)
+  xpu_library(fused_seqpool_cvm_kernel
+              SRCS fused_seqpool_cvm_kernel.h fused_seqpool_cvm_kernel.kps
+              DEPS resnet_unit_op)
+endif()
+
 register_operators(
+  DEPS
+  fused_seqpool_cvm_kernel
   EXCLUDES
   fused_bn_activation_op
   conv_fusion_op
@@ -33,10 +44,6 @@ register_operators(
 op_library(fusion_gru_op)
 op_library(fusion_lstm_op)
 
-if(WITH_XPU)
-  op_library(resnet_basic_block_op)
-  op_library(resnet_unit_op)
-endif()
 
 if(WITH_GPU OR WITH_ROCM)
   # fused_bn_activation_op needs cudnn 7.4.1 above

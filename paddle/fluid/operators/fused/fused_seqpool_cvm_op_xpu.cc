@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_kernel.h"
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_op.h"
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_utils_xpu.h"
 #ifdef PADDLE_WITH_BOX_PS
@@ -169,6 +170,7 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
       check_tensors_nan(place, xpu_context, ins, "fused-x");
     }
     int r = xpu::sequence_sum_pool_cvm<T>(xpu_context,
+    // int r = paddle::framework::sequence_sum_pool_cvm<T>(xpu_context,
                                           cpu_x_addr_vec,
                                           cpu_y_addr_vec,
                                           cpu_lodx,
@@ -272,6 +274,7 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
       check_tensors_nan(place, xpu_context, dOut, "fused-dy");
     }
     int r = xpu::sequence_sum_pool_cvm_grad<T>(xpu_context,
+    // int r = paddle::framework::sequence_sum_pool_cvm_grad<T>(xpu_context,
                                                cpu_dy_list,
                                                cvm_data,
                                                cpu_dx_list,
