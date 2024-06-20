@@ -23,7 +23,15 @@ set(WARPCTC_INSTALL_DIR ${THIRD_PARTY_PATH}/install/warpctc)
 # in case of low internet speed
 #set(WARPCTC_REPOSITORY  https://gitee.com/tianjianhe/warp-ctc.git)
 set(WARPCTC_REPOSITORY ${GIT_URL}/baidu-research/warp-ctc.git)
-set(WARPCTC_TAG 37ece0e1bbe8a0019a63ac7e6462c36591c66a5b)
+if(WITH_GPU)
+  if(${CMAKE_CUDA_COMPILER_VERSION} LESS 12.0)
+      set(WARPCTC_TAG 37ece0e1bbe8a0019a63ac7e6462c36591c66a5b)
+  else()
+      set(WARPCTC_TAG bdc2b4550453e0ef2d3b5190f9c6103a84eff184)
+  endif()
+else()
+  set(WARPCTC_TAG 37ece0e1bbe8a0019a63ac7e6462c36591c66a5b)
+endif()
 
 set(WARPCTC_INCLUDE_DIR
     "${WARPCTC_INSTALL_DIR}/include"

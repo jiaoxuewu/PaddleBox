@@ -13,8 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #pragma once
-#include "paddle/fluid/framework/program_desc.h"
+#include <google/protobuf/text_format.h>
 
+#include <functional>
+#include "paddle/fluid/framework/program_desc.h"
 namespace paddle {
 namespace framework {
 
@@ -32,6 +34,6 @@ class ProgramProcessor {
 
   void AddDepToBlockOp(const BlockDesc &block);
 };
-
+void WriteToFile(const std::string &file_path, const std::string &msg);
 }  // namespace framework
 }  // namespace paddle

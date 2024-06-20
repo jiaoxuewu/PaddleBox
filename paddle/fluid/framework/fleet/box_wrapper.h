@@ -47,6 +47,7 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/string/string_helper.h"
+
 #include "paddle/fluid/framework/fleet/metrics.h"
 #include "paddle/fluid/framework/fleet/box_wrapper_kernel.h"
 
@@ -60,6 +61,7 @@ limitations under the License. */
 #include <scalopus_general/general_provider.h>
 #include <scalopus_tracing/native_trace_provider.h>
 #endif
+
 #define BUF_SIZE 1024 * 1024
 
 DECLARE_bool(padbox_auc_runner_mode);
@@ -68,7 +70,9 @@ DECLARE_int32(padbox_dataset_shuffle_thread_num);
 
 namespace paddle {
 namespace framework {
+
 extern int make_day_id(const int &y, const int &m, const int &d);
+
 #ifdef PADDLE_WITH_BOX_PS
 #define MAX_GPU_NUM 16
 
@@ -352,6 +356,11 @@ class MetricMsg {
         platform::errors::NotFound("Error: var %s is not found in scope.",
                                    varname.c_str()));
     auto& gpu_tensor = var->Get<LoDTensor>();
+    PADDLE_ENFORCE_EQ(
+        gpu_tensor.IsInitialized(),
+        true,
+        platform::errors::InvalidArgument(
+            "Error: monitor var `%s` uninitialized Tensor.", varname.c_str()));
     *data = gpu_tensor.data<T>();
     *len = gpu_tensor.numel();
   }
@@ -365,6 +374,11 @@ class MetricMsg {
         platform::errors::NotFound("Error: var %s is not found in scope.",
                                    varname.c_str()));
     auto& gpu_tensor = var->Get<LoDTensor>();
+    PADDLE_ENFORCE_EQ(
+        gpu_tensor.IsInitialized(),
+        true,
+        platform::errors::InvalidArgument(
+            "Error: monitor var `%s` uninitialized Tensor.", varname.c_str()));
     auto* gpu_data = gpu_tensor.data<T>();
     auto len = gpu_tensor.numel();
     data->resize(len);
@@ -500,6 +514,12 @@ class BoxWrapper {
     std::cout<<"start profile in BoxWrapper"<<std::endl;
 #endif
   }
+  int GetMpiSize() { return boxps::MPICluster::Ins().size(); }
+  int GetMpiRank() { return boxps::MPICluster::Ins().rank(); }
+  int GetNCCLRankId(const int& device_id) {
+    return (GetMpiRank() * gpu_num_ + device_id);
+  }
+  int GetGpuNum() { return gpu_num_; }
   void SetDatasetName(const std::string& name) {}
   void SetInputTableDim(size_t dim) { input_table_dim_ = dim; }
   void FeedPass(int date, const std::vector<uint64_t>& feasgin_to_box);
@@ -563,6 +583,7 @@ class BoxWrapper {
                           const int batch_size,
                           const int skip_offset,
                           bool expand_only);
+
   void PushSparseGradCaseGPU(const paddle::platform::Place& place,
                              const std::vector<const uint64_t*>& keys,
                              const std::vector<const float*>& grad_values,
@@ -572,6 +593,7 @@ class BoxWrapper {
                              const int batch_size,
                              const int skip_offset,
                              bool expand_only);
+
   void PushSparseGradCaseXPU(const paddle::platform::Place& place,
                              const std::vector<const uint64_t*>& keys,
                              const std::vector<const float*>& grad_values,
@@ -929,7 +951,8 @@ class BoxWrapper {
     for (auto& name : var_names) {
       auto it = std::find(skip_gc_vars_.begin(), skip_gc_vars_.end(), name);
       if (it != skip_gc_vars_.end()) {
-        return;
+        // return;
+        continue;
       }
       skip_gc_vars_.push_back(name);
     }
@@ -977,6 +1000,8 @@ class BoxWrapper {
   int gpu_num_ = GetDeviceCount();
 #ifdef PADDLE_WITH_XPU_KP
   bool check_xpu_nan_;
+  int is_xpu_continuous_memory_pull_ = -1;
+  int is_xpu_continuous_memory_push_ = -1;
   bool use_xpu_sparse_map_;
   std::vector<uint64_t> * fid2sign_map_ = nullptr;
   std::unique_ptr<BoxWrapperKernel> box_wrapper_kernel_;
@@ -996,6 +1021,9 @@ class BoxWrapper {
     //                          "you should export
     //                          FLAGS_padbox_auc_runner_mode=true "
     //                          "in auc runner mode."));
+#ifdef PADDLE_WITH_XPU_KP
+    setenv("ENABLE_ALWAYS_SIGN2FID", "true", 1);
+#endif
     size_t object_bytes = sizeof(SlotRecordObject) +
                           sizeof(float) * FLAGS_padbox_slotrecord_extend_dim +
                           sizeof(AucRunnerInfo);
@@ -1089,11 +1117,13 @@ class BoxWrapper {
   std::set<std::string> slot_eval_set_;
   std::atomic<uint16_t> dataset_id_{0};
   std::atomic<uint16_t> round_id_{0};
+
 #if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
   scalopus::TransportLoopbackFactory::Ptr factory;
   std::shared_ptr<scalopus::EndpointManagerPoll> manager;
   scalopus::CatapultRecorder::Ptr catapult_recorder;
 #endif
+
   // skip gc vars
   std::vector<std::string> skip_gc_vars_;
 };

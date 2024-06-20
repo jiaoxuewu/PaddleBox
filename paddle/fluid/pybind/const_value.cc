@@ -49,7 +49,8 @@ void BindConstValue(pybind11::module* m) {
       .value("Loss", framework::OpRole::kLoss)
       .value("RPC", framework::OpRole::kRPC)
       .value("Dist", framework::OpRole::kDist)
-      .value("LRSched", framework::OpRole::kLRSched);
+      .value("LRSched", framework::OpRole::kLRSched)
+      .value("ScaleLr", framework::OpRole::kScaleLr);
 
   op_proto_and_checker_maker.def(
       "kOpRoleAttrName", framework::OpProtoAndCheckerMaker::OpRoleAttrName);

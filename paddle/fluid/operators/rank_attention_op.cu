@@ -264,9 +264,9 @@ __global__ void kernel_rank_back_propagate(const int para_row,
   // rank offset 2:1:46:2:44:3:45
   CUDA_KERNEL_LOOP(idx, ins_num * ins_col * para_col * max_rank) {
     int ins_id = idx / para_col / ins_col / max_rank;
-    int para_col_id = (idx / ins_col / max_rank) % para_col;
+    int para_col_id = (idx / ins_col / ins_num) % para_col;
     int ins_col_id = (idx / para_col / max_rank) % ins_col;
-    int k = (idx / para_col / ins_col) % max_rank;
+    int k = idx % max_rank;
 
     int lower = rank_offset[ins_id * rank_cols] - 1;
     if (lower < 0) {

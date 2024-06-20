@@ -71,6 +71,9 @@ DECLARE_bool(check_nan_inf);
 DECLARE_bool(enable_unused_var_check);
 DECLARE_bool(run_kp_kernel);
 DECLARE_bool(enable_host_event_recorder_hook);
+PADDLE_DEFINE_EXPORTED_bool(enable_check_input_var,
+                            false,
+                            "enable check input var");
 
 namespace paddle {
 namespace framework {
@@ -1795,7 +1798,8 @@ void OperatorWithKernel::RunImpl(const Scope& scope,
         os << "\n";
         printf("%s", os.str().c_str());
       }
-      PADDLE_ENFORCE(false, "ERROR: check INF and NAN: %s",
+      PADDLE_ENFORCE(false,
+                     "ERROR: check INF and NAN: %s",
                      DebugStringEx(&exec_scope).c_str());
     }
 #else
@@ -1960,7 +1964,8 @@ void OperatorWithKernel::ChooseKernel(const ExecutionContext& ctx) const {
               << ", fallbacking to CPU one!";
       expected_kernel_key.place_ = platform::CPUPlace();
       kernel_iter = kernels.find(expected_kernel_key);
-    } else if (!paddle::platform::is_xpu_support_op(type_, expected_kernel_key)) {
+    } else if (!paddle::platform::is_xpu_support_op(type_,
+                                                    expected_kernel_key)) {
       VLOG(3) << "fluid XPU not support kernel: " << type_
               << ", expected_kernel_key:" << expected_kernel_key
               << ", fallbacking to CPU one!";
@@ -2441,13 +2446,15 @@ void OperatorWithKernel::ParseInputDataType(
       }
     }
     if (t != nullptr) {
-      PADDLE_ENFORCE_EQ(
-          t->IsInitialized(),
-          true,
-          platform::errors::InvalidArgument("The %s Op's Input Variable `%s` "
-                                            "contains uninitialized Tensor.",
-                                            Type(),
-                                            name));
+      if (FLAGS_enable_check_input_var) {
+        PADDLE_ENFORCE_EQ(
+            t->IsInitialized(),
+            true,
+            platform::errors::InvalidArgument("The %s Op's Input Variable `%s` "
+                                              "contains uninitialized Tensor.",
+                                              Type(),
+                                              name));
+      }
       *data_type = paddle::framework::TransToProtoVarType(t->dtype());
     }
   }

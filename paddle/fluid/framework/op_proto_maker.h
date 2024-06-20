@@ -35,6 +35,9 @@ enum class OpRole {
   // Tag all learning rate scheduler operators.
   kLRSched = 0x0010,
 
+  // scale lr(for adam)
+  kScaleLr = 0x0012,
+
   kLoss = 0x0100,
   // The default value of op's role. This should be only used for unittests and
   // CreateOp inside a operator.

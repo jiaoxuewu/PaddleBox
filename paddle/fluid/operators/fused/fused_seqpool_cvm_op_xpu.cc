@@ -12,7 +12,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_kernel.h"
 #include "paddle/fluid/operators/fused/fused_seqpool_cvm_op.h"
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_utils_xpu.h"
 #ifdef PADDLE_WITH_BOX_PS
 #include "paddle/fluid/framework/fleet/box_wrapper.h"
 #else
@@ -28,6 +30,7 @@ limitations under the License. */
 #include <scalopus_general/endpoint_manager_poll.h>
 #include <scalopus_general/general_provider.h>
 #include <scalopus_tracing/native_trace_provider.h>
+DECLARE_bool(check_fused_negative_nan_inf);
 namespace paddle {
 namespace operators {
 
@@ -79,21 +82,38 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
     bool embed_threshold_filter = ctx.Attr<bool>("embed_threshold_filter");
     float embed_threshold = ctx.Attr<float>("embed_threshold");
     int embed_thres_size = ctx.Attr<int>("embed_thres_size");
+    int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
+    bool embedx_concate_filter = ctx.Attr<bool>("embedx_concate_filter");
     bool fix_ctr_to_click = ctx.Attr<bool>("fix_ctr_to_click");
+
+    if (embedx_concate_size != 1 && embed_thres_size != 0) {
+      CHECK(1 == 0) << "embedx_concate_size: " << embedx_concate_size
+                    << "embed_thres_size: " << embed_thres_size;
+    }
 
     auto x0_lod = ins[0]->lod();
     auto x0_dims = ins[0]->dims();
     auto y_dims = out[0]->dims();
+    int embedding_size = ins[0]->numel() / ins[0]->dims()[0];
     auto xpu_context = ctx.template device_context<DeviceContext>().x_context();
-    size_t bs = x0_lod[0].size() - 1;
+    int bs = x0_lod[0].size() - 1;
     int slot_num = static_cast<int>(ins.size());
     framework::LoD y_lod(1);
     y_lod[0].resize(bs + 1);
-    for (size_t i = 0; i <= bs; ++i) {
+    for (int i = 0; i <= bs; ++i) {
         y_lod[0][i] = i;
     }
     for (int i = 0; i < slot_num; i++) {
-      out[i]->Resize({static_cast<int64_t>(bs), y_dims[1]});
+      // out[i]->Resize({static_cast<int64_t>(bs), y_dims[1]});
+      if (use_cvm) {
+        if (clk_filter) {
+          out[i]->Resize({bs, (embedding_size - 1) * embedx_concate_size});
+        } else {
+          out[i]->Resize({bs, embedding_size});
+        }
+      } else {
+        out[i]->Resize({bs, (embedding_size - cvm_offset - embed_thres_size) * embedx_concate_size});
+      }
     }
     //TODO:r480 l3 have some thing wrong
     static bool use_l3_tensor = std::getenv("XPU_PADDLE_L3_TENSOR")!=NULL ?
@@ -144,7 +164,13 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
 #ifdef TRACE_PROFILE
     TRACE_SCOPE_START("xpu::sequence_sum_pool_cvm", xpu_wait(xpu_context->xpu_stream););
 #endif
+
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, ins, "fused-x");
+    }
     int r = xpu::sequence_sum_pool_cvm<T>(xpu_context,
+    // int r = paddle::framework::sequence_sum_pool_cvm<T>(xpu_context,
                                           cpu_x_addr_vec,
                                           cpu_y_addr_vec,
                                           cpu_lodx,
@@ -163,11 +189,17 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
                                           embed_threshold_filter,
                                           embed_threshold,
                                           embed_thres_size,
+                                          embedx_concate_size, 
+                                          embedx_concate_filter,
                                           fix_ctr_to_click);
     PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
                      platform::errors::External(
                          "The sequence_sum_pool_cvm XPU OP return wrong value[%d %s]",
                          r, XPUAPIErrorMsg[r]));
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, out, "fused-y");
+    }
     TRACE_SCOPE_END("xpu::sequence_sum_pool_cvm", xpu_wait(xpu_context->xpu_stream););
     TRACE_SCOPE_END("FusedSeqpoolCVMOpXPUKernel Compute", xpu_wait(xpu_context->xpu_stream));
   }
@@ -188,6 +220,7 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
     bool clk_filter = ctx.Attr<bool>("clk_filter");
     auto cvm_offset = ctx.Attr<int>("cvm_offset");
     int embed_thres_size = ctx.Attr<int>("embed_thres_size");
+    int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
 
     int slot_num = dxs.size();
     auto xpu_context = ctx.template device_context<DeviceContext>().x_context();
@@ -235,7 +268,13 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
         start_index += lod_size;
     }
 
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_negative(place, xpu_context, cvm_data, cvm->numel());
+      check_tensors_nan(place, xpu_context, dOut, "fused-dy");
+    }
     int r = xpu::sequence_sum_pool_cvm_grad<T>(xpu_context,
+    // int r = paddle::framework::sequence_sum_pool_cvm_grad<T>(xpu_context,
                                                cpu_dy_list,
                                                cvm_data,
                                                cpu_dx_list,
@@ -246,12 +285,17 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
                                                item_size,
                                                batch_size,
                                                slot_num,
-                                               embed_thres_size);
+                                               embed_thres_size,
+                                               embedx_concate_size);
 
      PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
             platform::errors::External(
                "The sequence_pool_cvm_grad XPU OP return wrong value[%d %s]",
                r, XPUAPIErrorMsg[r]));
+    if (FLAGS_check_fused_negative_nan_inf) {
+      xpu_wait(xpu_context->xpu_stream);
+      check_tensors_nan(place, xpu_context, dxs, "fused-dx");
+    }
     TRACE_SCOPE_END("FusedSeqpoolCVMGradOpXPUKernel Compute", xpu_wait(xpu_context->xpu_stream));
   }
 };

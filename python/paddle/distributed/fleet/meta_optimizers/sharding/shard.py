@@ -51,6 +51,7 @@ class Shard(object):
             self._var_device_id(var_name) == self.worker_idx
 
     def _split_params(self, params_grads, worker_idx, worker_num):
+        """
         param2device = {}
         total_param_mem = 0.0
         param2mem = []
@@ -62,11 +63,28 @@ class Shard(object):
         device_idx = 0
         mem_accu = 0.0
         for param_name, mem in param2mem:
-            if mem_accu > total_param_mem * 1.0 * (device_idx + 1) / worker_num:
+            if mem_accu > total_param_mem * (device_idx + 1) / worker_num:
                 device_idx += 1
             device2params[device_idx].append(param_name)
             param2device[param_name] = device_idx
             mem_accu += mem
+        return param2device, device2params
+        """
+        param2device = {}
+        device2params = {x: [] for x in range(worker_num)}
+        
+        sizes = [0] * worker_num
+        for param in [x[0] for x in params_grads]:
+            numel = get_var_size(param)
+            device_idx = sizes.index(min(sizes))
+            device2params[device_idx].append(param.name)
+            param2device[param.name] = device_idx
+            sizes[device_idx] += numel
+            
+        for x in range(worker_num):
+            print("device id: %s, num: %s, mem: %s, names: %s" % (
+                x, len(device2params[x]), sizes[x], device2params[x]))
+        
         return param2device, device2params
 
     def _var_device_id(self, var_name):

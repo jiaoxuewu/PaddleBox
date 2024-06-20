@@ -1,0 +1,2334 @@
+#include "xpu/kernel/xtdk.h"  // NOLINT
+#include "xpu/kernel/xtdk_math.h"            // NOLINT
+#include "xpu/kernel/xtdk_simd.h"
+#include "xpu/refactor/impl_public/wrapper_check.h"
+
+#include "paddle/fluid/operators/fused/fused_seqpool_cvm_kernel.h"
+#include "paddle/fluid/platform/device/xpu/xpu_header.h"
+
+namespace paddle {
+namespace framework {
+
+static __device__ inline float32x16_t vset_zero() {
+    float32x16_t ret;
+    ret = __builtin_xpu2_vvxor_s_mr1(ret, ret);
+    return ret;
+}
+
+#define QUANT_VALUE(val)  \
+    (static_cast<int>(val * quant_ratio + 0.5) / static_cast<float>(quant_ratio));
+template <typename T, bool use_cvm, bool clk_filter, bool quant_ratio_valid, typename T2>
+struct show_clk_engine{
+    static __device__ inline void calculate(T2* sum_show_clk, T* local_x,
+                                        int start_offset, int quant_ratio, float quant_ratio_inf) {
+        sum_show_clk[0] += local_x[0];
+        sum_show_clk[1] += local_x[1];
+    }
+};
+// partial specialization show_clk_engine::calculate when quant = false
+template <typename T, bool clk_filter, typename T2>
+struct show_clk_engine<T, false, clk_filter, false, T2>{
+    static __device__ inline void calculate(T2* sum_show_clk, T* local_x,
+                                        int start_offset, int quant_ratio, float quant_ratio_inf) {
+        sum_show_clk[0] += local_x[start_offset + 0];
+        sum_show_clk[1] += local_x[start_offset + 1];
+    }
+};
+template <typename T, typename T2>
+struct show_clk_engine<T, true, true, false, T2>{
+    static __device__ inline void calculate(T2* sum_show_clk, T* local_x,
+                                        int start_offset, int quant_ratio, float quant_ratio_inf) {
+        sum_show_clk[0] += local_x[0];
+        sum_show_clk[1] += local_x[start_offset + 1];
+    }
+};
+// partial specialization show_clk_engine::calculate when quant = true
+template <typename T, bool clk_filter, typename T2>
+struct show_clk_engine<T, false, clk_filter, true, T2>{
+    static __device__ inline void calculate(T2* sum_show_clk, T* local_x,
+                                        int start_offset, int quant_ratio, float quant_ratio_inf) {
+        sum_show_clk[0] += QUANT_VALUE(local_x[start_offset + 0]);
+        sum_show_clk[1] += QUANT_VALUE(local_x[start_offset + 1]);
+    }
+};
+template <typename T, typename T2>
+struct show_clk_engine<T, true, true, true, T2>{
+    static __device__ inline void calculate(T2* sum_show_clk, T* local_x,
+                                        int start_offset, int quant_ratio, float quant_ratio_inf) {
+        sum_show_clk[0] += local_x[0];
+        sum_show_clk[1] += QUANT_VALUE(local_x[start_offset + 1]);
+    }
+};
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool embed_threshold_filter, bool quant_ratio_valid, typename T2>
+struct reduce_engine {
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        float32x16_t &v_scale,
+                                        float32x16_t &v_dst1,
+                                        float32x16_t &v_dst2,
+                                        __global_ptr__ T* cur_x) {
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);      
+
+            //TODO: unlimited dim_size , now max_dim = 32
+            float32x16_t v_src1 = vload_lm_float32x16(local_x);
+            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
+            v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+            v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+        }
+    }
+};
+// partial specialization reduce_engine::reduce_value_pooling when quant = true
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool embed_threshold_filter, typename T2>
+struct reduce_engine<T, use_cvm, clk_filter, need_filter, embed_threshold_filter, true, T2>{
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        float32x16_t &v_scale,
+                                        float32x16_t &v_dst1,
+                                        float32x16_t &v_dst2,
+                                        __global_ptr__ T* cur_x) {
+        constexpr bool quant_ratio_valid = true;
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            auto &show = local_x[0];
+            auto &click = local_x[1];
+            if (need_filter && embed_threshold_filter) {
+                if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+                    continue;
+                }
+                auto &embedw = local_x[cvm_offset];
+                auto embedx_weight_score = 0.0;
+                int embed_thres_size_ = embed_thres_size;
+                if (embed_thres_size == 0) {
+                    embed_thres_size_ = dim - cvm_offset;
+                }
+                for (int cvm_i = cvm_offset + 1; cvm_i < cvm_offset + embed_thres_size_; cvm_i++) { 
+                    embedx_weight_score +=
+                        pow(fabs(local_x[cvm_i]), 2);
+                }
+                embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw);
+                if (embedx_weight_score < embed_threshold) {
+                    continue;
+                }
+            } else if (need_filter) {
+                if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+                    continue;
+                }
+            }
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);  
+            //TODO: unlimited dim_size , now max_dim = 32
+            float32x16_t v_src1 = vload_lm_float32x16(local_x);
+            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
+            float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
+            float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
+            __simd__ float lm_float[32];
+            vstore_lm_float32x16(lm_float, v_temp1);
+            vstore_lm_float32x16(lm_float + 16, v_temp2);
+            mfence_lm();
+            for(int r = start_offset ; r < dim + start_offset ; r++){
+                lm_float[r] = (float)(int(lm_float[r]));
+            }
+            mfence_lm();
+            v_temp1 = vload_lm_float32x16(lm_float);
+            v_temp2 = vload_lm_float32x16(lm_float + 16);
+            v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
+            v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
+        }
+    }
+};
+
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid, bool embed_threshold_filter, typename T2>
+__global__ void seq_sum_pooling_cvm_fwd(unsigned long long* x_addr,
+                                        unsigned long long* y_addr,
+                                        int* sequence_addr,
+                                        uint32_t batch,
+                                        uint32_t dim,
+                                        uint32_t slot_num,
+                                        float padding_value,
+                                        int quant_ratio,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        bool fix_ctr_to_click) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int total_thread = cluster_num() * ncores;
+    const int buf_size = 512;
+    int max_seq_len = buf_size / dim;
+    __simd__ T local_x[buf_size + 16];
+    __simd__ T local_x_tmp[16];
+    T2 sum_show_clk[2];
+    __simd__ T sum[64];
+    __simd__ T local_x_diff[64];
+    __local__ int sequence_lm[2];
+    int max_slot_num = 200;
+    uint64_t x_list[max_slot_num];
+    uint64_t y_list[max_slot_num];
+    float quant_ratio_reciprocal = 1.0 / quant_ratio;
+    int dim_size = use_cvm ? (clk_filter ? dim - 1 : dim) : (dim - cvm_offset - embed_thres_size);
+    int start_offset = dim - dim_size;
+    float32x16_t v_scale = vset_zero();
+    v_scale = svadd_float32x16(0.5, v_scale);
+    const int max_sm_size = 250 * 1024 / 4;//7296; //
+    const int max_sm_count = max_sm_size / dim / 64;
+    __shared__ T sm_y[max_sm_size];
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(x_addr + slot_len_offset, x_list, slot_len * sizeof(uint64_t));
+        GM2LM(y_addr + slot_len_offset, y_list, slot_len * sizeof(uint64_t));
+        for (int slot_id = 0; slot_id < slot_len; slot_id++) {
+            __global_ptr__ T* cur_x = reinterpret_cast<__global_ptr__ T*>(x_list[slot_id]);
+            __global_ptr__ T* cur_y = reinterpret_cast<__global_ptr__ T*>(y_list[slot_id]);
+            int count = roundup_div(batch, total_thread);
+            for (int count_offset = 0; count_offset < count; count_offset += max_sm_count) {
+                int real_count = min(count - count_offset, max_sm_count);
+                for (int64_t count_id = 0; count_id < real_count; count_id += 1) {
+                    // int seqid = (count_offset + count_id) * total_thread + thread_id;
+                    int seqid = count * ncores * cluster_id()+ (count_offset + count_id) * ncores + cid;
+                    if(seqid >= batch)
+                        break;
+                    mfence();
+                    GM2LM(sequence_addr + (slot_len_offset + slot_id) * (batch + 1) + seqid, sequence_lm, 2 * sizeof(int));
+                    float32x16_t v_dst1 = vset_zero();
+                    float32x16_t v_dst2 = vset_zero();
+                    v_dst1 = svadd_float32x16(padding_value, v_dst1);
+                    v_dst2 = svadd_float32x16(padding_value, v_dst2);
+                    sum_show_clk[0] = 0.0;
+                    sum_show_clk[1] = 0.0;
+                    for (int i = sequence_lm[0]; i < sequence_lm[1]; i += max_seq_len) {
+                        // int len = min<int64_t>(sequence_lm[1] - i, max_seq_len);
+                        int len = min(sequence_lm[1] - i, max_seq_len);
+                        if (len <= 0)
+                            continue;
+                        mfence();
+                        reduce_engine<T, use_cvm, clk_filter, need_filter, embed_threshold_filter, quant_ratio_valid, T2>::reduce_value_pooling(
+                                                    sum_show_clk, local_x, len,
+                                                    dim, dim_size, start_offset,
+                                                    quant_ratio, quant_ratio_reciprocal,
+                                                    show_coeff, clk_coeff, threshold, cvm_offset,
+                                                    embed_threshold, embed_thres_size, 
+                                                    v_scale, v_dst1, v_dst2, cur_x + i * dim);
+                    }
+                    vstore_lm_float32x16(sum, v_dst1);
+                    vstore_lm_float32x16(sum + 16, v_dst2);
+                    // default use cvm
+                    if (use_cvm) {
+                        sum_show_clk[0] = log(sum_show_clk[0] + 1);
+                        if (!clk_filter) {
+                            sum_show_clk[1] = log(sum_show_clk[1] + 1) - sum_show_clk[0];
+                        }
+                    }
+                    mfence_lm();
+                    sum[start_offset + 0] = (float)sum_show_clk[0];
+                    sum[start_offset + 1] = (float)sum_show_clk[1];
+                    // fix_ctr_to_click: click += show
+                    if (use_cvm && !clk_filter && fix_ctr_to_click) {
+                        sum[start_offset + 1] += sum[start_offset + 0];
+                    }
+                    mfence();
+                    for (int i = 0; i < dim_size; i++) {
+                        sm_y[count_id * ncores * dim_size + cid * dim_size + i] = sum[start_offset + i];/* code */
+                    }
+                }
+                mfence();
+                sync_all();
+                int cur_y_offset = count * ncores * cluster_id() * dim_size + count_offset * ncores * dim_size;
+                int real_size = min(real_count * ncores * dim_size, batch * dim_size - cur_y_offset);
+                if(cid==0 && real_size > 0) {
+                    SM2GM(sm_y, cur_y + cur_y_offset, real_size * sizeof(T));
+                }
+                sync_all();
+            }
+        }
+    }
+}
+
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool embed_threshold_filter, bool quant_ratio_valid, typename T2>
+struct reduce_engine_with_large_dim {
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x, T* sum,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        float32x16_t &v_scale,
+                                        __global_ptr__ T* cur_x) {
+
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);      
+            for(int k = 0; k < dim ; k += 32){
+                float32x16_t v_src1 = vload_lm_float32x16(local_x);
+                float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
+                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
+                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
+                v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+                v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+                vstore_lm_float32x16(sum + k, v_dst1);
+                vstore_lm_float32x16(sum + k + 16, v_dst2);
+            }
+        }
+    }
+};
+
+// partial specialization reduce_engine::reduce_value_pooling when quant = true
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool embed_threshold_filter, typename T2>
+struct reduce_engine_with_large_dim<T, use_cvm, clk_filter, need_filter, embed_threshold_filter, true, T2>{
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x, T* sum,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        float32x16_t &v_scale,
+                                        __global_ptr__ T* cur_x) {
+        constexpr bool quant_ratio_valid = true;
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            auto &show = local_x[0];
+            auto &click = local_x[1];
+            if (need_filter && embed_threshold_filter) {
+                if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+                    continue;
+                }
+                auto &embedw = local_x[cvm_offset];
+                auto embedx_weight_score = 0.0;
+                int embed_thres_size_ = embed_thres_size;
+                if (embed_thres_size == 0) {
+                    embed_thres_size_ = dim - cvm_offset;
+                }
+                for (int cvm_i = cvm_offset + 1; cvm_i < cvm_offset + embed_thres_size_; cvm_i++) { 
+                    embedx_weight_score +=
+                        pow(fabs(local_x[cvm_i]), 2);
+                }
+                embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw);
+                if (embedx_weight_score < embed_threshold) {
+                    continue;
+                }
+            } else if (need_filter) {
+                if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+                    continue;
+                }
+            }
+
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);  
+            __simd__ float lm_float[32];
+            for(int k = 0; k < dim ; k += 32){
+                float32x16_t v_src1 = vload_lm_float32x16(local_x + k );
+                float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
+                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
+                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
+                float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
+                float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
+                vstore_lm_float32x16(lm_float, v_temp1);
+                vstore_lm_float32x16(lm_float + 16, v_temp2);
+                mfence_lm();
+                for(int r = 0 ; r < 32 ; r++){
+                    lm_float[r] = (float)(int(lm_float[r]));
+                }
+                mfence_lm();
+                v_temp1 = vload_lm_float32x16(lm_float);
+                v_temp2 = vload_lm_float32x16(lm_float + 16);
+                v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
+                v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
+                vstore_lm_float32x16(sum + k, v_dst1);
+                vstore_lm_float32x16(sum + k + 16, v_dst2);
+            }
+        }
+    }
+};
+
+template <typename TID>
+static __device__ inline void memset_value_float_align64(TID* lm, int size, float value) {
+    float32x16_t vzero = vset_zero();
+    vzero = svadd_float32x16(value, vzero);
+    for (int i = 0; i < size; i += 16) {
+        vstore_lm_float32x16((float*)(lm + i), vzero);
+    }
+    mfence_lm();
+}
+
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid, bool embed_threshold_filter, typename T2>
+__global__ void seq_sum_pooling_cvm_fwd_with_large_dim(unsigned long long* x_addr,
+                                        unsigned long long* y_addr,
+                                        int* sequence_addr,
+                                        uint32_t batch,
+                                        uint32_t dim,
+                                        uint32_t slot_num,
+                                        float padding_value,
+                                        int quant_ratio,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float embed_threshold,
+                                        int embed_thres_size,
+                                        bool fix_ctr_to_click) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cid * cluster_num() + cluster_id();
+    int total_thread = cluster_num() * ncores;
+    const int buf_size = 512;
+    int max_seq_len = buf_size / dim;
+    __simd__ T local_x[buf_size + 32];
+    T2 sum_show_clk[2];
+    const int sum_size = roundup32(dim);
+    __simd__ T sum[sum_size];
+    __local__ int sequence_lm[2];
+    int max_slot_num = 200;
+    uint64_t x_list[max_slot_num];
+    uint64_t y_list[max_slot_num];
+    float quant_ratio_reciprocal = 1.0 / quant_ratio;
+    const int dim_size = use_cvm ? (clk_filter ? dim - 1 : dim) : (dim - cvm_offset - embed_thres_size);
+    const int start_offset = dim - dim_size;
+    float32x16_t v_scale = vset_zero();
+    v_scale = svadd_float32x16(0.5, v_scale);
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(x_addr + slot_len_offset, x_list, slot_len * sizeof(uint64_t));
+        GM2LM(y_addr + slot_len_offset, y_list, slot_len * sizeof(uint64_t));
+        for (int slot_id = 0; slot_id < slot_len; slot_id++) {
+            __global_ptr__ T* cur_x = reinterpret_cast<__global_ptr__ T*>(x_list[slot_id]);
+            __global_ptr__ T* cur_y = reinterpret_cast<__global_ptr__ T*>(y_list[slot_id]);
+            for (int64_t seqid = thread_id; seqid < batch; seqid += total_thread) {
+                mfence();
+                GM2LM(sequence_addr + (slot_len_offset + slot_id) * (batch + 1) + seqid, sequence_lm, 2 * sizeof(int));
+                memset_value_float_align64(sum, sum_size, padding_value);
+                sum_show_clk[0] = 0.0;
+                sum_show_clk[1] = 0.0;
+                for (int i = sequence_lm[0]; i < sequence_lm[1]; i += max_seq_len) {
+                    // int len = min<int64_t>(sequence_lm[1] - i, max_seq_len);
+                    int len = min(sequence_lm[1] - i, max_seq_len);
+                    if (len <= 0)
+                        continue;
+                    mfence();
+                    reduce_engine_with_large_dim<T, use_cvm, clk_filter, need_filter, embed_threshold_filter, quant_ratio_valid, T2>::reduce_value_pooling(
+                                                sum_show_clk, local_x, sum,
+                                                len, dim, dim_size, start_offset,
+                                                quant_ratio, quant_ratio_reciprocal,
+                                                show_coeff, clk_coeff, threshold,
+                                                cvm_offset, embed_threshold,
+                                                embed_thres_size, v_scale, cur_x + i * dim);
+                }
+                mfence();
+                // default use cvm
+                if (use_cvm) {
+                    sum_show_clk[0] = log(sum_show_clk[0] + 1);
+                    if (!clk_filter) {
+                        sum_show_clk[1] = log(sum_show_clk[1] + 1) - sum_show_clk[0];
+                    }
+                }
+                mfence_lm();
+                sum[start_offset + 0] = (float)sum_show_clk[0];
+                sum[start_offset + 1] = (float)sum_show_clk[1];
+                // fix_ctr_to_click: click += show
+                if (use_cvm && !clk_filter && fix_ctr_to_click) {
+                    sum[start_offset + 1] += sum[start_offset + 0];
+                }
+                mfence();
+                LM2GM(sum + start_offset, cur_y + seqid * dim_size, dim_size * sizeof(T));
+            }
+        }
+    }
+}
+
+#define _XPU_DEF__SUM_POOLING_CVM_FWD_(DTYPE, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, DTYPE2) \
+template __global__ void seq_sum_pooling_cvm_fwd_with_large_dim<DTYPE,use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, DTYPE2> \
+                                        (unsigned long long* x_addr,\
+                                        unsigned long long* y_addr, \
+                                        int* sequence_addr,         \
+                                        uint32_t batch,              \
+                                        uint32_t dim,                \
+                                        uint32_t slot_num,           \
+                                        float padding_value,        \
+                                        int quant_ratio,            \
+                                        float show_coeff,           \
+                                        float clk_coeff,            \
+                                        float threshold,            \
+                                        int cvm_offset,             \
+                                        float embed_threshold,      \
+                                        int embed_thres_size,       \
+                                        bool fix_ctr_to_click)
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, false, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, false, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, true, false, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, true, true, float);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, true, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, false, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, true, true, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, false, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, false, true, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, false, true, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, false, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, false, true, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, true, false, double);
+_XPU_DEF__SUM_POOLING_CVM_FWD_(float, true, true, true, true, true, double);
+
+#define XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(kernel, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, T2)  \
+if (use_cvm) {                                                                            \
+    if (clk_filter) {                                                                     \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, true, true, true, true, T2>;          \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, true, true, false, T2>;         \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, true, true, false, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, true, false, false, T2>;        \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, true, false, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, false, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, true, false, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, false, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    } else {                                                                              \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, false, true, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, true, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, false, true, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, true, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, false, false, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, false, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, true, false, false, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, false, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    }                                                                                     \
+} else {                                                                                  \
+    if (clk_filter) {                                                                     \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, true, true, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, true, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, true, true, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, true, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, true, false, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, false, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, true, false, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, false, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    } else {                                                                              \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, false, true, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, true, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, false, true, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, true, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, false, false, true, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, false, true, false, T2>;      \
+                }                                                                         \
+            } else {                                                                      \
+                if (embed_threshold_filter) {                                             \
+                    func_kernel = kernel<T, false, false, false, false, true, T2>;      \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, false, false, false, T2>;     \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    }                                                                                     \
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_xpu2_wrapper(xpu::Context* ctx,
+                        T** x_vec,
+                        T** y_vec,
+                        TID* lods_vec,
+                        uint32_t batch,
+                        uint32_t dim,
+                        uint32_t slot_num,
+                        bool use_cvm,
+                        bool clk_filter,
+                        bool need_filter,
+                        float padding_value,
+                        int quant_ratio,
+                        float show_coeff,
+                        float clk_coeff,
+                        float threshold,
+                        int cvm_offset,
+                        bool embed_threshold_filter,
+                        float embed_threshold,
+                        int embed_thres_size,
+                        bool fix_ctr_to_click) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(x_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(y_vec);
+    bool quant_ratio_valid = quant_ratio > 0.0f;
+    bool is_float = 0;
+    auto is_float_str = XPUEnv::getenv("FUSION_SEQPOOLCVM_FLOOT");
+    if (is_float_str) {
+        if (std::string(is_float_str) != "0") {
+            is_float = 1;
+        }
+    }
+    if(dim <= 32){
+        auto func_kernel = seq_sum_pooling_cvm_fwd<T, true, true, true, true, true, float>;
+        if(is_float) {
+            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, float);
+        } else {
+            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, double);
+        }
+        int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
+                                                                        xpu_y_addr_ptr,
+                                                                        lods_vec,
+                                                                        batch,
+                                                                        dim,
+                                                                        slot_num,
+                                                                        padding_value,
+                                                                        quant_ratio,
+                                                                        show_coeff,
+                                                                        clk_coeff,
+                                                                        threshold,
+                                                                        cvm_offset,
+                                                                        embed_threshold,
+                                                                        embed_thres_size,
+                                                                        fix_ctr_to_click);
+        KERNEL_ASSERT_SUCCESS(ctx, ret);
+    } else {
+        auto func_kernel = seq_sum_pooling_cvm_fwd_with_large_dim<T, true, true, true, true, true, float>;
+        if(is_float) {
+            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, float);
+        } else {
+            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, double);
+        }
+        int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
+                                                                        xpu_y_addr_ptr,
+                                                                        lods_vec,
+                                                                        batch,
+                                                                        dim,
+                                                                        slot_num,
+                                                                        padding_value,
+                                                                        quant_ratio,
+                                                                        show_coeff,
+                                                                        clk_coeff,
+                                                                        threshold,
+                                                                        cvm_offset,
+                                                                        embed_threshold,
+                                                                        embed_thres_size,
+                                                                        fix_ctr_to_click);
+        KERNEL_ASSERT_SUCCESS(ctx, ret);
+    }
+
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm(xpu::Context* ctx,
+                          const std::vector<const T*>& x,
+                          const std::vector<T*>& y,
+                          const std::vector<TID>& lods,
+                          uint32_t batch,
+                          uint32_t dim,
+                          uint32_t slot_num,
+                          bool use_cvm,
+                          bool clk_filter,
+                          bool need_filter,
+                          float padding_value,
+                          int quant_ratio,
+                          float show_coeff,
+                          float clk_coeff,
+                          float threshold,
+                          int cvm_offset,
+                          bool embed_threshold_filter,
+                          float embed_threshold,
+                          int embed_thres_size,
+                          bool fix_ctr_to_click) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, dim, 2);
+    WRAPPER_ASSERT_LE(ctx, dim, 512);
+
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+    WRAPPER_ASSERT_LT(ctx, padding_value, 0.000001);
+    WRAPPER_ASSERT_GT(ctx, padding_value, -0.000001);
+    // int64_t cvm_offset = use_cvm ? 0: 2;
+
+    int dim_size = use_cvm ? (clk_filter ? dim - 1 : dim) : (dim - cvm_offset - embed_thres_size);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t x_len = lods[(i + 1) * (batch + 1) - 1] * dim;
+        if (x_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, x_len, x[i]);
+        }
+
+        int64_t y_len = batch * dim_size;
+        WRAPPER_CHECK_PTR(ctx, T, y_len, y[i]);
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** x_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, x_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, x.data(), x_xpu, slot_num * sizeof(T*)));
+
+    T** y_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, y_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, y.data(), y_xpu, slot_num * sizeof(T*)));
+
+    TID* lods_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, lods_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, lods.data(), lods_xpu, slot_num * sizeof(TID) * (batch + 1)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+        return sequence_sum_pool_cvm_xpu2_wrapper<T, TID>(ctx,
+                                    x_xpu,
+                                    y_xpu,
+                                    lods_xpu,
+                                    batch,
+                                    dim,
+                                    slot_num,
+                                    use_cvm,
+                                    clk_filter,
+                                    need_filter,
+                                    padding_value,
+                                    quant_ratio,
+                                    show_coeff,
+                                    clk_coeff,
+                                    threshold,
+                                    cvm_offset,
+                                    embed_threshold_filter,
+                                    embed_threshold,
+                                    embed_thres_size,
+                                    fix_ctr_to_click);
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+template int sequence_sum_pool_cvm(xpu::Context*,
+                                   const std::vector<const float*>&,
+                                   const std::vector<float*>&,
+                                   const std::vector<int>&,
+                                   uint32_t,
+                                   uint32_t,
+                                   uint32_t,
+                                   bool,
+                                   bool,
+                                   bool,
+                                   float,
+                                   int,
+                                   float,
+                                   float,
+                                   float,
+                                   int,
+                                   bool,
+                                   float,
+                                   int,
+                                   bool);
+
+// fused_seqpool_cvm end
+
+template <typename TID>
+static __device__ inline void memset_zero(TID* lm, int size) {
+    float32x16_t vzero = vset_zero();
+    for (int i = 0; i < size; i += 16) {
+        vstore_lm_float32x16((float*)(lm + i), vzero);
+    }
+    mfence_lm();
+}
+
+template <typename T>
+static __device__ inline void lm_memcpy(T* dst, T* src, int size){
+    for(int i = 0; i < size; i++){
+        dst[i] = src[i];
+    }
+    mfence();
+}
+template <typename T>
+__global__ void seq_sum_pooling_cvm_bwd(unsigned long long* dy_addr,
+                                        T* cvm,
+                                        unsigned long long* dx_addr,
+                                        int* seq_addr,
+                                        bool use_cvm,
+                                        int cvm_offset,
+                                        bool clk_filter,//split
+                                        uint32_t item_width,
+                                        uint32_t batch_size,
+                                        uint32_t slot_num,
+                                        int embed_thres_size) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int nthreads = cluster_num() * ncores;
+    // __local__ T local_y_grad[1000];
+    __local__ T local_y_grad[item_width];
+    int max_slot_num = 200;
+    unsigned long long DX_list[max_slot_num];
+    unsigned long long DY_list[max_slot_num];
+    int dim_size = use_cvm ? (clk_filter ? item_width - 1 : item_width) : (item_width - cvm_offset - embed_thres_size);
+    int start_offset = item_width - dim_size;
+    cvm_offset = embed_thres_size > 0 ? cvm_offset + embed_thres_size : cvm_offset; // for use_cvm && embed_thres_size
+    int dy_offset = cvm_offset - start_offset;
+    if (!use_cvm && embed_thres_size > 0) {
+        memset_zero(local_y_grad, cvm_offset);
+    }
+
+    //               use_cvm,    clk_filter,   no_use_cvm
+    // dim_size:     item_width, item_width-1, item_width-2
+    // start_offset: 0,          1,            2
+    // dy_offset:    2,          1,            0
+    const int batch_per_thread = batch_size / nthreads + 1;
+    __local__ int sequence_lm[batch_per_thread + 1];
+    int start = batch_per_thread * thread_id;
+    int end = min(batch_per_thread * (thread_id + 1), batch_size);
+    const int buffer_size = item_width > 512 ? item_width : 512 + item_width;
+    __local__ T wb_buffer[buffer_size];
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(dx_addr + slot_len_offset, DX_list, slot_len * sizeof(unsigned long long));
+        GM2LM(dy_addr + slot_len_offset, DY_list, slot_len * sizeof(unsigned long long));
+        for (int k = 0; k < slot_len; k++) {
+            __global_ptr__ T* cur_DX = reinterpret_cast<__global_ptr__ T*>(DX_list[k]);
+            __global_ptr__ T* cur_DY = reinterpret_cast<__global_ptr__ T*>(DY_list[k]);
+            int real_len = end - start;
+            if (real_len <= 0) break;
+            GM2LM(seq_addr + (k + slot_len_offset) * (batch_size + 1) + start, sequence_lm, (real_len + 1) * sizeof(int));
+            int wb_offset = sequence_lm[0] * item_width;
+            int buffer_in = 0;
+            for (int64_t i = start; i < end; i += 1) {
+                mfence();
+                if (cvm_offset > 0 && embed_thres_size == 0) {
+                    GM2LM_ASYNC(cvm + i * cvm_offset, local_y_grad, cvm_offset * sizeof(T));
+                }
+                GM2LM_ASYNC(cur_DY + i * dim_size + dy_offset, local_y_grad + cvm_offset, (dim_size - dy_offset) * sizeof(T));
+
+                mfence_lm();
+                for (int j = sequence_lm[i - start]; j < sequence_lm[i + 1 - start]; j++) {
+                    lm_memcpy(wb_buffer + buffer_in, local_y_grad, item_width);
+                    buffer_in += item_width;
+                    if(buffer_in > 512){
+                        LM2GM_ASYNC(wb_buffer, cur_DX + wb_offset , buffer_in * sizeof(T));
+                        wb_offset += buffer_in;
+                        buffer_in = 0;
+                    }
+                }
+            }
+            if(buffer_in > 0){
+                LM2GM_ASYNC(wb_buffer, cur_DX + wb_offset , buffer_in * sizeof(T));
+            }
+        }
+        mfence();
+    }
+    return;
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_grad_xpu2_wrapper(xpu::Context* ctx,
+                        T** dy_vec,
+                        float* cvm,
+                        T** dx_vec,
+                        TID* seq_vec,
+                        bool use_cvm,
+                        int cvm_offset,
+                        bool clk_filter,//split
+                        uint32_t item_width,
+                        uint32_t batch_size,
+                        uint32_t slot_num,
+                        int embed_thres_size) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(dx_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(dy_vec);
+    int ret = seq_sum_pooling_cvm_bwd<T><<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_y_addr_ptr,
+                                                                                                cvm,
+                                                                                                xpu_x_addr_ptr,
+                                                                                                seq_vec,
+                                                                                                use_cvm,
+                                                                                                cvm_offset,
+                                                                                                clk_filter,//split
+                                                                                                item_width,
+                                                                                                batch_size,
+                                                                                                slot_num,
+                                                                                                embed_thres_size);
+    KERNEL_ASSERT_SUCCESS(ctx, ret);
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm_grad(xpu::Context* ctx,
+                               std::vector<const float*>& dy_vec,
+                               float *cvm,
+                               std::vector<float*>& dx_vec,
+                               std::vector<int>& seq_vec,
+                               bool use_cvm,
+                               int cvm_offset,
+                               bool clk_filter,//split
+                               uint32_t item_width,
+                               uint32_t batch_size,
+                               uint32_t slot_num,
+                               int embed_thres_size) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, item_width, 2);
+    WRAPPER_ASSERT_LT(ctx, item_width, 1000);
+    WRAPPER_ASSERT_GT(ctx, batch_size, 0);
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+
+    int dim_size = use_cvm ? (clk_filter ? item_width - 1 : item_width) : (item_width - cvm_offset - embed_thres_size);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dy_vec_len = batch_size * dim_size;
+        WRAPPER_CHECK_PTR(ctx, T, dy_vec_len, dy_vec[i]);
+    }
+    WRAPPER_CHECK_PTR(ctx, T, batch_size * 2, cvm);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dx_vec_len = seq_vec[(i + 1) * (batch_size + 1) - 1] * item_width;
+        if (dx_vec_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, dx_vec_len, dx_vec[i]);
+        }
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** dy_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dy_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dy_vec.data(), dy_xpu, slot_num * sizeof(T*)));
+
+    T** dx_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dx_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dx_vec.data(), dx_xpu, slot_num * sizeof(T*)));
+
+    TID* seq_vec_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch_size + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+         return sequence_sum_pool_cvm_grad_xpu2_wrapper<T, TID>(ctx,
+                                     dy_xpu,
+                                     cvm,
+                                     dx_xpu,
+                                     seq_vec_xpu,
+                                     use_cvm,
+                                     cvm_offset,
+                                     clk_filter,//split
+                                     item_width,
+                                     batch_size,
+                                     slot_num,
+                                     embed_thres_size);
+        // return  xpu::SUCCESS;
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+template int sequence_sum_pool_cvm_grad<float, int>(xpu::Context* ctx,
+                                               std::vector<const float*>& dy_vec,
+                                               float *cvm,
+                                               std::vector<float*>& dx_vec,
+                                               std::vector<int>& seq_vec,
+                                               bool use_cvm,
+                                               int cvm_offset,
+                                               bool clk_filter,//split
+                                               uint32_t item_width,
+                                               uint32_t batch_size,
+                                               uint32_t slot_num,
+                                               int embed_thres_size);
+
+// fused_seqpool_cvm_grad end
+
+template <typename TID>
+static __device__ inline void memset_value_float(TID* lm, int size, float value) {
+    float32x16_t vzero = vset_zero();
+    vzero = svadd_float32x16(value, vzero);
+    for (int i = 0; i < size; i += 16) {
+        vstore_lm_float32x16((float*)(lm + i), vzero);
+    }
+    // TODO: tail
+    mfence_lm();
+}
+
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool xbox_diff_thres_filter, bool quant_ratio_valid, typename T2>
+struct reduce_engine_with_diff_thres {
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float diff_thres,
+                                        float32x16_t &v_scale,
+                                        float32x16_t &v_dst1,
+                                        float32x16_t &v_dst2,
+                                        __global_ptr__ T* cur_x) {
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);      
+
+            //TODO: unlimited dim_size , now max_dim = 32
+            float32x16_t v_src1 = vload_lm_float32x16(local_x);
+            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
+            v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+            v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+        }
+    }
+};
+
+
+// partial specialization reduce_engine::reduce_value_pooling when quant = true
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool xbox_diff_thres_filter, typename T2>
+struct reduce_engine_with_diff_thres<T, use_cvm, clk_filter, need_filter, xbox_diff_thres_filter, true, T2>{
+    static __device__ void reduce_value_pooling(T2* sum_show_clk,
+                                        T* local_x,
+                                        int len, int dim, int dim_size, int start_offset,
+                                        int quant_ratio,
+                                        float quant_ratio_reciprocal,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float diff_thres,
+                                        float32x16_t &v_scale,
+                                        float32x16_t &v_dst1,
+                                        float32x16_t &v_dst2,
+                                        __global_ptr__ T* cur_x) {
+        constexpr bool quant_ratio_valid = true;
+        for (int j = 0; j < len; j++) {
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            auto &show = local_x[0];
+            auto &click = local_x[1];
+            if (need_filter) {
+                if (!xbox_diff_thres_filter) {
+                    if ((show - click) * show_coeff + click * clk_coeff < threshold) { 
+                        continue;
+                    }
+                } else {
+                    // xbox_diff_thres_filter
+                    if ((show - click) * show_coeff + click * clk_coeff < diff_thres) { 
+                        continue;
+                    }
+                }
+            }
+            show_clk_engine<T, use_cvm, clk_filter, quant_ratio_valid, T2>::calculate(
+                                    sum_show_clk, local_x, start_offset, quant_ratio, quant_ratio_reciprocal);  
+            //TODO: unlimited dim_size , now max_dim = 32
+            float32x16_t v_src1 = vload_lm_float32x16(local_x);
+            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
+            float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
+            float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
+            __simd__ float lm_float[32];
+            vstore_lm_float32x16(lm_float, v_temp1);
+            vstore_lm_float32x16(lm_float + 16, v_temp2);
+            mfence_lm();
+            for(int r = start_offset ; r < dim + start_offset ; r++){
+                lm_float[r] = (float)(int(lm_float[r]));
+            }
+            mfence_lm();
+            v_temp1 = vload_lm_float32x16(lm_float);
+            v_temp2 = vload_lm_float32x16(lm_float + 16);
+            v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
+            v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
+        }
+    }
+};
+
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid, bool xbox_diff_thres_filter, typename T2>
+__global__ void seq_sum_pooling_cvm_with_diff_thres_fwd(unsigned long long* x_addr,
+                                        unsigned long long* y_addr,
+                                        int* sequence_addr,
+                                        uint32_t batch,
+                                        uint32_t dim,
+                                        uint32_t slot_num,
+                                        float padding_value,
+                                        int quant_ratio,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        float* threshold_vec) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int total_thread = cluster_num() * ncores;
+    const int buf_size = 512;
+    int max_seq_len = buf_size / dim;
+    __simd__ T local_x[buf_size + 16];
+    __simd__ T local_x_tmp[16];
+    T2 sum_show_clk[2];
+    __simd__ T sum[64];
+    __simd__ T local_x_diff[64];
+    __local__ int sequence_lm[2];
+    int max_slot_num = 200;
+    uint64_t x_list[max_slot_num];
+    uint64_t y_list[max_slot_num];
+    float local_threshold_vec[max_slot_num];
+    float quant_ratio_reciprocal = 1.0 / quant_ratio;
+    int dim_size = use_cvm ? (clk_filter ? dim - 1 : dim) : (dim - cvm_offset);
+    int start_offset = dim - dim_size;
+    float32x16_t v_scale = vset_zero();
+    v_scale = svadd_float32x16(0.5, v_scale);
+    const int max_sm_size = 250 * 1024 / 4;//7296;
+    const int max_sm_count = max_sm_size / dim / 64;
+    __shared__ T sm_y[max_sm_size];
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(x_addr + slot_len_offset, x_list, slot_len * sizeof(uint64_t));
+        GM2LM(y_addr + slot_len_offset, y_list, slot_len * sizeof(uint64_t));
+        GM2LM(threshold_vec + slot_len_offset, local_threshold_vec, slot_len * sizeof(float));
+        for (int slot_id = 0; slot_id < slot_len; slot_id++) {
+            __global_ptr__ T* cur_x = reinterpret_cast<__global_ptr__ T*>(x_list[slot_id]);
+            __global_ptr__ T* cur_y = reinterpret_cast<__global_ptr__ T*>(y_list[slot_id]);
+            int count = roundup_div(batch, total_thread);
+            for (int count_offset = 0; count_offset < count; count_offset += max_sm_count) {
+                int real_count = min(count - count_offset, max_sm_count);
+                for (int64_t count_id = 0; count_id < real_count; count_id += 1) {
+                    // int seqid = (count_offset + count_id) * total_thread + thread_id;
+                    int seqid = count * ncores * cluster_id()+ (count_offset + count_id) * ncores + cid;
+                    if(seqid >= batch)
+                        break;
+                    mfence();
+                    GM2LM(sequence_addr + (slot_len_offset + slot_id) * (batch + 1) + seqid, sequence_lm, 2 * sizeof(int));
+                    float32x16_t v_dst1 = vset_zero();
+                    float32x16_t v_dst2 = vset_zero();
+                    v_dst1 = svadd_float32x16(padding_value, v_dst1);
+                    v_dst2 = svadd_float32x16(padding_value, v_dst2);
+                    sum_show_clk[0] = 0.0f;
+                    sum_show_clk[1] = 0.0f;
+                    for (int i = sequence_lm[0]; i < sequence_lm[1]; i += max_seq_len) {
+                        // int len = min<int64_t>(sequence_lm[1] - i, max_seq_len);
+                        int len = min(sequence_lm[1] - i, max_seq_len);
+                        if (len <= 0)
+                            continue;
+                        mfence();
+                        reduce_engine_with_diff_thres<T, use_cvm, clk_filter, need_filter, xbox_diff_thres_filter, quant_ratio_valid, T2>::reduce_value_pooling(
+                                                    sum_show_clk, local_x, len,
+                                                    dim, dim_size, start_offset,
+                                                    quant_ratio, quant_ratio_reciprocal,
+                                                    show_coeff, clk_coeff, threshold, cvm_offset,
+                                                    local_threshold_vec[slot_id], 
+                                                    v_scale, v_dst1, v_dst2, cur_x + i * dim);
+                    }
+                    vstore_lm_float32x16(sum, v_dst1);
+                    vstore_lm_float32x16(sum + 16, v_dst2);
+                    // default use cvm
+                    if (use_cvm) {
+                        sum_show_clk[0] = log(sum_show_clk[0] + 1);
+                        if (!clk_filter) {
+                            sum_show_clk[1] = log(sum_show_clk[1] + 1) - sum_show_clk[0];
+                        }
+                    }
+                    mfence_lm();
+                    sum[start_offset + 0] = (float)sum_show_clk[0];
+                    sum[start_offset + 1] = (float)sum_show_clk[1];
+                    mfence();
+                    for (int i = 0; i < dim_size; i++) {
+                        sm_y[count_id * ncores * dim_size + cid * dim_size + i] = sum[start_offset + i];/* code */
+                    }
+                }
+                mfence();
+                sync_all();
+                int cur_y_offset = count * ncores * cluster_id() * dim_size + count_offset * ncores * dim_size;
+                int real_size = min(real_count * ncores * dim_size, batch * dim_size - cur_y_offset);
+                if(cid==0 && real_size > 0) {
+                    SM2GM(sm_y, cur_y + cur_y_offset, real_size * sizeof(T));
+                }
+                sync_all();
+            }
+        }
+    }
+}
+
+#define XPU2_KERNEL_SUM_POOL_CVM_WITH_DIFF_THRES_INTERFACE(kernel, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, xbox_diff_thres_filter, T2)  \
+if (use_cvm) {                                                                            \
+    if (clk_filter) {                                                                     \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, true, true, true, true, T2>;          \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, true, true, false, T2>;         \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, true, true, false, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, true, false, false, T2>;        \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, true, false, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, false, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, true, false, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, true, false, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    } else {                                                                              \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, false, true, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, true, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, false, true, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, true, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, false, false, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, false, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, true, false, false, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, true, false, false, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    }                                                                                     \
+} else {                                                                                  \
+    if (clk_filter) {                                                                     \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, true, true, true, true, T2>;         \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, true, true, false, T2>;        \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, true, true, false, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, true, false, false, T2>;       \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, true, false, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, false, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, true, false, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, true, false, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    } else {                                                                              \
+        if (need_filter) {                                                                \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, false, true, true, true, T2>;        \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, true, true, false, T2>;       \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, false, true, false, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, true, false, false, T2>;      \
+                }                                                                         \
+            }                                                                             \
+        } else {                                                                          \
+            if (quant_ratio_valid) {                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, false, false, true, true, T2>;       \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, false, true, false, T2>;      \
+                }                                                                         \
+            } else {                                                                      \
+                if (xbox_diff_thres_filter) {                                             \
+                    func_kernel = kernel<T, false, false, false, false, true, T2>;      \
+                } else {                                                                  \
+                    func_kernel = kernel<T, false, false, false, false, false, T2>;     \
+                }                                                                         \
+            }                                                                             \
+        }                                                                                 \
+    }                                                                                     \
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_with_diff_thres_xpu2_wrapper(xpu::Context* ctx,
+                        T** x_vec,
+                        T** y_vec,
+                        TID* lods_vec,
+                        uint32_t batch,
+                        uint32_t dim,
+                        uint32_t slot_num,
+                        bool use_cvm,
+                        bool clk_filter,
+                        bool need_filter,
+                        float padding_value,
+                        int quant_ratio,
+                        float show_coeff,
+                        float clk_coeff,
+                        float threshold,
+                        int cvm_offset,
+                        bool xbox_diff_thres_filter,
+                        T* diff_threshold_vec) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(x_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(y_vec);
+    bool quant_ratio_valid = (need_filter || quant_ratio > 0.0f);
+
+    bool is_float = 0;
+    auto is_float_str = XPUEnv::getenv("FUSION_SEQPOOLCVM_FLOOT");
+    if (is_float_str) {
+        if (std::string(is_float_str) != "0") {
+            is_float = 1;
+        }
+    }
+    auto func_kernel = seq_sum_pooling_cvm_with_diff_thres_fwd<T, true, true, true, true, true, float>;
+    if(is_float) {
+        XPU2_KERNEL_SUM_POOL_CVM_WITH_DIFF_THRES_INTERFACE(seq_sum_pooling_cvm_with_diff_thres_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, xbox_diff_thres_filter, float);
+    } else {
+        XPU2_KERNEL_SUM_POOL_CVM_WITH_DIFF_THRES_INTERFACE(seq_sum_pooling_cvm_with_diff_thres_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid, xbox_diff_thres_filter, double);
+    }
+    int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
+                                                                    xpu_y_addr_ptr,
+                                                                    lods_vec,
+                                                                    batch,
+                                                                    dim,
+                                                                    slot_num,
+                                                                    padding_value,
+                                                                    quant_ratio,
+                                                                    show_coeff,
+                                                                    clk_coeff,
+                                                                    threshold,
+                                                                    cvm_offset,
+                                                                    diff_threshold_vec);
+    // KERNEL_ASSERT_SUCCESS(ctx, ret);
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm_with_diff_thres(xpu::Context* ctx,
+                          const std::vector<const T*>& x,
+                          const std::vector<T*>& y,
+                          const std::vector<TID>& lods,
+                          uint32_t batch,
+                          uint32_t dim,
+                          uint32_t slot_num,
+                          bool use_cvm,
+                          bool clk_filter,
+                          bool need_filter,
+                          float padding_value,
+                          int quant_ratio,
+                          float show_coeff,
+                          float clk_coeff,
+                          float threshold,
+                          int cvm_offset,
+                          bool xbox_diff_thres_filter,
+                          const std::vector<T>& diff_threshold_vec) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, dim, 2);
+    // WRAPPER_ASSERT_LE(ctx, dim, 64);
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+    WRAPPER_ASSERT_LT(ctx, padding_value, 0.000001);
+    WRAPPER_ASSERT_GT(ctx, padding_value, -0.000001);
+    // int64_t cvm_offset = use_cvm ? 0: 2;
+
+    int dim_size = use_cvm ? (clk_filter ? dim - 1 : dim) : (dim - cvm_offset);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t x_len = lods[(i + 1) * (batch + 1) - 1] * dim;
+        if (x_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, x_len, x[i]);
+        }
+
+        int64_t y_len = batch * dim_size;
+        WRAPPER_CHECK_PTR(ctx, T, y_len, y[i]);
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** x_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, x_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, x.data(), x_xpu, slot_num * sizeof(T*)));
+
+    T** y_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, y_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, y.data(), y_xpu, slot_num * sizeof(T*)));
+
+    TID* lods_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, lods_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, lods.data(), lods_xpu, slot_num * sizeof(TID) * (batch + 1)));
+
+    size_t vec_len = diff_threshold_vec.size();
+    T* diff_threshold_vec_xpu = RAII_GUARD.alloc_l3_or_gm<float>(vec_len);
+    WRAPPER_ASSERT_WORKSPACE(ctx, diff_threshold_vec_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, diff_threshold_vec.data(), diff_threshold_vec_xpu, vec_len * sizeof(T)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+        return sequence_sum_pool_cvm_with_diff_thres_xpu2_wrapper<T, TID>(ctx,
+                                    x_xpu,
+                                    y_xpu,
+                                    lods_xpu,
+                                    batch,
+                                    dim,
+                                    slot_num,
+                                    use_cvm,
+                                    clk_filter,
+                                    need_filter,
+                                    padding_value,
+                                    quant_ratio,
+                                    show_coeff,
+                                    clk_coeff,
+                                    threshold,
+                                    cvm_offset,
+                                    xbox_diff_thres_filter,
+                                    diff_threshold_vec_xpu);
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+template int sequence_sum_pool_cvm_with_diff_thres(xpu::Context*,
+                                   const std::vector<const float*>&,
+                                   const std::vector<float*>&,
+                                   const std::vector<int>&,
+                                   uint32_t,
+                                   uint32_t,
+                                   uint32_t,
+                                   bool,
+                                   bool,
+                                   bool,
+                                   float,
+                                   int,
+                                   float,
+                                   float,
+                                   float,
+                                   int,
+                                   bool,
+                                   const std::vector<float>&);
+// fused_seqpool_cvm_with_diff_thres_fwd end
+
+template <typename T>
+__global__ void seq_sum_pooling_cvm_with_diff_thres_bwd(unsigned long long* dy_addr,
+                                        T* cvm,
+                                        unsigned long long* dx_addr,
+                                        int* seq_addr,
+                                        bool use_cvm,
+                                        int cvm_offset,
+                                        bool clk_filter,//split
+                                        uint32_t item_width,
+                                        uint32_t batch_size,
+                                        uint32_t slot_num) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int nthreads = cluster_num() * ncores;
+    __local__ T local_y_grad[item_width];
+    int max_slot_num = 200;
+    unsigned long long DX_list[max_slot_num];
+    unsigned long long DY_list[max_slot_num];
+    int dim_size = use_cvm ? (clk_filter ? item_width - 1 : item_width) : (item_width - cvm_offset);
+    int start_offset = item_width - dim_size;
+    int dy_offset = cvm_offset - start_offset;
+    //               use_cvm,    clk_filter,   no_use_cvm
+    // dim_size:     item_width, item_width-1, item_width-2
+    // start_offset: 0,          1,            2
+    // dy_offset:    2,          1,            0
+    const int batch_per_thread = batch_size / nthreads + 1;
+    __local__ int sequence_lm[batch_per_thread + 1];
+    int start = batch_per_thread * thread_id;
+    int end = min(batch_per_thread * (thread_id + 1), batch_size);
+    const int buffer_size = item_width > 512 ? item_width : 512 + item_width;
+    __local__ T wb_buffer[buffer_size];
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(dx_addr + slot_len_offset, DX_list, slot_len * sizeof(unsigned long long));
+        GM2LM(dy_addr + slot_len_offset, DY_list, slot_len * sizeof(unsigned long long));
+        for (int k = 0; k < slot_len; k++) {
+            __global_ptr__ T* cur_DX = reinterpret_cast<__global_ptr__ T*>(DX_list[k]);
+            __global_ptr__ T* cur_DY = reinterpret_cast<__global_ptr__ T*>(DY_list[k]);
+            int real_len = end - start;
+            if (real_len <= 0) break;
+            GM2LM(seq_addr + (k + slot_len_offset) * (batch_size + 1) + start, sequence_lm, (real_len + 1) * sizeof(int));
+            int wb_offset = sequence_lm[0] * item_width;
+            int buffer_in = 0;
+            for (int64_t i = start; i < end; i += 1) {
+                mfence();
+                if (cvm_offset > 0) {
+                    GM2LM_ASYNC(cvm + i * cvm_offset, local_y_grad, cvm_offset * sizeof(T));
+                } 
+                GM2LM_ASYNC(cur_DY + i * dim_size + dy_offset, local_y_grad + cvm_offset, (dim_size - dy_offset) * sizeof(T));
+                mfence_lm();
+                for (int j = sequence_lm[i - start]; j < sequence_lm[i + 1 - start]; j++) {
+                    lm_memcpy(wb_buffer + buffer_in, local_y_grad, item_width);
+                    buffer_in += item_width;
+                    if(buffer_in > 512){
+                        LM2GM_ASYNC(wb_buffer, cur_DX + wb_offset , buffer_in * sizeof(T));
+                        wb_offset += buffer_in;
+                        buffer_in = 0;
+                    }
+                }
+            }
+            if(buffer_in > 0){
+                LM2GM_ASYNC(wb_buffer, cur_DX + wb_offset , buffer_in * sizeof(T));
+            }
+        }
+        mfence();
+    }
+    return;
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_with_diff_thres_grad_xpu2_wrapper(xpu::Context* ctx,
+                        T** dy_vec,
+                        float* cvm,
+                        T** dx_vec,
+                        TID* seq_vec,
+                        bool use_cvm,
+                        int cvm_offset,
+                        bool clk_filter,//split
+                        uint32_t item_width,
+                        uint32_t batch_size,
+                        uint32_t slot_num) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(dx_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(dy_vec);
+    int ret = seq_sum_pooling_cvm_with_diff_thres_bwd<T><<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_y_addr_ptr,
+                                                                                                cvm,
+                                                                                                xpu_x_addr_ptr,
+                                                                                                seq_vec,
+                                                                                                use_cvm,
+                                                                                                cvm_offset,
+                                                                                                clk_filter,//split
+                                                                                                item_width,
+                                                                                                batch_size,
+                                                                                                slot_num);
+    KERNEL_ASSERT_SUCCESS(ctx, ret);
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm_with_diff_thres_grad(xpu::Context* ctx,
+                               std::vector<const float*>& dy_vec,
+                               float *cvm,
+                               std::vector<float*>& dx_vec,
+                               std::vector<int>& seq_vec,
+                               bool use_cvm,
+                               int cvm_offset,
+                               bool clk_filter,//split
+                               uint32_t item_width,
+                               uint32_t batch_size,
+                               uint32_t slot_num) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, item_width, 2);
+    WRAPPER_ASSERT_LT(ctx, item_width, 1000);
+    WRAPPER_ASSERT_GT(ctx, batch_size, 0);
+    WRAPPER_ASSERT_LT(ctx, batch_size, 4196352); // 8K * 8 * 64
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+
+    int dim_size = use_cvm ? (clk_filter ? item_width - 1 : item_width) : (item_width - cvm_offset);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dy_vec_len = batch_size * dim_size;
+        WRAPPER_CHECK_PTR(ctx, T, dy_vec_len, dy_vec[i]);
+    }
+    WRAPPER_CHECK_PTR(ctx, T, batch_size * 2, cvm);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dx_vec_len = seq_vec[(i + 1) * (batch_size + 1) - 1] * item_width;
+        if (dx_vec_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, dx_vec_len, dx_vec[i]);
+        }
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** dy_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dy_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dy_vec.data(), dy_xpu, slot_num * sizeof(T*)));
+
+    T** dx_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dx_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dx_vec.data(), dx_xpu, slot_num * sizeof(T*)));
+
+    TID* seq_vec_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch_size + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+         return sequence_sum_pool_cvm_with_diff_thres_grad_xpu2_wrapper<T, TID>(ctx,
+                                     dy_xpu,
+                                     cvm,
+                                     dx_xpu,
+                                     seq_vec_xpu,
+                                     use_cvm,
+                                     cvm_offset,
+                                     clk_filter,//split
+                                     item_width,
+                                     batch_size,
+                                     slot_num);
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+template int sequence_sum_pool_cvm_with_diff_thres_grad<float, int>(xpu::Context* ctx,
+                                               std::vector<const float*>& dy_vec,
+                                               float *cvm,
+                                               std::vector<float*>& dx_vec,
+                                               std::vector<int>& seq_vec,
+                                               bool use_cvm,
+                                               int cvm_offset,
+                                               bool clk_filter,//split
+                                               uint32_t item_width,
+                                               uint32_t batch_size,
+                                               uint32_t slot_num);
+// fused_seqpool_cvm_with_diff_thres_bwd end
+
+
+template <typename T, bool use_cvm, bool need_filter, bool show_filter, bool need_embedx_concate>
+struct pooling_engine {
+    static __device__ void sum_pooling(
+                                        T* local_x,
+                                        T* sum,
+                                        int len, int cur_batched_index,
+                                        int dim, int align_dim, int start_offset,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        int embedx_concate_size,
+                                        __global_ptr__ T* cur_x) {
+        for (int j = 0; j < len; j++) {
+            mfence();
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            if (cur_batched_index + j < embedx_concate_size) {
+                for(int k = 0; k < dim; k += 32) {
+                    float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
+                    float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
+                    vstore_lm_float32x16(sum + (cur_batched_index + j) * align_dim + k, v_src1);
+                    vstore_lm_float32x16(sum + (cur_batched_index + j) * align_dim + k + 16, v_src2);  
+                }
+            } else {
+                for(int k = 0; k < dim; k += 32) {
+                    float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
+                    float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
+                    float32x16_t v_dst1 = vload_lm_float32x16(sum + (embedx_concate_size - 1) * align_dim + k);
+                    float32x16_t v_dst2 = vload_lm_float32x16(sum + (embedx_concate_size - 1) * align_dim + k + 16);
+                    v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+                    v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+                    vstore_lm_float32x16(sum + (embedx_concate_size - 1) * align_dim + k, v_dst1);
+                    vstore_lm_float32x16(sum + (embedx_concate_size - 1) * align_dim + k + 16, v_dst2); 
+                }
+            }
+        }
+    }
+};
+// embedx_concate_size==1 (need_embedx_concate==false)
+template <typename T, bool use_cvm, bool need_filter, bool show_filter>
+struct pooling_engine<T, use_cvm, need_filter, show_filter, false> {
+    static __device__ void sum_pooling(
+                                        T* local_x,
+                                        T* sum,
+                                        int len, int cur_batched_index,
+                                        int dim, int align_dim, int start_offset,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        int cvm_offset,
+                                        int embedx_concate_size,
+                                        __global_ptr__ T* cur_x) {
+        for (int j = 0; j < len; j++) {
+            mfence();
+            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+            auto &show = local_x[0];
+            auto &click = local_x[1];
+            if (need_filter) {
+                if ((show - click) * show_coeff + click * clk_coeff < threshold) { 
+                    continue;
+                }
+            }
+            for(int k = 0; k < dim; k += 32) {
+                float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
+                float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
+                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
+                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
+                v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+                v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+                vstore_lm_float32x16(sum + k, v_dst1);
+                vstore_lm_float32x16(sum + k + 16, v_dst2);
+            }
+        }
+    }
+};
+// use_cvm=true, show_filter=false
+template <typename T, bool use_cvm, bool show_filter>
+struct cvm_engine {
+    static __device__ inline void cvm(T* sum, float* sum_show_clk_conv,
+                                    int seqid, int dim_size,
+                                    int align_dim,
+                                    int concate_dim_size,
+                                    int embedx_concate_size,
+                                    int start_offset,
+                                    __global_ptr__ T* cur_y) {
+        for (int k = 0; k < embedx_concate_size; k++) {
+            sum_show_clk_conv[0] = log(*(T*)(sum + k * align_dim + 0) + 1);
+            sum_show_clk_conv[1] = log(*(T*)(sum + k * align_dim + 1) + 1);
+            sum_show_clk_conv[2] = log(*(T*)(sum + k * align_dim + 2) + 1) - log(*(T*)(sum + k * align_dim + 1) + 1);
+            mfence_lm();
+            *(T*)(sum + k * align_dim + 0) = (float)sum_show_clk_conv[0];
+            *(T*)(sum + k * align_dim + 1) = (float)sum_show_clk_conv[1];
+            *(T*)(sum + k * align_dim + 2) = (float)sum_show_clk_conv[2];
+            mfence();
+            LM2GM_ASYNC(sum + k * align_dim, cur_y + seqid * concate_dim_size + k * dim_size, dim_size * sizeof(T));
+        }
+    }
+};
+// use_cvm=false, show_filter=true|false
+template <typename T, bool show_filter>
+struct cvm_engine<T, false, show_filter> {
+    static __device__ inline void cvm(T* sum, float* sum_show_clk_conv,
+                                    int seqid, int dim_size,
+                                    int align_dim,
+                                    int concate_dim_size,
+                                    int embedx_concate_size,
+                                    int start_offset,
+                                    __global_ptr__ T* cur_y) {
+        for (int k = 0; k < embedx_concate_size; k++) {
+            mfence();
+            LM2GM_ASYNC(sum + k * align_dim + start_offset,
+                        cur_y + seqid * concate_dim_size + k * dim_size,
+                        dim_size * sizeof(T));
+        }
+    }
+};
+// use_cvm=true, show_filter=true
+template <typename T>
+struct cvm_engine<T, true, true> {
+    static __device__ inline void cvm(T* sum, float* sum_show_clk_conv,
+                                    int seqid, int dim_size,
+                                    int align_dim,
+                                    int concate_dim_size,
+                                    int embedx_concate_size,
+                                    int start_offset,
+                                    __global_ptr__ T* cur_y) {
+        // skip show
+        for (int k = 0; k < embedx_concate_size; k++) {
+            sum_show_clk_conv[1] = log(*(T*)(sum + k * align_dim + 1) + 1);
+            sum_show_clk_conv[2] = log(*(T*)(sum + k * align_dim + 2) + 1) - log(*(T*)(sum + k * align_dim + 1) + 1);
+            mfence_lm();
+            *(T*)(sum + k * align_dim + 0) = (float)sum_show_clk_conv[0];
+            *(T*)(sum + k * align_dim + 1) = (float)sum_show_clk_conv[1];
+            *(T*)(sum + k * align_dim + 2) = (float)sum_show_clk_conv[2];
+            mfence();
+            LM2GM_ASYNC(sum + k * align_dim + start_offset,
+                        cur_y + seqid * concate_dim_size + k * dim_size,
+                        dim_size * sizeof(T));
+        }
+    }
+};
+
+
+template <typename T, bool use_cvm, bool need_filter, bool show_filter, bool need_embedx_concate>
+__global__ void seq_sum_pooling_cvm_with_conv_fwd(unsigned long long* x_addr,
+                                        unsigned long long* y_addr,
+                                        int* sequence_addr,
+                                        uint32_t batch,
+                                        uint32_t dim,
+                                        uint32_t slot_num,
+                                        float show_coeff,
+                                        float clk_coeff,
+                                        float threshold,
+                                        float padding_value,
+                                        int cvm_offset,
+                                        int embedx_concate_size) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cid * cluster_num() + cluster_id();
+    int total_thread = cluster_num() * ncores;
+    const int buf_size = 512;
+    int max_seq_len = buf_size / dim;
+    int local_buf_size = buf_size + 32;
+    __simd__ T local_x[local_buf_size];
+    float sum_show_clk_conv[cvm_offset]; // cvm_offset = 3
+    const int sum_size = roundup32(dim);
+    __simd__ T sum[embedx_concate_size * sum_size];
+    __local__ int sequence_lm[2];
+    int max_slot_num = 200;
+    uint64_t x_list[max_slot_num];
+    uint64_t y_list[max_slot_num];
+    int dim_size = use_cvm ? (show_filter ? dim - 1 : dim) : (dim - cvm_offset);
+    int start_offset = dim - dim_size;
+    int concate_dim_size = dim_size * embedx_concate_size;
+    int start = 0;
+    int end = 0;
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(x_addr + slot_len_offset, x_list, slot_len * sizeof(uint64_t));
+        GM2LM(y_addr + slot_len_offset, y_list, slot_len * sizeof(uint64_t));
+
+        for (int slot_id = 0; slot_id < slot_len; slot_id++) {
+            __global_ptr__ T* cur_x = reinterpret_cast<__global_ptr__ T*>(x_list[slot_id]);
+            __global_ptr__ T* cur_y = reinterpret_cast<__global_ptr__ T*>(y_list[slot_id]);
+            for (int64_t seqid = thread_id; seqid < batch; seqid += total_thread) {
+                mfence();
+                GM2LM(sequence_addr + (slot_len_offset + slot_id) * (batch + 1) + seqid, sequence_lm, 2 * sizeof(int));
+
+                memset_value_float((T*)sum, embedx_concate_size * sum_size, padding_value);
+                memset_value_float(local_x, local_buf_size, padding_value);
+                start = sequence_lm[0];
+                end = sequence_lm[1];
+
+                // first: sum pool
+                for (int i = start; i < end; i += max_seq_len) {
+                    // int len = min<int64_t>(end - i, max_seq_len);
+                    int len = min(end - i, max_seq_len);
+                    if (len <= 0)
+                        continue;
+                    mfence();
+                    pooling_engine<T, use_cvm, need_filter, show_filter, need_embedx_concate>::sum_pooling(
+                                                local_x, sum, len, (i - start),
+                                                dim, sum_size, start_offset,
+                                                show_coeff, clk_coeff, threshold, cvm_offset,
+                                                embedx_concate_size, 
+                                                cur_x + i * dim);
+                }
+                // second: cvm
+                sum_show_clk_conv[0] = 0.0;
+                sum_show_clk_conv[1] = 0.0;
+                sum_show_clk_conv[2] = 0.0;
+
+                cvm_engine<T, use_cvm, show_filter>::cvm(sum, sum_show_clk_conv,
+                                                        seqid, dim_size, sum_size, concate_dim_size,
+                                                        embedx_concate_size, start_offset,
+                                                        cur_y);
+            }
+        }
+    }
+}
+
+#define XPU2_KERNEL_SUM_POOL_CVM_WITH_CONV_INTERFACE(kernel, T, use_cvm, need_filter, show_filter, need_embedx_concate)  \
+auto func_kernel = kernel<T, true, true, true, true>;                                                 \
+if (use_cvm) {                                                                  \
+    if (need_filter) {                                                          \
+        if (show_filter) {                                                      \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, true, true, true, true>;          \
+            } else {                                                            \
+                func_kernel = kernel<T, true, true, true, false>;         \
+            }                                                                   \
+        } else {                                                                \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, true, true, false, true>;         \
+            } else {                                                            \
+                func_kernel = kernel<T, true, true, false, false>;        \
+            }                                                                   \
+        }                                                                       \
+    } else {                                                                    \
+        if (show_filter) {                                                      \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, true, false, true, true>;         \
+            } else {                                                            \
+                func_kernel = kernel<T, true, false, true, false>;        \
+            }                                                                   \
+        } else {                                                                \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, true, false, false, true>;        \
+            } else {                                                            \
+                func_kernel = kernel<T, true, false, false, false>;       \
+            }                                                                   \
+        }                                                                       \
+    }                                                                           \
+} else {                                                                        \
+    if (need_filter) {                                                          \
+        if (show_filter) {                                                      \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, false, true, true, true>;         \
+            } else {                                                            \
+                func_kernel = kernel<T, false, true, true, false>;        \
+            }                                                                   \
+        } else {                                                                \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, false, true, false, true>;        \
+            } else {                                                            \
+                func_kernel = kernel<T, false, true, false, false>;       \
+            }                                                                   \
+        }                                                                       \
+    } else {                                                                    \
+        if (show_filter) {                                                      \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, false, false, true, true>;        \
+            } else {                                                            \
+                func_kernel = kernel<T, false, false, true, false>;       \
+            }                                                                   \
+        } else {                                                                \
+            if (need_embedx_concate) {                                          \
+                func_kernel = kernel<T, false, false, false, true>;       \
+            } else {                                                            \
+                func_kernel = kernel<T, false, false, false, false>;      \
+            }                                                                   \
+        }                                                                       \
+    }                                                                           \
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_with_conv_xpu2_wrapper(xpu::Context* ctx,
+                        T** x_vec,
+                        T** y_vec,
+                        TID* lods_vec,
+                        uint32_t batch,
+                        uint32_t dim,
+                        uint32_t slot_num,
+                        bool use_cvm,
+                        bool need_filter,
+                        float show_coeff,
+                        float clk_coeff,
+                        float threshold,
+                        bool show_filter,
+                        float padding_value,
+                        int cvm_offset,
+                        int embedx_concate_size) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(x_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(y_vec);
+    bool need_embedx_concate = embedx_concate_size > 1 ? true : false;
+    XPU2_KERNEL_SUM_POOL_CVM_WITH_CONV_INTERFACE(seq_sum_pooling_cvm_with_conv_fwd, T, use_cvm, need_filter, show_filter, need_embedx_concate);
+    int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
+                                                                    xpu_y_addr_ptr,
+                                                                    lods_vec,
+                                                                    batch,
+                                                                    dim,
+                                                                    slot_num,
+                                                                    show_coeff,
+                                                                    clk_coeff,
+                                                                    threshold,
+                                                                    padding_value,
+                                                                    cvm_offset,
+                                                                    embedx_concate_size);
+    KERNEL_ASSERT_SUCCESS(ctx, ret);
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm_with_conv(xpu::Context* ctx,
+                          const std::vector<const T*>& x,
+                          const std::vector<T*>& y,
+                          const std::vector<TID>& lods,
+                          uint32_t batch,
+                          uint32_t dim,
+                          uint32_t slot_num,
+                          bool use_cvm,
+                          bool need_filter,
+                          float show_coeff,
+                          float clk_coeff,
+                          float threshold,
+                          bool show_filter,
+                          float padding_value,
+                          int cvm_offset,
+                          int embedx_concate_size) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, dim, 2);
+    WRAPPER_ASSERT_LE(ctx, dim, 64);
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+    WRAPPER_ASSERT_LT(ctx, padding_value, 0.000001);
+    WRAPPER_ASSERT_GT(ctx, padding_value, -0.000001);
+    WRAPPER_ASSERT_GE(ctx, embedx_concate_size, 1);
+
+    int dim_size = use_cvm ? (show_filter ? dim - 1 : dim) : (dim - cvm_offset);
+    dim_size = embedx_concate_size > 1 ? embedx_concate_size * dim_size : dim_size;
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t x_len = lods[(i + 1) * (batch + 1) - 1] * dim;
+        if (x_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, x_len, x[i]);
+        }
+
+        int64_t y_len = batch * dim_size;
+        WRAPPER_CHECK_PTR(ctx, T, y_len, y[i]);
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** x_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, x_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, x.data(), x_xpu, slot_num * sizeof(T*)));
+
+    T** y_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, y_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, y.data(), y_xpu, slot_num * sizeof(T*)));
+
+    TID* lods_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, lods_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, lods.data(), lods_xpu, slot_num * sizeof(TID) * (batch + 1)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+        return sequence_sum_pool_cvm_with_conv_xpu2_wrapper<T, TID>(ctx,
+                                    x_xpu,
+                                    y_xpu,
+                                    lods_xpu,
+                                    batch,
+                                    dim,
+                                    slot_num,
+                                    use_cvm,
+                                    need_filter,
+                                    show_coeff,
+                                    clk_coeff,
+                                    threshold,
+                                    show_filter,
+                                    padding_value,
+                                    cvm_offset,
+                                    embedx_concate_size);
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+#define _SEQ_SUM_POOL_CVM_WITH_CONV(T, TID) \
+template int sequence_sum_pool_cvm_with_conv<T, TID>(xpu::Context*,          \
+                                   const std::vector<const float*>&,    \
+                                   const std::vector<float*>&,          \
+                                   const std::vector<TID>&,             \
+                                   uint32_t,                             \
+                                   uint32_t,                             \
+                                   uint32_t,                             \
+                                   bool,                                \
+                                   bool,                                \
+                                   float,                               \
+                                   float,                               \
+                                   float,                               \
+                                   bool,                                \
+                                   float,                               \
+                                   int,                                 \
+                                   int);
+
+_SEQ_SUM_POOL_CVM_WITH_CONV(float, int);
+// fused_seqpool_cvm_with_conv end
+
+template <typename T>
+__global__ void seq_sum_pooling_cvm_with_conv_bwd(unsigned long long* dy_addr,
+                                        T* cvm,
+                                        unsigned long long* dx_addr,
+                                        int* seq_addr,
+                                        bool use_cvm,
+                                        int cvm_offset,
+                                        bool show_filter,
+                                        uint32_t item_width,
+                                        uint32_t batch_size,
+                                        uint32_t slot_num,
+                                        int embedx_concate_size) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int nthreads = cluster_num() * ncores;
+    // __local__ T local_y_grad[1000];
+    __local__ T local_y_grad[item_width];
+    __local__ int sequence_lm[2];
+    int max_slot_num = 200;
+    unsigned long long DX_list[max_slot_num];
+    unsigned long long DY_list[max_slot_num];
+    int dim_size = use_cvm ? (show_filter ? item_width - 1 : item_width) : (item_width - cvm_offset);
+    int start_offset = item_width - dim_size;
+    int dy_offset = cvm_offset - start_offset;
+    //               use_cvm,    show_filter,   no_use_cvm
+    // dim_size:     item_width, item_width-1, item_width-2
+    // start_offset: 0,          1,            2
+    // dy_offset:    2,          1,            0
+    int concate_index = 0;
+    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
+        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
+        GM2LM(dx_addr + slot_len_offset, DX_list, slot_len * sizeof(unsigned long long));
+        GM2LM(dy_addr + slot_len_offset, DY_list, slot_len * sizeof(unsigned long long));
+        for (int k = 0; k < slot_len; k++) {
+            __global_ptr__ T* cur_DX = reinterpret_cast<__global_ptr__ T*>(DX_list[k]);
+            __global_ptr__ T* cur_DY = reinterpret_cast<__global_ptr__ T*>(DY_list[k]);
+            for (int64_t i = thread_id; i < batch_size; i += nthreads) {
+                mfence();
+                GM2LM_ASYNC(cvm + i * cvm_offset, local_y_grad, cvm_offset * sizeof(T));
+                if (embedx_concate_size == 1) {
+                    GM2LM_ASYNC(cur_DY + i * dim_size + dy_offset, local_y_grad + cvm_offset, (item_width - cvm_offset) * sizeof(T));
+                }
+
+                GM2LM_ASYNC(seq_addr + (k + slot_len_offset) * (batch_size + 1) + i, sequence_lm, 2 * sizeof(int));
+                mfence_lm();
+                concate_index = 0;
+                for (int j = sequence_lm[0]; j < sequence_lm[1]; j++) {
+                    if (embedx_concate_size > 1) {
+                        mfence();
+                        GM2LM_ASYNC(cur_DY + i * dim_size * embedx_concate_size + dim_size * concate_index + dy_offset, local_y_grad + cvm_offset, (item_width - cvm_offset) * sizeof(T));
+                        concate_index = concate_index == (embedx_concate_size - 1) ? concate_index : concate_index + 1;
+                        mfence_lm();
+                    }
+                    LM2GM_ASYNC(local_y_grad, cur_DX + j * item_width , item_width * sizeof(T));
+                }
+            }
+        }
+        mfence();
+    }
+    return;
+}
+
+template <typename T, typename TID>
+static int sequence_sum_pool_cvm_with_conv_grad_xpu2_wrapper(xpu::Context* ctx,
+                        T** dy_vec,
+                        float* cvm,
+                        T** dx_vec,
+                        TID* seq_vec,
+                        bool use_cvm,
+                        int cvm_offset,
+                        bool show_filter,
+                        uint32_t item_width,
+                        uint32_t batch_size,
+                        uint32_t slot_num,
+                        int embedx_concate_size) {
+    auto xpu_x_addr_ptr = reinterpret_cast<unsigned long long*>(dx_vec);
+    auto xpu_y_addr_ptr = reinterpret_cast<unsigned long long*>(dy_vec);
+    int ret = seq_sum_pooling_cvm_with_conv_bwd<T><<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_y_addr_ptr,
+                                                                                                cvm,
+                                                                                                xpu_x_addr_ptr,
+                                                                                                seq_vec,
+                                                                                                use_cvm,
+                                                                                                cvm_offset,
+                                                                                                show_filter,
+                                                                                                item_width,
+                                                                                                batch_size,
+                                                                                                slot_num,
+                                                                                                embedx_concate_size);
+    KERNEL_ASSERT_SUCCESS(ctx, ret);
+    return xpu::SUCCESS;
+}
+
+template<typename T, typename TID>
+int sequence_sum_pool_cvm_with_conv_grad(xpu::Context* ctx,
+                               std::vector<const float*>& dy_vec,
+                               float *cvm,
+                               std::vector<float*>& dx_vec,
+                               std::vector<int>& seq_vec,
+                               bool use_cvm,
+                               int cvm_offset,
+                               bool show_filter,
+                               uint32_t item_width,
+                               uint32_t batch_size,
+                               uint32_t slot_num,
+                               int embedx_concate_size) {
+    WRAPPER_CHECK_CTX(ctx);
+
+    WRAPPER_ASSERT_GT(ctx, item_width, 2);
+    WRAPPER_ASSERT_LT(ctx, item_width, 1000);
+    WRAPPER_ASSERT_GT(ctx, batch_size, 0);
+    WRAPPER_ASSERT_GT(ctx, slot_num, 0);
+    WRAPPER_ASSERT_GE(ctx, embedx_concate_size, 1);
+
+    int dim_size = use_cvm ? (show_filter ? item_width - 1 : item_width) : (item_width - cvm_offset);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dy_vec_len = batch_size * dim_size * embedx_concate_size;
+        WRAPPER_CHECK_PTR(ctx, T, dy_vec_len, dy_vec[i]);
+    }
+    WRAPPER_CHECK_PTR(ctx, T, batch_size * 2, cvm);
+    for (int64_t i = 0; i < slot_num; i++) {
+        int64_t dx_vec_len = seq_vec[(i + 1) * (batch_size + 1) - 1] * item_width;
+        if (dx_vec_len != 0) {
+            WRAPPER_CHECK_PTR(ctx, T, dx_vec_len, dx_vec[i]);
+        }
+    }
+
+    xpu::ctx_guard RAII_GUARD(ctx);
+    T** dy_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dy_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dy_vec.data(), dy_xpu, slot_num * sizeof(T*)));
+
+    T** dx_xpu = RAII_GUARD.alloc_l3_or_gm<T*>(slot_num);
+    WRAPPER_ASSERT_WORKSPACE(ctx, dx_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, dx_vec.data(), dx_xpu, slot_num * sizeof(T*)));
+
+    TID* seq_vec_xpu = RAII_GUARD.alloc_l3_or_gm<TID>(slot_num * (batch_size + 1));
+    WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
+    WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
+
+    if (ctx->dev().type() == xpu::kXPU2) {
+         return sequence_sum_pool_cvm_with_conv_grad_xpu2_wrapper<T, TID>(ctx,
+                                     dy_xpu,
+                                     cvm,
+                                     dx_xpu,
+                                     seq_vec_xpu,
+                                     use_cvm,
+                                     cvm_offset,
+                                     show_filter,
+                                     item_width,
+                                     batch_size,
+                                     slot_num,
+                                     embedx_concate_size);
+    }
+    WRAPPER_UNIMPLEMENTED(ctx);
+}
+
+template int sequence_sum_pool_cvm_with_conv_grad<float, int>(xpu::Context* ctx,
+                                               std::vector<const float*>& dy_vec,
+                                               float *cvm,
+                                               std::vector<float*>& dx_vec,
+                                               std::vector<int>& seq_vec,
+                                               bool use_cvm,
+                                               int cvm_offset,
+                                               bool show_filter,
+                                               uint32_t item_width,
+                                               uint32_t batch_size,
+                                               uint32_t slot_num,
+                                               int embedx_concate_size);
+}  // end namespace framework
+}  // end namespace paddle

@@ -48,6 +48,7 @@ class FusedSeqpoolCVMOp : public framework::OperatorWithKernel {
     bool clk_filter = ctx->Attrs().Get<bool>("clk_filter");
     const int embed_thres_size = ctx->Attrs().Get<int>("embed_thres_size");
     const int embedx_concate_size = ctx->Attrs().Get<int>("embedx_concate_size");
+    //const bool fill_zero = ctx->Attrs().Get<bool>("fill_zero");
 
     // need filter quant_ratio more than zero
     if (ctx->Attrs().Get<bool>("need_filter")) {
@@ -142,6 +143,7 @@ class FusedSeqpoolCVMOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<int>("embed_thres_size", "(int, default 0)").SetDefault(0);
     AddAttr<int>("embedx_concate_size", "(int, default 1)").SetDefault(1);
     AddAttr<bool>("embedx_concate_filter", "(bool, default false)").SetDefault(false);
+    AddAttr<bool>("fill_zero", "(bool, default true)").SetDefault(true);
     AddAttr<bool>("fix_ctr_to_click", "(bool, default false)").SetDefault(false);
 
     AddComment(R"DOC(

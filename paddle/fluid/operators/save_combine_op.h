@@ -37,12 +37,9 @@ template <typename DeviceContext, typename T>
 class SaveCombineOpKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &ctx) const override {
-    auto place = ctx.GetPlace();
     auto filename = ctx.Attr<std::string>("file_path");
     auto overwrite = ctx.Attr<bool>("overwrite");
-    auto save_as_fp16 = ctx.Attr<bool>("save_as_fp16");
     auto save_to_memory = ctx.Attr<bool>("save_to_memory");
-    auto output = ctx.Output<std::string>("Y");
 
     bool is_present = FileExists(filename);
     if (is_present && !overwrite) {
@@ -52,8 +49,31 @@ class SaveCombineOpKernel : public framework::OpKernel<T> {
           filename,
           overwrite));
     }
+    if (save_to_memory) {
+      auto output = ctx.Output<std::string>("Y");
+      PADDLE_ENFORCE_NE(output,
+                        nullptr,
+                        platform::errors::InvalidArgument(
+                            "Cannot find variable Y for save_combine_op"));
+      std::ostringstream ss;
+      SaveCombineVars(ctx, reinterpret_cast<std::ostream *>(&ss));
+      *output = ss.str();
+    } else {
+      MkDirRecursively(DirName(filename).c_str());
+      std::ofstream fout(filename, std::ios::binary);
+      PADDLE_ENFORCE_EQ(static_cast<bool>(fout),
+                        true,
+                        platform::errors::Unavailable(
+                            "Cannot open %s to save variables.", filename));
+      SaveCombineVars(ctx, reinterpret_cast<std::ostream *>(&fout));
+      fout.close();
+    }
+  }
 
-    std::ostringstream ss;
+ protected:
+  void SaveCombineVars(const framework::ExecutionContext &ctx, std::ostream *os) const {
+    auto place = ctx.GetPlace();
+    auto save_as_fp16 = ctx.Attr<bool>("save_as_fp16");
     auto inp_var_names = ctx.InputNames("X");
     auto &inp_vars = ctx.MultiInputVar("X");
     PADDLE_ENFORCE_GT(inp_var_names.size(),
@@ -102,9 +122,9 @@ class SaveCombineOpKernel : public framework::OpKernel<T> {
           out.set_lod(tensor.lod());
           framework::TransDataType(
               in_kernel_type, out_kernel_type, tensor, &out);
-          framework::SerializeToStream(ss, out, dev_ctx);
+          framework::SerializeToStream(*os, out, dev_ctx);
         } else {
-          framework::SerializeToStream(ss, tensor, dev_ctx);
+          framework::SerializeToStream(*os, tensor, dev_ctx);
         }
       } else {
         auto &tensor = inp_vars[i]->Get<framework::Vocab>();
@@ -114,24 +134,8 @@ class SaveCombineOpKernel : public framework::OpKernel<T> {
           framework::ConvertWstrToStr(it->first, &t);
           data.emplace(t, it->second);
         }
-        framework::StringMapToStream(ss, data);
+        framework::StringMapToStream(*os, data);
       }
-    }
-    if (save_to_memory) {
-      PADDLE_ENFORCE_NE(output,
-                        nullptr,
-                        platform::errors::InvalidArgument(
-                            "Cannot find variable Y for save_combine_op"));
-      *output = ss.str();
-    } else {
-      MkDirRecursively(DirName(filename).c_str());
-      std::ofstream fout(filename, std::ios::binary);
-      PADDLE_ENFORCE_EQ(static_cast<bool>(fout),
-                        true,
-                        platform::errors::Unavailable(
-                            "Cannot open %s to save variables.", filename));
-      fout << ss.str();
-      fout.close();
     }
   }
 };

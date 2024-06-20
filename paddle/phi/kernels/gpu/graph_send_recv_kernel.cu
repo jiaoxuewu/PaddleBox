@@ -14,9 +14,7 @@
 
 #include "paddle/phi/kernels/graph_send_recv_kernel.h"
 
-#include <thrust/device_vector.h>
-#include <thrust/fill.h>
-
+#include "paddle/phi/kernels/funcs/math_function.h"
 #include <algorithm>
 #include <vector>
 
@@ -59,17 +57,9 @@ void GraphSendRecvOpCUDAKernelLaunchHelper(const Context& ctx,
     cudaMemset(p_output, 0, memset_bytes);
 #endif
   } else if (pool_type == "MAX") {
-    thrust::device_ptr<T> p_output_ptr(p_output);
-    thrust::fill(thrust::device,
-                 p_output_ptr,
-                 p_output_ptr + memset_size,
-                 std::numeric_limits<T>::min());
+    phi::funcs::set_constant<T>(ctx, out, std::numeric_limits<T>::min());
   } else if (pool_type == "MIN") {
-    thrust::device_ptr<T> p_output_ptr(p_output);
-    thrust::fill(thrust::device,
-                 p_output_ptr,
-                 p_output_ptr + memset_size,
-                 std::numeric_limits<T>::max());
+    phi::funcs::set_constant<T>(ctx, out, std::numeric_limits<T>::max());
   }
 
   if (index_size == 0) return;

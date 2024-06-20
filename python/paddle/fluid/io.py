@@ -290,7 +290,8 @@ def save_vars(executor,
               main_program=None,
               vars=None,
               predicate=None,
-              filename=None):
+              filename=None,
+              filter_func=None):
     """
     :api_attr: Static Graph
 
@@ -374,7 +375,8 @@ def save_vars(executor,
                          main_program=main_program,
                          dirname=dirname,
                          vars=list(filter(predicate, main_program.list_vars())),
-                         filename=filename)
+                         filename=filename,
+                         filter_func=filter_func)
     else:
         params_var_name = "saved_params"
         # give warning when there is no var in model
@@ -389,6 +391,8 @@ def save_vars(executor,
 
         save_var_map = {}
         for each_var in vars:
+            if filter_func is not None and filter_func(each_var.name):
+                continue
             # NOTE: don't save the variable which type is RAW
             if each_var.type == core.VarDesc.VarType.RAW:
                 continue
@@ -668,7 +672,11 @@ def _save_distributed_persistables(executor, dirname, main_program):
 
 
 @dygraph_not_support
-def save_persistables(executor, dirname, main_program=None, filename=None):
+def save_persistables(executor,
+                      dirname,
+                      main_program=None,
+                      filename=None,
+                      filter_func=None):
     """
     :api_attr: Static Graph
 
@@ -737,7 +745,8 @@ def save_persistables(executor, dirname, main_program=None, filename=None):
                          main_program=main_program,
                          vars=None,
                          predicate=is_persistable,
-                         filename=filename)
+                         filename=filename,
+                         filter_func=filter_func)
 
 
 def load_vars(executor,
@@ -1245,7 +1254,8 @@ def save_inference_model(dirname,
                          params_filename=None,
                          export_for_deployment=True,
                          program_only=False,
-                         clip_extra=False):
+                         clip_extra=False,
+                         filter_func=None):
     """
     :api_attr: Static Graph
 
@@ -1454,7 +1464,7 @@ def save_inference_model(dirname,
     if params_filename is not None:
         params_filename = os.path.basename(params_filename)
 
-    save_persistables(executor, save_dirname, main_program, params_filename)
+    save_persistables(executor, save_dirname, main_program, params_filename, filter_func)
     return target_var_name_list
 
 

@@ -17,11 +17,6 @@ limitations under the License. */
 #include <chrono>
 
 #include "paddle/fluid/framework/convert_utils.h"
-#ifdef PADDLE_WITH_BOX_PS
-#include "paddle/fluid/framework/fleet/box_wrapper.h"
-#endif
-DECLARE_bool(lineid_have_extend_info);
-DECLARE_bool(dump_filed_same_as_aibox);
 
 namespace phi {
 class DenseTensor;
@@ -210,11 +205,7 @@ void PrintLodTensor(const phi::DenseTensor* tensor,
              proto::VarType::FP64) {
     PrintLodTensorType<double>(
         tensor, start, end, out_val, separator, need_leading_separator);
-  } else if (framework::TransToProtoVarType(tensor->dtype()) ==
-             proto::VarType::BOOL) {
-    PrintLodTensorType<bool>(
-        tensor, start, end, out_val, separator, need_leading_separator);
-  } else {
+    } else {
     out_val += "unsupported type";
   }
 }
@@ -247,20 +238,28 @@ bool CheckValidOutput(const LoDTensor* tensor, size_t batch_size) {
 
 void DeviceWorker::DumpParam(const Scope& scope, const int batch_id) {
   std::ostringstream os;
+  int device_id = int(place_.GetDeviceId());
   for (auto& param : *dump_param_) {
     os.str("");
     Variable* var = scope.FindVar(param);
-    if (var == nullptr) {
+    if (var == nullptr || !var->IsInitialized()) {
+      continue;
+    }
+    if (!var->IsType<phi::DenseTensor>()) {
       continue;
     }
     LoDTensor* tensor = var->GetMutable<LoDTensor>();
+    if (tensor == nullptr || !tensor->IsInitialized()) {
+      continue;
+    }
     framework::LoDTensor cpu_tensor;
-    if (platform::is_gpu_place(tensor->place())) {
+    if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
       TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
       tensor = &cpu_tensor;
     }
     int64_t len = tensor->numel();
-    os << "(" << batch_id << "," << param << ")"
+    os << "(" << device_id << "," << batch_id << "," << param << ")"
        << PrintLodTensor(tensor, 0, len);
     writer_ << os.str();
   }
@@ -353,7 +352,8 @@ void DeviceWorker::DumpField(const Scope& scope,
         continue;
       }
       framework::LoDTensor cpu_tensor;
-      if (platform::is_gpu_place(tensor->place())) {
+      if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
         TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
         cpu_tensor.set_lod(tensor->lod());
         tensor = &cpu_tensor;
@@ -429,6 +429,11 @@ void DeviceWorker::DumpField(const Scope& scope,
               << "] cannot be find in scope, so it was skipped.";
       continue;
     }
+    if (!var->IsType<phi::DenseTensor>()) {
+      VLOG(3) << "Note: field[" << field
+              << "] is not dense tensor, so it was skipped.";
+      continue;
+    }
     LoDTensor* tensor = var->GetMutable<LoDTensor>();
     if (!tensor->IsInitialized()) {
       VLOG(0) << "Note: field[" << field
@@ -436,7 +441,8 @@ void DeviceWorker::DumpField(const Scope& scope,
       continue;
     }
     framework::LoDTensor cpu_tensor;
-    if (platform::is_gpu_place(tensor->place())) {
+    if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
       TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
       cpu_tensor.set_lod(tensor->lod());
       tensor = &cpu_tensor;
@@ -466,286 +472,6 @@ void DeviceWorker::DumpField(const Scope& scope,
     writer_ << ars[i];
   }
   writer_.Flush();
-}
-template <class... ARGS>
-void format_string_append(std::string* str,
-                          const char* fmt,
-                          ARGS&&... args) {  // use VA_ARGS may be better ?
-  int len = snprintf(NULL, 0, fmt, args...);
-  PADDLE_ENFORCE(len >= 0, "format args length error");
-  size_t oldlen = str->length();
-  str->resize(oldlen + len + 1);
-  PADDLE_ENFORCE(snprintf(&(*str)[oldlen], (size_t)len + 1, fmt, args...) ==
-                 len);
-  str->resize(oldlen + len);
-}
-inline void GetLodBound(const LoD& lod,
-                        const int64_t& dim,
-                        const int& index,
-                        std::pair<int64_t, int64_t>* bound) {
-  if (lod.size() != 0) {
-    bound->first = lod[0][index] * dim;
-    bound->second = lod[0][index + 1] * dim;
-  } else {
-    bound->first = index * dim;
-    bound->second = (index + 1) * dim;
-  }
-}
-template <typename T, typename C>
-void PrintLodTensorFmtType(const Tensor* tensor,
-                           const int64_t& start,
-                           const int64_t& end,
-                           const char* fmt,
-                           std::string* out_val) {
-  if (start >= end) {
-    return;
-  }
-  const T* ptr = tensor->data<T>();
-  for (int64_t i = start; i < end; i++) {
-    format_string_append(out_val, fmt, static_cast<C>(ptr[i]));
-  }
-}
-void PrintLodTensor(const Tensor* tensor,
-                    const int64_t& start,
-                    const int64_t& end,
-                    std::string* out) {
-  auto dtype = framework::TransToProtoVarType(tensor->dtype());
-  if (dtype == proto::VarType::FP32) {
-    PrintLodTensorFmtType<float, float>(tensor, start, end, ":%.9g", out);
-  } else if (dtype == proto::VarType::INT64) {
-    PrintLodTensorFmtType<int64_t, uint64_t>(tensor, start, end, ":%lu", out);
-  } else if (dtype == proto::VarType::FP64) {
-    PrintLodTensorFmtType<double, double>(tensor, start, end, ":%.9g", out);
-  } else if (dtype == proto::VarType::INT32) {
-    PrintLodTensorFmtType<int, int>(tensor, start, end, ":%d", out);
-  } else if (dtype == proto::VarType::INT16) {
-    PrintLodTensorFmtType<int16_t, int16_t>(tensor, start, end, ":%d", out);
-  } else if (dtype == proto::VarType::BOOL) {
-    PrintLodTensorFmtType<bool, bool>(tensor, start, end, ":%d", out);
-  } else {
-    out->append("unsupported type");
-  }
-}
-void DeviceWorker::DumpParamBoxPS(const Scope& scope, const int batch_id) {
-  size_t field_num = dump_param_->size();
-
-  auto chan = writer_.channel();
-  // thread process fields
-#ifdef PADDLE_WITH_BOX_PS
-  auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
-  box_ptr->ExecuteFunc(
-      platform::CPUPlace(),
-#else
-  parallel_run_dynamic(
-#endif
-      field_num,
-      [this, &scope, batch_id, chan](const size_t& id) {
-        auto& name = (*dump_param_)[id];
-        Variable* var = scope.FindVar(name);
-        if (var == nullptr || !var->IsInitialized()) {
-          return;
-        }
-        const LoDTensor& tensor = var->Get<LoDTensor>();
-        if (!tensor.IsInitialized()) {
-          VLOG(0) << "Note: param[" << name
-                  << "] is not initialized, so it was skipped.";
-          return;
-        }
-        framework::LoDTensor cpu_tensor;
-        if (!platform::is_cpu_place(tensor.place())) {
-          TensorCopySync(tensor, platform::CPUPlace(), &cpu_tensor);
-        } else {
-          cpu_tensor.ShareDataWith(tensor);
-        }
-
-        std::string s;
-        format_string_append(&s, "(%d,%s)", batch_id, name.c_str());
-        int64_t len = cpu_tensor.numel();
-        PrintLodTensor(&cpu_tensor, 0, len, &s);
-        // write to channel
-        chan->WriteMove(1, &s);
-      });
-}
-void DeviceWorker::DumpFieldBoxPS(
-    const Scope& scope,
-    int dump_mode,
-    int dump_interval) {  // dump_mode: 0: no random,
-                          // 1: random with insid hash,
-                          // 2: random with random
-                          // number
-  size_t batch_size = device_reader_->GetCurBatchSize();
-  size_t field_num = dump_fields_->size();
-  std::vector<int64_t> dims(field_num, 0);
-  std::vector<framework::LoDTensor> cpu_tensors(field_num);
-  std::vector<const LoD*> lods(field_num, nullptr);
-
-// #ifdef PADDLE_WITH_XPU_KP
-std::set<std::string> used_slot_set;
-#if (defined PADDLE_WITH_XPU_KP) && (defined PADDLE_WITH_BOX_PS)
-  auto real_reader = dynamic_cast<SlotPaddleBoxDataFeed *>(device_reader_);
-  PADDLE_ENFORCE_NOT_NULL(
-        real_reader, platform::errors::NotFound("In XPU only support SlotPaddleBoxDataFeed"));
-  std::vector<std::string> used_slot_names;
-  real_reader->GetUsedSlotIndex(nullptr, &used_slot_names);
-  for (auto & slot : used_slot_names) {
-    used_slot_set.insert(slot);
-  }
-#endif
-
-  // copy fields
-#ifdef PADDLE_WITH_BOX_PS
-  auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
-  box_ptr->ExecuteFunc(
-      platform::CPUPlace(),
-#else
-  parallel_run_dynamic(
-#endif
-      field_num,
-      [this, &dims, &cpu_tensors, &lods, &scope, &used_slot_set, batch_size](const size_t& i) {
-        auto& field = (*dump_fields_)[i];
-        Variable* var = scope.FindVar(field);
-        if (var == nullptr || !var->IsInitialized()) {
-          VLOG(3) << "Note: field[" << field
-                  << "] cannot be find in scope, so it was skipped.";
-          return;
-        }
-        const LoDTensor& tensor = var->Get<LoDTensor>();
-        if (!tensor.IsInitialized()) {
-          VLOG(3) << "Note: field[" << field
-                  << "] is not initialized, so it was skipped.";
-          return;
-        }
-        if (!CheckValidOutput(&tensor, batch_size)) {
-          //      VLOG(0) << "Note: field[" << field << "] cannot pass check, so
-          //      it was "
-          //                                            "skipped. Maybe the
-          //                                            dimension is " "wrong ";
-          return;
-        }
-        dims[i] = tensor.dims()[1];
-        lods[i] = (&tensor.lod());
-        if (!platform::is_cpu_place(tensor.place())) {
-          TensorCopySync(tensor, platform::CPUPlace(), &cpu_tensors[i]);
-        } else {
-          cpu_tensors[i].ShareDataWith(tensor);
-        }
-#ifdef PADDLE_WITH_XPU_KP
-    auto fid2sign_map_ptr = paddle::framework::BoxWrapper::GetInstance()->GetFid2SginMap();
-    if (used_slot_set.find(field) != used_slot_set.end() \
-        && fid2sign_map_ptr != nullptr && fid2sign_map_ptr->size() > 0) {
-      auto t_dtype = framework::TransToProtoVarType(cpu_tensors[i].dtype());
-      if (t_dtype == proto::VarType::INT64) {
-        size_t numel = cpu_tensors[i].numel();
-        int64_t * slot_data = cpu_tensors[i].data<int64_t>();
-        for (size_t j = 0; j < numel; ++j) {
-          uint64_t fid = static_cast<uint64_t>(slot_data[j]);
-          PADDLE_ENFORCE_LT(fid, fid2sign_map_ptr->size());
-          uint64_t sign = (*fid2sign_map_ptr)[fid];
-          PADDLE_ENFORCE(sign > 0 || (sign == 0 && fid == 0),
-              platform::errors::PreconditionNotMet(
-              "sign can only be 0 when fid is 0, fid:%llu, sign:%llu",
-              (unsigned long long)(fid), (unsigned long long)sign));
-          slot_data[j] = static_cast<int64_t>(sign);
-        }
-      }
-    }
-#endif
-      });
-
-  // dump data
-  std::default_random_engine engine(0);
-  std::uniform_int_distribution<size_t> dist(0U, INT_MAX);
-  // need dump check
-  auto need_dump_func = [this, &dist, &engine, dump_mode, dump_interval](
-                            const std::string& lineid) {
-    size_t r = 0;
-    if (dump_mode == 1) {
-      r = XXH64(lineid.data(), lineid.length(), 0);
-    } else if (dump_mode == 2) {
-      r = dist(engine);
-    }
-    if (r % dump_interval != 0) {
-      return false;
-    }
-    return true;
-  };
-
-  std::atomic<size_t> line_cnt{0};
-  std::atomic<size_t> num_cnt{0};
-
-  auto chan = writer_.channel();
-#ifdef PADDLE_WITH_BOX_PS
-  box_ptr->ExecuteFunc(
-      platform::CPUPlace(),
-#else
-  // dump data
-  parallel_run_dynamic(
-#endif
-      batch_size,
-      [this,
-       chan,
-       &dims,
-       &cpu_tensors,
-       &lods,
-       &need_dump_func,
-       field_num,
-       &line_cnt,
-       &num_cnt](const size_t& i) {
-        const std::string& lineid = device_reader_->GetLineId(i);
-        if (!need_dump_func(lineid)) {
-          return;
-        }
-
-        ++line_cnt;
-
-        thread_local std::pair<int64_t, int64_t> bound;
-        std::string s;
-        size_t pos = 0;
-        if (FLAGS_lineid_have_extend_info) {
-          pos = lineid.find(" ");
-          if (pos != std::string::npos) {
-            s.append(&lineid[0], pos);
-          } else {
-            s.append(lineid);
-          }
-        } else {
-          s.append(lineid);
-        }
-
-        size_t num = 0;
-        for (size_t k = 0; k < field_num; ++k) {
-          auto& lod = lods[k];
-          if (lod == nullptr) {
-            continue;
-          }
-          auto& field = (*dump_fields_)[k];
-          s.append("\t", 1);
-          GetLodBound(*lod, dims[k], i, &bound);
-
-          num += (bound.second - bound.first);
-          if (FLAGS_dump_filed_same_as_aibox) {
-            size_t ext_pos = field.find(".");
-            if (ext_pos != std::string::npos) {
-              s.append(&field[0], ext_pos);
-            } else {
-              s.append(field);
-            }
-          } else {
-            format_string_append(
-                &s, "%s:%ld", field.c_str(), bound.second - bound.first);
-          }
-          PrintLodTensor(&cpu_tensors[k], bound.first, bound.second, &s);
-        }
-        num_cnt += num;
-
-        // append extends tag info
-        if (pos > 0) {
-          s.append("\t", 1);
-          s.append(&lineid[pos + 1], lineid.length() - pos - 1);
-        }
-        // write to channel
-        chan->WriteMove(1, &s);
-      });
 }
 
 }  // namespace framework

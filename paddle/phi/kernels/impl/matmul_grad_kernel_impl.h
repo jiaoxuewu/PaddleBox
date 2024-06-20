@@ -100,7 +100,7 @@ void MatMul(const Context& dev_ctx,
             const DenseTensor& b,
             bool trans_b,
             DenseTensor* out,
-            bool flag = false) {
+            bool flag) {
   dev_ctx.template Alloc<T>(out);
   auto blas = phi::funcs::GetBlas<Context, T>(dev_ctx);
   auto mat_dim_a = phi::funcs::CreateMatrixDescriptor(a.dims(), 0, trans_a);
@@ -119,6 +119,32 @@ void MatMul(const Context& dev_ctx,
               static_cast<T>(1),
               dev_ctx.template Alloc<T>(out),
               static_cast<T>(flag));
+}
+template <typename Context, typename T>
+void MatMul(const Context& dev_ctx,
+            const DenseTensor& a,
+            bool trans_a,
+            const DenseTensor& b,
+            bool trans_b,
+            DenseTensor* out) {
+  dev_ctx.template Alloc<T>(out);
+  auto blas = phi::funcs::GetBlas<Context, T>(dev_ctx);
+  auto mat_dim_a = phi::funcs::CreateMatrixDescriptor(a.dims(), 0, trans_a);
+  auto mat_dim_b = phi::funcs::CreateMatrixDescriptor(b.dims(), 0, trans_b);
+  if (a.dims().size() == 3 && b.dims().size() <= 2) {
+    // the transpose_X must be false, if is true, the transpose cost much time
+    if (!trans_a) {
+      mat_dim_a.height_ *= mat_dim_a.batch_size_;
+      mat_dim_a.batch_size_ = 0;
+    }
+  }
+  blas.MatMul(a.data<T>(),
+              mat_dim_a,
+              b.data<T>(),
+              mat_dim_b,
+              static_cast<T>(1),
+              dev_ctx.template Alloc<T>(out),
+              static_cast<T>(false));
 }
 
 /**

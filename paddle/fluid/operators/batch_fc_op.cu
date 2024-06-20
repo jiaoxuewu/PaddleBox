@@ -171,11 +171,96 @@ void transpose_split_row(cudaStream_t stream, const unsigned int rown,
                                stream>>>(rown, coln, num_block, source, dest);
 }
 
+template <typename T>
+__global__ void transpose_weight_kernel(const T* source, T* dest,
+                      const unsigned int rown, const unsigned int coln, const int64_t batch_count) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x;
+  int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x < rown && y < coln) {
+    int dst_coln = coln / batch_count;
+    int dst_x =  x + y / dst_coln * rown;
+    int dst_y =  y % dst_coln;
+    dest[dst_x * dst_coln + dst_y] = source[x * coln + y];
+  }
+}
+
+template <typename T>
+void transpose_weight_impl(cudaStream_t stream, const T* source, T* dest,
+                      const unsigned int rown, const unsigned int coln, const int64_t batch_count) {
+  dim3 grid((rown + 15) / 16, (coln + 15) / 16);
+  dim3 block(16, 16);
+  transpose_weight_kernel<<<grid, block, 0, stream>>>(source, dest, rown, coln, batch_count);
+}
+
 template <typename DeviceContext, typename T>
 class BatchFCCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
     int batchcount = ctx.Attr<int>("batchcount");
+    auto transpose_weight = ctx.Attr<bool>("transpose_weight");
+    if (transpose_weight) {
+      // Input_dim: [batch_count, ?, in_dim]
+      // W_dim: [in_dim, batch_count * out_dim]
+      // Bias_dim: [1, batch_count * out_dim]
+      // Out_dim: [batch_count, ?, out_dim]
+      auto* input = ctx.Input<framework::LoDTensor>("Input");
+      auto* w = ctx.Input<Tensor>("W");
+      auto* bias = ctx.Input<Tensor>("Bias");
+      auto* output = ctx.Output<framework::LoDTensor>("Out");
+      auto input_dims = input->dims();
+      auto w_dims = w->dims();
+      auto slot_pairs_num = input_dims[0];
+      auto ins_num = input_dims[1];
+      auto in_dim = input_dims[2];
+      auto out_dim = w_dims[1] / batchcount;
+  
+      // get data ptr
+      const T* in_data = input->data<T>();
+      const T* w_data = w->data<T>();
+      const T* bias_data = bias->data<T>();
+  
+      output->Resize({slot_pairs_num, ins_num, out_dim});
+      T* out_data = output->mutable_data<T>(ctx.GetPlace());
+
+      auto& dev_ctx = ctx.template device_context<phi::GPUContext>();
+
+      Tensor w_help;
+      w_help =
+          ctx.AllocateTmpTensor<T, DeviceContext>({batchcount, w_dims[0], w_dims[1] / batchcount}, dev_ctx);
+      T* w_help_data = w_help.data<T>();
+
+      transpose_weight_impl<T>(ctx.cuda_device_context().stream(), w_data, w_help_data, w_dims[0], w_dims[1], batchcount);
+
+      CBLAS_TRANSPOSE transA = CblasNoTrans;
+      CBLAS_TRANSPOSE transB = CblasNoTrans;
+  
+      T alpha = 1;
+      T beta = 0;
+      int64_t strideA = ins_num * in_dim;
+      int64_t strideB = in_dim * out_dim;
+
+      auto blas = phi::funcs::GetBlas<phi::GPUContext, T>(dev_ctx);
+      blas.BatchedGEMM(transA,
+                       transB,
+                       ins_num,
+                       out_dim,
+                       in_dim,
+                       alpha,
+                       in_data,
+                       w_help_data,
+                       beta,
+                       out_data,
+                       slot_pairs_num,
+                       strideA,
+                       strideB);
+      add_bias<T>(ctx.cuda_device_context().stream(),
+                  out_data,
+                  slot_pairs_num,
+                  ins_num,
+                  out_dim,
+                  bias_data);
+      return;
+    }
     if (batchcount > 0) {
       auto* input = ctx.Input<framework::LoDTensor>("Input");
       auto* w = ctx.Input<Tensor>("W");

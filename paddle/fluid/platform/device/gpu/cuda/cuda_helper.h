@@ -22,6 +22,7 @@
 #include "paddle/fluid/platform/dynload/cublasLt.h"
 #include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/macros.h"
+#include "paddle/phi/backends/gpu/cuda/cuda_helper.h"
 
 namespace paddle {
 namespace platform {
@@ -69,11 +70,6 @@ namespace platform {
  *    }
  *
  */
-
-#define CUDA_KERNEL_LOOP_TYPE(i, num, index_type)            \
-  int64_t __index__ = blockIdx.x * blockDim.x + threadIdx.x; \
-  for (index_type i = __index__; __index__ < (num);          \
-       __index__ += blockDim.x * gridDim.x, i = __index__)
 
 class CublasHandleHolder {
  public:

@@ -199,6 +199,9 @@ class PADDLE_API GPUContext : public DeviceContext {
   // clear: whether clear the original CUDAStream or not
   void SetCUDAStream(CUDAStream*, bool clear = true);
 
+  // Get Work Space
+  void* GetWorkSpacePtr(const size_t& len) const;
+
  protected:
   // NOTE: External users manage resources. Used in inference scenarios.
   // The Set interface is for inference only, DeviceContext will mark the

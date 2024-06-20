@@ -87,7 +87,6 @@ class FusedConcatOpXPUKernel : public framework::OpKernel<T> {
                                     cpu_y_addr,
                                     batch_size,
                                     dim_size,
-                                    x_num,
                                     length,
                                     offset);
     PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,
@@ -138,7 +137,6 @@ class FusedConcatGradOpXPUKernel : public framework::OpKernel<T> {
                                         cpu_dx_list,
                                         batch_size,
                                         dim_size,
-                                        x_num,
                                         length,
                                         offset);
      PADDLE_ENFORCE_EQ(r, xpu::Error_t::SUCCESS,

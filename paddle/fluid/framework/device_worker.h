@@ -226,11 +226,7 @@ class DeviceWorker {
   virtual void DumpField(const Scope& scope,
                          int dump_mode,
                          int dump_interval = 10000);
-  virtual void DumpParamBoxPS(const Scope& scope, const int batch_id);
-  virtual void DumpFieldBoxPS(const Scope& scope,
-                              int dump_mode,
-                              int dump_interval = 10000);
-
+  
   Scope* root_scope_ = nullptr;
   Scope* thread_scope_;
   paddle::platform::Place place_;
@@ -851,15 +847,39 @@ class BoxPSAsynDenseTable {
 };
 
 class BoxPSWorker : public DeviceWorker {
+  struct MemoryShareTensor {
+    int64_t offset_ = 0;
+    phi::DenseTensor* data_tensor_ = nullptr;
+    // init
+    void init(const std::string& name,
+              const platform::Place& place,
+              const int64_t& total_len,
+              Scope* root_scope);
+    // share
+    phi::DenseTensor& share(phi::DenseTensor* gpu_tensor, const size_t& len);
+    template <typename T>
+    T* data() {
+      return data_tensor_->data<T>();
+    }
+    phi::DenseTensor& tensor() { return *data_tensor_; }
+    // numel
+    int64_t numel(void) { return data_tensor_->numel(); }
+  };
+
+  struct fd_info_t {
+    int fd;
+    size_t len;
+    int fileid;
+  };
+
  public:
   BoxPSWorker() {}
   ~BoxPSWorker() override {}
 
   void Initialize(const TrainerDesc& desc) override;
-
+  void Finalize();
   void BindingDataFeedMemory() override {}
   void CreateDeviceResource(const ProgramDesc& main_prog) override;
-
   void TrainFiles() override;
   void TrainFilesWithProfiler() override;
 
@@ -881,33 +901,75 @@ class BoxPSWorker : public DeviceWorker {
  protected:
   int PackBatchTask(void);
   int CheckNeedParam(VarDesc* var);
-  int64_t AllocParamTensor(int64_t* pad_len);
-  int64_t AllocParamTensorAsync();
+  int64_t AllocParamTensor(const ProgramDesc& program, int64_t* pad_len);
+  int64_t AllocParamTensorAsync(const ProgramDesc& program);
   void SyncParam(void);
+  void BuildShardingDepends(const ProgramDesc& program);
+  void CreateThreadScopeForAsync(const ProgramDesc& program);
+  void CreateThreadScopeForSharding(const ProgramDesc& program);
+  void CreateThreadScopeForNorm(const ProgramDesc& program);
+  void CreateThreadOperators(const ProgramDesc& program);
+  int IsParameter(const std::string& name, bool full_match);
+
+protected:
+  virtual void DumpParam(const Scope& scope, const int batch_id);
+  virtual void DumpField(const Scope& scope,
+                         int dump_mode,
+                         int dump_interval = 10000);
+
+ private:
+  void OpenDump(const int &tid);
+  void WriteDump(const int &tid, const std::string& buf);
+  void FlushDump(void);
 
  protected:
   int device_id_;
   int thread_id_;
 
-  std::shared_ptr<framework::ProgramDesc> program_;
   std::vector<std::unique_ptr<OperatorBase>> ops_;
+
   platform::DeviceContext* dev_ctx_ = nullptr;
 
   // dense async table
   BoxPSAsynDenseTable* dense_table_ = nullptr;
-  Tensor param_async_;
-  Tensor grad_async_;
-  Tensor param_sync_;
+  MemoryShareTensor param_async_;
+  MemoryShareTensor grad_async_;
+  MemoryShareTensor param_sync_;
   std::set<std::string> async_param_name_;
   int param_sync_step_ = 0;
   int sync_mode_ = 0;
   bool one_ring_ = false;
   int device_num_ = 0;
   int node_size_ = 1;
+
   // skip vars
   std::vector<std::string> skip_vars_;
   std::unordered_map<const OperatorBase*, std::vector<std::string>>
       unused_vars_;
+
+  int nccl_rank_id_ = 0;
+  int ring_id_ = 0;
+  std::unordered_map<std::string, int> params2rootid_;
+  std::multiset<std::string> remove_vars_;
+  std::vector<std::string> all_vars_;
+  std::vector<std::string> thread_vars_;
+  std::multiset<std::string> unpersist_vars_;
+  std::multiset<std::string> persist_param_vars_;
+  std::multiset<OpDesc*> remove_ops_;
+  std::vector<std::string> need_copy_vars_;
+  std::vector<std::string> shard_dump_params_;
+  std::vector<std::string> shard_dump_fields_;
+  bool sharding_mode_ = false;
+  // op extend
+  std::unordered_set<const OperatorBase*> sync_points_;
+
+  // dump file
+  int dump_thread_num_ = 20;
+  std::string dump_fields_path_ = "";
+  std::vector<fd_info_t> fds_sizes_;
+  // dump thread
+  std::shared_ptr<paddle::framework::ThreadPool> dump_thread_pool_ =
+      nullptr;
 };
 #endif
 
