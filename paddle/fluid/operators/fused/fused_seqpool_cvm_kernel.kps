@@ -1213,7 +1213,7 @@ __global__ void seq_sum_pooling_cvm_fwd_with_large_dim(unsigned long long* x_add
 }
 
 #define _XPU_DEF__SUM_POOLING_CVM_FWD_(DTYPE, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, embedx_concate_filter, DTYPE2) \
-template __global__ void seq_sum_pooling_cvm_fwd_with_large_dim<DTYPE,use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, embedx_concate_filter, DTYPE2> \
+template __global__ void seq_sum_pooling_cvm_fwd_with_large_dim<DTYPE, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, embedx_concate_filter, DTYPE2> \
                                         (unsigned long long* x_addr,\
                                         unsigned long long* y_addr, \
                                         int* sequence_addr,         \
@@ -1229,24 +1229,7 @@ template __global__ void seq_sum_pooling_cvm_fwd_with_large_dim<DTYPE,use_cvm, c
                                         float embed_threshold,      \
                                         int embed_thres_size,       \
                                         int embedx_concate_size,    \
-                                        bool fix_ctr_to_click)
-template __global__ void seq_sum_pooling_cvm_fwd<DTYPE, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, embedx_concate_filter, DTYPE2> \
-                                        (unsigned long long* x_addr,\
-                                        unsigned long long* y_addr, \
-                                        int* sequence_addr,         \
-                                        uint32_t batch,             \
-                                        uint32_t dim,               \
-                                        uint32_t slot_num,          \
-                                        float padding_value,        \
-                                        int quant_ratio,            \
-                                        float show_coeff,           \
-                                        float clk_coeff,            \
-                                        float threshold,            \
-                                        int cvm_offset,             \
-                                        float embed_threshold,      \
-                                        int embed_thres_size,       \
-                                        int embedx_concate_size,    \
-                                        bool fix_ctr_to_click)
+                                        bool fix_ctr_to_click)      
 _XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, false, false, float);
 _XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, false, true, float);
 _XPU_DEF__SUM_POOLING_CVM_FWD_(float, false, false, false, false, true, false, float);
