@@ -26,6 +26,8 @@ int sequence_sum_pool_cvm(xpu::Context* ctx,
                           bool embed_threshold_filter,
                           float embed_threshold,
                           int embed_thres_size,
+                          int embedx_concate_size,
+                          bool embedx_concate_filter,
                           bool fix_ctr_to_click);
 
 template<typename T, typename TID = int>
@@ -40,7 +42,8 @@ int sequence_sum_pool_cvm_grad(xpu::Context* ctx,
                                uint32_t item_width,
                                uint32_t batch_size,
                                uint32_t slot_num,
-                               int embed_thres_size);
+                               int embed_thres_size,
+                               int embedx_concate_size);
 
 template<typename T, typename TID = int>
 int sequence_sum_pool_cvm_with_diff_thres(xpu::Context* ctx,

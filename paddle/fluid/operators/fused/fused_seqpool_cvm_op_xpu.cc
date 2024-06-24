@@ -169,8 +169,8 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
       xpu_wait(xpu_context->xpu_stream);
       check_tensors_nan(place, xpu_context, ins, "fused-x");
     }
-    int r = xpu::sequence_sum_pool_cvm<T>(xpu_context,
-    // int r = paddle::framework::sequence_sum_pool_cvm<T>(xpu_context,
+    // int r = xpu::sequence_sum_pool_cvm<T>(xpu_context,
+    int r = paddle::framework::sequence_sum_pool_cvm<T>(xpu_context,
                                           cpu_x_addr_vec,
                                           cpu_y_addr_vec,
                                           cpu_lodx,
@@ -273,8 +273,8 @@ class FusedSeqpoolCVMGradOpXPUKernel : public framework::OpKernel<T> {
       check_negative(place, xpu_context, cvm_data, cvm->numel());
       check_tensors_nan(place, xpu_context, dOut, "fused-dy");
     }
-    int r = xpu::sequence_sum_pool_cvm_grad<T>(xpu_context,
-    // int r = paddle::framework::sequence_sum_pool_cvm_grad<T>(xpu_context,
+    // int r = xpu::sequence_sum_pool_cvm_grad<T>(xpu_context,
+    int r = paddle::framework::sequence_sum_pool_cvm_grad<T>(xpu_context,
                                                cpu_dy_list,
                                                cvm_data,
                                                cpu_dx_list,
