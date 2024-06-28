@@ -190,7 +190,7 @@ static void PullBoxExtendedSparseFunctor(
       formatter.SetPrintTensorLod(true);
       formatter.SetPrintTensorLayout(true);
       // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
-      // formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse_input.txt");
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".pull_sparse.txt");
       std::string message = std::string("---embs_all_")+std::to_string(i)+std::string("---");
       formatter.Print(*(outputs[i]), name, message);
     }
@@ -203,7 +203,7 @@ static void PullBoxExtendedSparseFunctor(
       formatter.SetPrintTensorLod(true);
       formatter.SetPrintTensorLayout(true);
       // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
-      // formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse_input.txt");
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".pull_sparse.txt");
       std::string message = std::string("---expand_all_")+std::to_string(i)+std::string("---");
       formatter.Print(*(outputs_extend[i]), name, message);
     }
@@ -303,7 +303,7 @@ static void PushBoxExtendedSparseFunctor(
       formatter.SetPrintTensorLod(true);
       formatter.SetPrintTensorLayout(true);
       // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
-      // formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse_input.txt");
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse.txt");
       std::string message = std::string("---expand_all_")+std::to_string(i)+std::string("---");
       formatter.Print(*(d_output_extend[i]), "print_" + name, message);
     }
@@ -317,7 +317,7 @@ static void PushBoxExtendedSparseFunctor(
       formatter.SetPrintTensorLod(true);
       formatter.SetPrintTensorLayout(true);
       // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
-      // formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse_input.txt");
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse.txt");
       std::string message = std::string("---embs_all_")+std::to_string(i)+std::string("---");
       formatter.Print(*(d_output[i]), "print_" + name, message);
     }
