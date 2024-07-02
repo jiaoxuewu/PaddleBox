@@ -1380,7 +1380,7 @@ def save_inference_model(dirname,
         uniq_target_vars = []
         for i, var in enumerate(target_vars):
             # Fix saved inference_model format not capable with previous version in PaddleBox
-            if isinstance(var, Variable):
+            if isinstance(var, Variable) and os.getenv("NO_SCARE_BEFORE_TARGET_VAR") is None:
                 var = layers.scale(
                     var, 1., name="save_infer_model/scale_{}".format(i))
             uniq_target_vars.append(var)
