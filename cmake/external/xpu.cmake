@@ -116,7 +116,7 @@ if (WITH_BOX_PS OR WITH_XPU_KP)
         "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/20230306/scalopus.tar.gz"
         CACHE STRING "" FORCE)
     set(XPU_XTDK_URL
-        "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/xtdk/20230914/output.tar.gz"
+        "https://klx-sdk-release-public.su.bcebos.com/xtdk_llvm15/release/3.0.0.1/xtdk-llvm15-bdcentos7_x86_64.tar.gz"
         CACHE STRING "" FORCE)
 endif()
 
@@ -151,7 +151,7 @@ ExternalProject_Add(
     ${XPU_XRE_DIR_NAME} ${XPU_XDNN_URL} ${XPU_XDNN_DIR_NAME} ${XPU_XCCL_URL}
     ${XPU_XCCL_DIR_NAME} ${XPU_XCTR_URL} ${XPU_XCTR_DIR_NAME} &&
     wget --no-check-certificate ${SCALOPUS_URL} && tar zxvf scalopus.tar.gz &&
-    wget --no-check-certificate ${XPU_XTDK_URL} && tar zxvf output.tar.gz
+    wget --no-check-certificate ${XPU_XTDK_URL} && tar zxvf xtdk-llvm15-bdcentos7_x86_64.tar.gz
   DOWNLOAD_NO_PROGRESS 1
   UPDATE_COMMAND ""
   CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${XPU_INSTALL_ROOT}
