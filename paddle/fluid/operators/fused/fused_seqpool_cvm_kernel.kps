@@ -24,6 +24,30 @@ static __device__ inline void memset_value_float(float* lm, int size, float valu
     mfence_lm();
 }
 
+// cvm_offset == 0
+template <typename T, bool cvm_is_zero, typename T2>
+struct showclick_quant {
+    static __device__ inline void copy(T* sum, T2* sum_show_clk) {
+        // do nothing
+    }
+};
+
+// cvm_offset > 0
+template <typename T, typename T2>
+struct showclick_quant<T, true, T2> {
+    static __device__ inline void copy(T* sum, T2* sum_show_clk) {
+        sum[0] = (float)sum_show_clk[0];
+        sum[1] = (float)sum_show_clk[1];
+    }
+};
+
+#define KERNEL_SHOW_CLICK_COPY(kernel, cvm_is_zero, T, T2, args...)   \
+    if (cvm_is_zero) {                                     \
+        kernel<T, true, T2>::copy(args);                   \
+    } else {                                               \
+        kernel<T, false, T2>::copy(args);                  \
+    }
+
 // normal
 // need_filter:false && quant_ratio_valid:false
 template <typename T, bool need_filter, bool embed_threshold_filter, 
@@ -177,9 +201,9 @@ struct pooling_engine<T, true, true, false, quant_ratio_valid, T2>{
             sum_show_clk[1] += local_x[1]; 
         }
 
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);
     }
 };
 
@@ -262,9 +286,9 @@ struct pooling_engine_with_large_dim<T, true, true, false, quant_ratio_valid, T2
             sum_show_clk[0] += local_x[0];
             sum_show_clk[1] += local_x[1]; 
         }
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);
     }
 };
 
@@ -327,9 +351,9 @@ struct pooling_engine<T, true, false, embedx_concate_filter, quant_ratio_valid, 
             sum_show_clk[0] += local_x[0];
             sum_show_clk[1] += local_x[1]; 
         }
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);
     }
 };
 
@@ -393,9 +417,9 @@ struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, quan
             sum_show_clk[0] += local_x[0];
             sum_show_clk[1] += local_x[1]; 
         }
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);
     }
 };
 
@@ -452,9 +476,9 @@ struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, t
             sum_show_clk[0] += local_x[0];
             sum_show_clk[1] += local_x[1]; 
         }  
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];      
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);    
     }
 };
 
@@ -512,9 +536,9 @@ struct pooling_engine_with_large_dim<T, false, embed_threshold_filter, embedx_co
             sum_show_clk[0] += local_x[0];
             sum_show_clk[1] += local_x[1]; 
         }  
+        // only for cvm_offset > 0
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];      
+        KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, sum, sum_show_clk);   
     }
 };
 
@@ -794,11 +818,9 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                     sum_show_clk[0] += local_x[0];
                     sum_show_clk[1] += local_x[1]; 
 
+                    // only for cvm_offset > 0
                     mfence_lm();
-                    local_result[0] = (float)sum_show_clk[0];
-                    local_result[1] = (float)sum_show_clk[1];  
-
-                    mfence_lm();
+                    KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, local_result, sum_show_clk);
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + (embedx_concate_size - 1) * out_dim_size;
@@ -806,6 +828,7 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                 } else {
                     // first: sum pool
                     // copy
@@ -831,11 +854,9 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                     vstore_lm_float32x16(local_result, v_temp1);
                     vstore_lm_float32x16(local_result + 16, v_temp2);  
 
+                    // only for cvm_offset > 0
                     mfence_lm();
-                    local_result[0] = local_x[0];
-                    local_result[1] = local_x[1];
-
-                    mfence_lm();
+                    KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T, local_result, local_x);
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
@@ -843,6 +864,7 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                     concate_index += 1;
                 }  
             }
@@ -851,8 +873,8 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
         for (int i = concate_index; i < embedx_concate_size; i++) {
             memset_value_float(local_result, local_result_len, padding_value);
             int cur_y_index = seqid * embedx_concate_size * out_dim_size + i * out_dim_size;
-            mfence();
             LM2GM_ASYNC(local_result, cur_y + cur_y_index, out_dim_size * sizeof(T));
+            mfence();
         }
     }
 };
@@ -943,11 +965,9 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                     sum_show_clk[0] += local_x[0];
                     sum_show_clk[1] += local_x[1]; 
 
+                    // only for cvm_offset > 0
                     mfence_lm();
-                    local_result[0] = (float)sum_show_clk[0];
-                    local_result[1] = (float)sum_show_clk[1];  
-
-                    mfence_lm();
+                    KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T2, local_result, sum_show_clk);
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + (embedx_concate_size - 1) * out_dim_size;
@@ -955,6 +975,7 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                 } else {
                     // first: sum pool
 
@@ -984,11 +1005,9 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                         vstore_lm_float32x16(local_result + k + 16, v_temp2);  
                     }
                     
+                    // only for cvm_offset > 0
                     mfence_lm();
-                    local_result[0] = local_x[0];
-                    local_result[1] = local_x[1];
-
-                    mfence_lm();
+                    KERNEL_SHOW_CLICK_COPY(showclick_quant, cvm_offset > 0, T, T, local_result, local_x);
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
@@ -996,6 +1015,7 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                     concate_index += 1;
                 }
             }
