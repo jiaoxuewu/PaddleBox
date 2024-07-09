@@ -883,7 +883,7 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
                                  values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size,
+                                 expand_only ? pull_info_.expand_size : expand_embed_dim + hidden_size,
                                  total_length);
   }
   box_wrapper_kernel_->CopyForPull(place, xpu_keys, (float**)values.data(), total_values_xpu,
@@ -1404,7 +1404,7 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                                  grad_values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size);
+                                 expand_only ? pull_info_.expand_size : expand_embed_dim + hidden_size);
   }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,

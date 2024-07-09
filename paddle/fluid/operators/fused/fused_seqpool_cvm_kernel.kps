@@ -648,7 +648,7 @@ struct do_sum_pooling_and_cvm {
                                         v_scale, 
                                         cur_x + i * in_dim_size);
         }
-
+        mfence();
         // second: cvm
         cvm_engine<T, embedx_concate_filter, use_cvm, clk_filter, T2>::cvm(local_result,
                                             seqid, out_dim_size,
@@ -701,7 +701,7 @@ struct do_sum_pooling_and_cvm_with_large_dim {
                                         v_scale, 
                                         cur_x + i * in_dim_size);
         }
-
+        mfence();
         // second: cvm
         cvm_engine<T, embedx_concate_filter, use_cvm, clk_filter, T2>::cvm(local_result,
                                             seqid, out_dim_size,
