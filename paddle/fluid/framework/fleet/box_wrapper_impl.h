@@ -879,11 +879,13 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
   }
 
   if (is_xpu_continuous_memory_pull_ == -1) {
+    int check_expand_dim = expand_only ? expand_embed_dim : expand_embed_dim + hidden_size;
+    if (pull_info_.expand_size < 0) check_expand_dim = -1;
     is_xpu_continuous_memory_pull_ = check_continuous_memory_pull(device_id,
                                  values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size,
+                                 check_expand_dim,
                                  total_length);
   }
   box_wrapper_kernel_->CopyForPull(place, xpu_keys, (float**)values.data(), total_values_xpu,
@@ -1400,11 +1402,13 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                total_length * sizeof(int));
 
   if (is_xpu_continuous_memory_push_ == -1) {
+    int check_expand_dim = expand_only ? expand_embed_dim : expand_embed_dim + hidden_size;
+    if (pull_info_.expand_size < 0) check_expand_dim = -1;
     is_xpu_continuous_memory_push_ = check_continuous_memory_push(device_id,
                                  grad_values,
                                  slot_lengths,
                                  hidden_size,
-                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size);
+                                 check_expand_dim);
   }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,
