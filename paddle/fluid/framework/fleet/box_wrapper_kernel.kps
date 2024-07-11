@@ -28,6 +28,7 @@ limitations under the License. */
 // #include "xpu/kernel/debug.h"           // NOLINT
 #include "xpu/kernel/xtdk_math.h"            // NOLINT
 #include "xpu/kernel/xtdk_simd.h"
+#include "xpu/kernel/xtdk_io.h"
 
 #ifdef TRACE_PROFILE
 #include "xpu/kernel/xtdk_io.h"
