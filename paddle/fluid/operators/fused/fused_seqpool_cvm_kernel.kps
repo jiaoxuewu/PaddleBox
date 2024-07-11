@@ -29,7 +29,7 @@ static __device__ inline void memset_value_float(float* lm, int size, float valu
 template <typename T, bool need_filter, bool embed_threshold_filter, 
             bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
 struct pooling_engine {
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len, 
@@ -66,7 +66,7 @@ struct pooling_engine {
 template <typename T, bool need_filter, bool embed_threshold_filter, 
             bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
 struct pooling_engine_with_large_dim {
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len,
@@ -104,7 +104,7 @@ struct pooling_engine_with_large_dim {
 // need_filter:true && embed_threshold_filter:true && embedx_concate_filter:false
 template <typename T, bool quant_ratio_valid, typename T2>
 struct pooling_engine<T, true, true, false, quant_ratio_valid, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len, 
@@ -120,8 +120,10 @@ struct pooling_engine<T, true, true, false, quant_ratio_valid, T2>{
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) {
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
 
         for (int j = 0; j < len; j++) {
             mfence();
@@ -173,13 +175,17 @@ struct pooling_engine<T, true, true, false, quant_ratio_valid, T2>{
             vstore_lm_float32x16(sum, v_dst1);
             vstore_lm_float32x16(sum + 16, v_dst2);  
 
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }
 
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        }
     }
 };
 
@@ -187,7 +193,7 @@ struct pooling_engine<T, true, true, false, quant_ratio_valid, T2>{
 // need_filter:true && embed_threshold_filter:true && embedx_concate_filter:false
 template <typename T, bool quant_ratio_valid, typename T2>
 struct pooling_engine_with_large_dim<T, true, true, false, quant_ratio_valid, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len,
@@ -203,8 +209,10 @@ struct pooling_engine_with_large_dim<T, true, true, false, quant_ratio_valid, T2
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) { 
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
 
         for (int j = 0; j < len; j++) {
             mfence();
@@ -259,12 +267,17 @@ struct pooling_engine_with_large_dim<T, true, true, false, quant_ratio_valid, T2
                 vstore_lm_float32x16(sum + k + 16, v_dst2);  
             }                        
             
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }
+
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        }
     }
 };
 
@@ -272,7 +285,7 @@ struct pooling_engine_with_large_dim<T, true, true, false, quant_ratio_valid, T2
 // need_filter:true && embed_threshold_filter:false
 template <typename T, bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
 struct pooling_engine<T, true, false, embedx_concate_filter, quant_ratio_valid, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len, 
@@ -288,8 +301,11 @@ struct pooling_engine<T, true, false, embedx_concate_filter, quant_ratio_valid, 
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) {
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
+
         for (int j = 0; j < len; j++) {
             mfence();
             GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
@@ -324,12 +340,17 @@ struct pooling_engine<T, true, false, embedx_concate_filter, quant_ratio_valid, 
             vstore_lm_float32x16(sum, v_dst1);
             vstore_lm_float32x16(sum + 16, v_dst2);  
 
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }
+
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        }
     }
 };
 
@@ -337,7 +358,7 @@ struct pooling_engine<T, true, false, embedx_concate_filter, quant_ratio_valid, 
 // need_filter:true && embed_threshold_filter:false
 template <typename T, bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
 struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, quant_ratio_valid, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len,
@@ -353,8 +374,11 @@ struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, quan
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) {
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
+
         for (int j = 0; j < len; j++) {
             mfence();
             GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
@@ -389,13 +413,19 @@ struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, quan
                 v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);  
                 vstore_lm_float32x16(sum + k, v_dst1);
                 vstore_lm_float32x16(sum + k + 16, v_dst2);  
-            }                        
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            }     
+
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }
+
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        }
     }
 };
 
@@ -403,7 +433,7 @@ struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, quan
 // need_filter:false && quant_ratio_valid:true
 template <typename T, bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
 struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, true, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len, 
@@ -419,8 +449,11 @@ struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, t
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) {
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
+
         for (int j = 0; j < len; j++) {
             mfence();
             GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
@@ -449,12 +482,17 @@ struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, t
             vstore_lm_float32x16(sum, v_dst1);
             vstore_lm_float32x16(sum + 16, v_dst2);  
             
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }  
+
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];      
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        } 
     }
 };
 
@@ -462,7 +500,7 @@ struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, t
 // need_filter:false && quant_ratio_valid:true
 template <typename T, bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
 struct pooling_engine_with_large_dim<T, false, embed_threshold_filter, embedx_concate_filter, true, T2>{
-    static __device__ void sum_pooling(T* local_x,
+    static __device__ inline void sum_pooling(T* local_x,
                                         T* sum,
                                         T2* sum_show_clk,
                                         int len,
@@ -478,8 +516,11 @@ struct pooling_engine_with_large_dim<T, false, embed_threshold_filter, embedx_co
                                         int embedx_concate_size,
                                         float32x16_t &v_scale,
                                         __global_ptr__ T* cur_x) {
-        sum_show_clk[0] = sum[0];
-        sum_show_clk[1] = sum[1];
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum_show_clk[cvm_i] = sum[cvm_i];
+        }
+
         for (int j = 0; j < len; j++) {
             mfence();
             GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
@@ -508,13 +549,19 @@ struct pooling_engine_with_large_dim<T, false, embed_threshold_filter, embedx_co
                 v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);  
                 vstore_lm_float32x16(sum + k, v_dst1);
                 vstore_lm_float32x16(sum + k + 16, v_dst2);  
-            }                     
-            sum_show_clk[0] += local_x[0];
-            sum_show_clk[1] += local_x[1]; 
+            }    
+
+            // cvm_offset = [0, 2]
+            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                sum_show_clk[cvm_i] += local_x[cvm_i];
+            }
         }  
+
         mfence_lm();
-        sum[0] = (float)sum_show_clk[0];
-        sum[1] = (float)sum_show_clk[1];      
+        // cvm_offset = [0, 2]
+        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+            sum[cvm_i] = (float)sum_show_clk[cvm_i];
+        }  
     }
 };
 
@@ -764,8 +811,10 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
     
                 if (concate_index == embedx_concate_size) {
                     // add+
-                    sum_show_clk[0] = local_result[0];
-                    sum_show_clk[1] = local_result[1];
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        sum_show_clk[cvm_i] = local_result[cvm_i];
+                    }
 
                     float32x16_t v_src1 = vload_lm_float32x16(local_x);
                     float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
@@ -791,14 +840,16 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                     vstore_lm_float32x16(local_result, v_dst1);
                     vstore_lm_float32x16(local_result + 16, v_dst2);   
 
-                    sum_show_clk[0] += local_x[0];
-                    sum_show_clk[1] += local_x[1]; 
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        sum_show_clk[cvm_i] += local_x[cvm_i];
+                    }
 
                     mfence_lm();
-                    local_result[0] = (float)sum_show_clk[0];
-                    local_result[1] = (float)sum_show_clk[1];  
-
-                    mfence_lm();
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        local_result[cvm_i] = (float)sum_show_clk[cvm_i];
+                    }
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + (embedx_concate_size - 1) * out_dim_size;
@@ -806,6 +857,7 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                 } else {
                     // first: sum pool
                     // copy
@@ -832,10 +884,10 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                     vstore_lm_float32x16(local_result + 16, v_temp2);  
 
                     mfence_lm();
-                    local_result[0] = local_x[0];
-                    local_result[1] = local_x[1];
-
-                    mfence_lm();
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        local_result[cvm_i] = local_x[cvm_i];
+                    }
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
@@ -843,6 +895,7 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                     concate_index += 1;
                 }  
             }
@@ -851,8 +904,8 @@ struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_v
         for (int i = concate_index; i < embedx_concate_size; i++) {
             memset_value_float(local_result, local_result_len, padding_value);
             int cur_y_index = seqid * embedx_concate_size * out_dim_size + i * out_dim_size;
-            mfence();
             LM2GM_ASYNC(local_result, cur_y + cur_y_index, out_dim_size * sizeof(T));
+            mfence();
         }
     }
 };
@@ -910,8 +963,10 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
     
                 if (concate_index == embedx_concate_size) {
                     // add+
-                    sum_show_clk[0] = local_result[0];
-                    sum_show_clk[1] = local_result[1];
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        sum_show_clk[cvm_i] = local_result[cvm_i];
+                    }
 
                     __simd__ float lm_float[32];
                     for(int k = 0; k < in_dim_size ; k += 32) {
@@ -940,14 +995,16 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                         vstore_lm_float32x16(local_result + k + 16, v_dst2);  
                     }
                      
-                    sum_show_clk[0] += local_x[0];
-                    sum_show_clk[1] += local_x[1]; 
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        sum_show_clk[cvm_i] += local_x[cvm_i];
+                    }
 
                     mfence_lm();
-                    local_result[0] = (float)sum_show_clk[0];
-                    local_result[1] = (float)sum_show_clk[1];  
-
-                    mfence_lm();
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        local_result[cvm_i] = (float)sum_show_clk[cvm_i];
+                    }
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + (embedx_concate_size - 1) * out_dim_size;
@@ -955,6 +1012,7 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                 } else {
                     // first: sum pool
 
@@ -985,10 +1043,10 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                     }
                     
                     mfence_lm();
-                    local_result[0] = local_x[0];
-                    local_result[1] = local_x[1];
-
-                    mfence_lm();
+                    // cvm_offset = [0, 2]
+                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+                        local_result[cvm_i] = local_x[cvm_i];
+                    }
 
                     // second: cvm
                     int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
@@ -996,6 +1054,7 @@ struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter
                                                         out_dim_size, dim_start_offset,
                                                         cur_y_index,
                                                         cur_y);
+                    mfence();
                     concate_index += 1;
                 }
             }
