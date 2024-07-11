@@ -412,6 +412,11 @@ class BoxWrapper {
     DCacheBuffer pull_offset;
     DCacheBuffer push_offset;
 
+#ifdef PADDLE_WITH_XPU_KP
+    // for xpu
+    DCacheBuffer push_slot_slices;
+#endif
+
     LoDTensor qvalue;
 
     platform::Timer all_pull_timer;
@@ -1002,6 +1007,7 @@ class BoxWrapper {
   bool check_xpu_nan_;
   int is_xpu_continuous_memory_pull_ = -1;
   int is_xpu_continuous_memory_push_ = -1;
+  std::vector<int> * push_slot_slices_ptr_ = nullptr;
   bool use_xpu_sparse_map_;
   std::vector<uint64_t> * fid2sign_map_ = nullptr;
   std::unique_ptr<BoxWrapperKernel> box_wrapper_kernel_;
