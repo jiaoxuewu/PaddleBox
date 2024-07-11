@@ -621,7 +621,8 @@ bool check_continuous_memory_push(int dev_id,
                                   const std::vector<const float*>& grad_values,
                                   const std::vector<int64_t>& slot_lengths,
                                   uint32_t hidden_size,
-                                  int expand_embed_dim) {
+                                  int expand_embed_dim,
+                                  std::vector<int>& slot_slices) {
   int slot_num = slot_lengths.size();
 
   bool ret = true;
@@ -639,11 +640,14 @@ bool check_continuous_memory_push(int dev_id,
       if (next_ptr != grad_values[i]) {
         ret = false;
         error_idx = i;
-        break;
+        slot_slices.push_back(i);
+        // break;
       }
       next_ptr = (float*)grad_values[i] + slot_lengths[i] * hidden_size;
     }
   }
+  // add end of slot
+  slot_slices.push_back(slot_num);
 
   if (expand_embed_dim > 0 && ret != false) {
     float* expand_head_ptr = nullptr;
@@ -660,7 +664,7 @@ bool check_continuous_memory_push(int dev_id,
           ret = false;
           error_idx = i;
           break;
-        }
+        } 
         expand_next_ptr = (float*)grad_values[slot_num + i] +
                           slot_lengths[i] * expand_embed_dim;
       }
@@ -879,13 +883,11 @@ void BoxWrapper::PullSparseCaseXPU(const paddle::platform::Place& place,
   }
 
   if (is_xpu_continuous_memory_pull_ == -1) {
-    int check_expand_dim = expand_only ? expand_embed_dim : expand_embed_dim + hidden_size;
-    if (pull_info_.expand_size < 0) check_expand_dim = -1;
     is_xpu_continuous_memory_pull_ = check_continuous_memory_pull(device_id,
                                  values,
                                  slot_lengths,
                                  hidden_size,
-                                 check_expand_dim,
+                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size,
                                  total_length);
   }
   box_wrapper_kernel_->CopyForPull(place, xpu_keys, (float**)values.data(), total_values_xpu,
@@ -1373,19 +1375,14 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
   float** xpu_values = dev.values_ptr_tensor.data<float*>();
   xpu_memcpy(xpu_values, grad_values.data(),
                   grad_values.size() * sizeof(float*), XPU_HOST_TO_DEVICE);
+
 #ifdef TRACE_PROFILE
   TRACE_SCOPE_START("CopyForPush's xpu::copy", xpu_wait(ctx_xpu->xpu_stream));
   TRACE_SCOPE_END("CopyForPush's xpu::copy", xpu_wait(ctx_xpu->xpu_stream));
 
   TRACE_SCOPE_START("CopyForPush", xpu_wait(ctx_xpu->xpu_stream));
 #endif
-//   float* real_grad_values;
-//   for (int i = 0; i < slot_num; i++) {
-//     if(grad_values[i] != nullptr) {
-//       real_grad_values = const_cast<float*>(grad_values[i]);
-//       break;
-//     }
-//   }
+
   std::vector<int> slot_inner_offset(total_length);
   int out_count = 0;
   for (int i = 0; i < slot_num; i++) {
@@ -1402,13 +1399,29 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
                total_length * sizeof(int));
 
   if (is_xpu_continuous_memory_push_ == -1) {
-    int check_expand_dim = expand_only ? expand_embed_dim : expand_embed_dim + hidden_size;
-    if (pull_info_.expand_size < 0) check_expand_dim = -1;
+    std::vector<int> slot_slices;
     is_xpu_continuous_memory_push_ = check_continuous_memory_push(device_id,
                                  grad_values,
                                  slot_lengths,
                                  hidden_size,
-                                 check_expand_dim);
+                                 expand_only ? expand_embed_dim : expand_embed_dim + hidden_size,
+                                 slot_slices);
+    
+    if (push_slot_slices_ptr_ == nullptr) {
+      push_slot_slices_ptr_ = new std::vector<int>();
+      std::vector<int>* original_ptr = &slot_slices;
+      std::copy(original_ptr->begin(), original_ptr->end(), std::back_inserter(*push_slot_slices_ptr_));
+    }
+  }
+
+  int xpu_slot_slice_num = push_slot_slices_ptr_->size();
+  int* d_slot_slices = nullptr;
+  if (!is_xpu_continuous_memory_push_ && xpu_slot_slice_num > 0 && dev.push_slot_slices.memory_size() == 0) {
+    d_slot_slices = dev.push_slot_slices.mutable_data<int>(xpu_slot_slice_num * sizeof(int), place);
+    xpu_memcpy(d_slot_slices, push_slot_slices_ptr_->data(),
+                  xpu_slot_slice_num * sizeof(int), XPU_HOST_TO_DEVICE);
+  } else if (dev.push_slot_slices.memory_size() != 0) {
+    d_slot_slices = dev.push_slot_slices.data<int>();
   }
 
   box_wrapper_kernel_->CopyForPush(place, xpu_values, total_grad_values_xpu,
@@ -1417,7 +1430,9 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
       expand_embed_dim,
       push_float_num_,
       expand_only,
-      (bool)is_xpu_continuous_memory_push_);
+      (bool)is_xpu_continuous_memory_push_,
+      (int*)d_slot_slices,
+      xpu_slot_slice_num);
 
   push_boxps_timer.Resume();
 #ifdef TRACE_PROFILE

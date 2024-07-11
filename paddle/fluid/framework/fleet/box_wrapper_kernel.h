@@ -66,7 +66,9 @@ void CopyForPush(
     const int expand_embed_dim,
     const int push_float_num,
     bool expand_only,
-    bool is_continuous);
+    bool is_continuous,
+    const int* slot_slices,
+    const int slot_slice_num);
 
 public:
   const static int MAX_SLOT_SIZE = 10240;
