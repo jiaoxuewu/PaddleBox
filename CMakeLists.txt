@@ -50,6 +50,7 @@ option(WITH_GPU "Compile PaddlePaddle with NVIDIA GPU" ${CUDA_FOUND})
 option(WITH_TENSORRT "Compile PaddlePaddle with NVIDIA TensorRT" OFF)
 option(WITH_XPU "Compile PaddlePaddle with BAIDU KUNLUN XPU" OFF)
 option(WITH_XPU_KP "Compile PaddlePaddle with BAIDU XPU compiler " OFF)
+option(WITH_XPU_XRE5 "Compile PaddlePaddle with BAIDU XPU XRE 5" OFF)
 option(TRACE_PROFILE "Compile PaddlePaddle with TRACE_PROFILE " OFF)
 option(WITH_MLU "Compile PaddlePaddle with CAMBRICON MLU" OFF)
 option(WITH_WIN_DUMP_DBG "Compile with windows core dump debug mode" OFF)
@@ -73,6 +74,9 @@ if(WITH_GPU AND WITH_XPU)
 endif()
 if(WITH_GPU AND WITH_XPU_KP)
   message(FATAL_ERROR "Error when compile GPU and XPU2 at the same time")
+endif()
+if(WITH_GPU AND WITH_XPU_XRE5)
+  message(FATAL_ERROR "Error when compile GPU and XPU-XRE5 at the same time")
 endif()
 if(WITH_GPU AND WITH_ASCEND)
   message(FATAL_ERROR "Error when compile GPU and ASCEND at the same time")
@@ -390,6 +394,14 @@ if(NOT WITH_XPU AND WITH_XPU_BKCL)
   set(WITH_XPU_BKCL
       OFF
       CACHE STRING "Disable BKCL when compiling without XPU" FORCE)
+endif()
+
+if(NOT WITH_XPU AND WITH_XPU_XRE5)
+  message((WARNING
+           "Disable XRE5 when compiling without XPU. Force WITH_XPU_XRE5=OFF"))
+  set(WITH_XPU_XRE5
+      OFF
+      CACHE STRING "Disable XRE5 when compiling without XPU" FORCE)
 endif()
 
 if(NOT WITH_MLU AND WITH_CNCL)
