@@ -7,7 +7,11 @@ set(XPU_PROJECT "extern_xpu")
 set(XPU_API_LIB_NAME "libxpuapi.so")
 set(XPU_API_PLUGIN_NAME  "libxpuplugin.so")
 set(XPU_RT_LIB_NAME "libxpurt.so")
-set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.1")
+if(WITH_XPU_XRE5)
+  set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.2")
+else()
+  set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.1")
+endif()
 set(XPU_ML_LIB_NAME "libxpuml.so")
 set(XPU_ML_ALIAS_LIB_NAME "libxpuml.so.1")
 
@@ -97,16 +101,35 @@ set(XPU_XCTR_URL
 set(XPU_PACK_DEPENCE_URL
     "https://baidu-kunlun-public.su.bcebos.com/paddle_depence/pack_paddle_box_depence_v2.sh"
     CACHE STRING "" FORCE)
+
+if(WITH_XPU_XRE5)
+  add_definitions(-DPADDLE_WITH_XPU_XRE5)
+  set(XPU_XRE_BASE_VERSION "5.0.9.1")
+  set(XPU_XCCL_BASE_VERSION "1.2.5.2")
+  set(XPU_XRE_BASE_URL
+      "https://klx-sdk-release-public.su.bcebos.com/xre/kl3-release/${XPU_XRE_BASE_VERSION}"
+  )
+  set(XPU_XRE_DIR_NAME "xre-bdcentos-x86_64-${XPU_XRE_BASE_VERSION}")
+else()
+  set(XPU_XRE_BASE_VERSION "4.0.28.1")
+  set(XPU_XCCL_BASE_VERSION "1.2.0.5")
+  set(XPU_XRE_BASE_URL
+      "https://klx-sdk-release-public.su.bcebos.com/xre/release/${XPU_XRE_BASE_VERSION}"
+  )
+  set(XPU_XRE_DIR_NAME "xre-bdcentos_x86_64")
+endif()
+
+set(XPU_XTDK_DIR_NAME "xtdk-llvm15-bdcentos7_x86_64")
+
 # if(WITH_BOX_PS)
 if (WITH_BOX_PS OR WITH_XPU_KP)
-    set(XPU_XRE_DIR_NAME "xre-bdcentos_x86_64")
     set(XPU_XDNN_DIR_NAME "xdnn-bdcentos_x86_64")
     set(XPU_XCCL_DIR_NAME "xccl_rdma-bdcentos_x86_64")
     set(XPU_XRE_URL
-        "https://klx-sdk-release-public.su.bcebos.com/xre/release/4.0.28.1/${XPU_XRE_DIR_NAME}.tar.gz"
+        "${XPU_XRE_BASE_URL}/${XPU_XRE_DIR_NAME}.tar.gz"
         CACHE STRING "" FORCE)
     set(XPU_XCCL_URL
-        "https://klx-sdk-release-public.su.bcebos.com/xccl/release/1.2.0.5/${XPU_XCCL_DIR_NAME}.tar.gz"
+        "https://klx-sdk-release-public.su.bcebos.com/xccl/release/${XPU_XCCL_BASE_VERSION}/${XPU_XCCL_DIR_NAME}.tar.gz"
         CACHE STRING "" FORCE)
     #"https://klx-sdk-release-public.su.bcebos.com/xdnn/release/2.6.0.1/${XPU_XDNN_DIR_NAME}.tar.gz"
     set(XPU_XDNN_URL
@@ -116,7 +139,7 @@ if (WITH_BOX_PS OR WITH_XPU_KP)
         "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/20230306/scalopus.tar.gz"
         CACHE STRING "" FORCE)
     set(XPU_XTDK_URL
-        "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/xtdk/20230914/output.tar.gz"
+        "https://klx-sdk-release-public.su.bcebos.com/xtdk_llvm15/release/3.0.0.1/${XPU_XTDK_DIR_NAME}.tar.gz"
         CACHE STRING "" FORCE)
 endif()
 
@@ -130,8 +153,8 @@ set(XPU_API_LIB "${XPU_LIB_DIR}/${XPU_API_LIB_NAME}")
 set(XPU_API_PLUGIN "${XPU_LIB_DIR}/${XPU_API_PLUGIN_NAME}")
 set(XPU_RT_LIB "${XPU_LIB_DIR}/${XPU_RT_LIB_NAME}")
 set(XPU_RT_ALIAS_LIB "${XPU_LIB_DIR}/${XPU_RT_ALIAS_LIB_NAME}")
-set(XPU_ML_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/xre-bdcentos_x86_64/so/${XPU_ML_LIB_NAME}")
-set(XPU_ML_ALIAS_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/xre-bdcentos_x86_64/so/${XPU_ML_ALIAS_LIB_NAME}")
+set(XPU_ML_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_LIB_NAME}")
+set(XPU_ML_ALIAS_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_ALIAS_LIB_NAME}")
 
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}" "${XPU_INSTALL_DIR}/lib")
 
@@ -151,7 +174,7 @@ ExternalProject_Add(
     ${XPU_XRE_DIR_NAME} ${XPU_XDNN_URL} ${XPU_XDNN_DIR_NAME} ${XPU_XCCL_URL}
     ${XPU_XCCL_DIR_NAME} ${XPU_XCTR_URL} ${XPU_XCTR_DIR_NAME} &&
     wget --no-check-certificate ${SCALOPUS_URL} && tar zxvf scalopus.tar.gz &&
-    wget --no-check-certificate ${XPU_XTDK_URL} && tar zxvf output.tar.gz
+    wget --no-check-certificate ${XPU_XTDK_URL} && tar zxvf ${XPU_XTDK_DIR_NAME}.tar.gz
   DOWNLOAD_NO_PROGRESS 1
   UPDATE_COMMAND ""
   CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${XPU_INSTALL_ROOT}
