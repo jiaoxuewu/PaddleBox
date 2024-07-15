@@ -81,7 +81,7 @@ set(TOOLCHAIN_ARGS)
 if(OPT_LEVEL)
   set(OPT_LEVEL ${OPT_LEVEL})
 else()
-  set(OPT_LEVEL "-O3")
+  set(OPT_LEVEL "-O2")
 endif()
 
 message(STATUS "Build with API_ARCH=" ${API_ARCH})
