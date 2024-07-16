@@ -1927,7 +1927,7 @@ __global__ void seq_sum_pooling_cvm_bwd(unsigned long long* dy_addr,
     // start_offset: 0,          1,            2
     // dy_offset:    2,          1,            0
     const int batch_per_thread = batch_size / nthreads + 1;
-    __local__ int sequence_lm[batch_per_thread];
+    __local__ int sequence_lm[batch_per_thread + 1];
     int start = batch_per_thread * thread_id;
     int end = min(batch_per_thread * (thread_id + 1), batch_size);
     const int buffer_size = item_width > 512 ? item_width : 512 + item_width;

@@ -35,7 +35,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${LINK_FLAGS}")
 
 if(NOT XPU_TOOLCHAIN)
   #set(XPU_TOOLCHAIN /workspace/output/XTDK-ubuntu_x86_64)
-  set(XPU_TOOLCHAIN ${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu/output/xtdk-centos7_x86_64_gcc8u3)
+  set(XPU_TOOLCHAIN ${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu/xtdk-llvm15-bdcentos7_x86_64)
   # set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-centos7_GCC8u3)
   #set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-bdcentos_x86_64)
   #set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-centos_GCCABI1_x86_64)

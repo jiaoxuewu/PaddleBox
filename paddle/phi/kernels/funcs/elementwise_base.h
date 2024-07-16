@@ -537,7 +537,9 @@ struct InputSetter {
   template <typename Array>
   static HOSTDEVICE void Apply(
       const std::vector<const DenseTensor *> &ins_tensor, Array *ins_data) {
-    (*ins_data)[Index] = (const _ptr_ char *)(ins_tensor[Index]->data());
+    // (*ins_data)[Index] = (const _ptr_ char *)(ins_tensor[Index]->data());
+    (void)(ins_tensor);
+    (void)(ins_data);
   }
 };
 
