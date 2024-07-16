@@ -504,7 +504,7 @@ __global__ void PullCopyNNCrossWithEmb(const TEmbedxOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int buf_length = 5;
+  const int buf_length = 1500 / (pull_float_num + hidden_size + hidden_size + expand_embed_dim + 3);
   int per_thread_len = roundup_div(total_length, nthreads);
   int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
   int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
@@ -1464,7 +1464,7 @@ __global__ void PushCopyNNCrossDiscontinuous(const TExpandPushGetOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int buf_length = 2100 / (push_float_num + hidden_size + expand_embed_dim + 3);
+  const int buf_length = (1500 - slot_slice_num - slot_slice_num - 2) / (push_float_num + hidden_size + 3);
 
   __local__ float lm_src_vals[buf_length * hidden_size];
   __local__ float lm_src_expand_vals[expand_embed_dim + 1];
