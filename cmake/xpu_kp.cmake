@@ -81,7 +81,7 @@ set(TOOLCHAIN_ARGS)
 if(OPT_LEVEL)
   set(OPT_LEVEL ${OPT_LEVEL})
 else()
-  set(OPT_LEVEL "-O3")
+  set(OPT_LEVEL "-O2")
 endif()
 
 if(WITH_XPU_XRE5)
