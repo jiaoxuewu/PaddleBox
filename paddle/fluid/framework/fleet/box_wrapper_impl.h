@@ -1418,8 +1418,12 @@ void BoxWrapper::PushSparseGradCaseXPU(const paddle::platform::Place& place,
     }
   }
 
-  int xpu_slot_slice_num = push_slot_slices_ptr_->size();
+  int xpu_slot_slice_num = 0;
   int* d_slot_slices = nullptr;
+  if (push_slot_slices_ptr_ != nullptr) {
+    xpu_slot_slice_num = push_slot_slices_ptr_->size();
+  }
+  
   if (!is_xpu_continuous_memory_push_ && xpu_slot_slice_num > 0 && dev.push_slot_slices.memory_size() == 0) {
     d_slot_slices = dev.push_slot_slices.mutable_data<int>(xpu_slot_slice_num * sizeof(int), place);
     xpu_memcpy(d_slot_slices, push_slot_slices_ptr_->data(),
