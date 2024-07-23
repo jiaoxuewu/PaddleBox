@@ -1014,7 +1014,7 @@ class ShardingOptimizer(MetaOptimizerBase):
                     "c_sync_comm_stream",
                     "c_calc_comm_stream",
                     "c_gen_nccl_id",
-                    "c_gen_nccl_id",
+                    "c_gen_bkcl_id",
                     "c_comm_init",
                     'send_v2',
                     'recv_v2',
