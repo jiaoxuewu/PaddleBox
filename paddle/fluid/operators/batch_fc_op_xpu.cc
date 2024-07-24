@@ -11,7 +11,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
-#ifdef PADDLE_WITH_XPU_KP
 
 #include <xpu/runtime.h>  // NOLINT
 #include <algorithm>
@@ -23,11 +22,8 @@ limitations under the License. */
 #include "paddle/fluid/platform/device/xpu/enforce_xpu.h"
 #include "paddle/fluid/platform/device_context.h"
 
-#include "xpu/kernel/xtdk.h"  // NOLINT
-#include "xpu/kernel/xtdk_math.h"            // NOLINT
-#include "xpu/kernel/xtdk_simd.h"
-
 #include "paddle/fluid/operators/batch_fc_op.h"
+#include "paddle/fluid/operators/batch_fc_kernel.h"
 #include "paddle/phi/kernels/funcs/math_function.h"
 
 #include "paddle/fluid/operators/xpu_api_wrapper.h"
@@ -35,142 +31,6 @@ limitations under the License. */
 namespace paddle {
 namespace operators {
 using framework::Tensor;
-
-static __device__ void primitive_add(const float* x, const float* y, float* z, int len) {
-    float32x16_t vx0;
-    float32x16_t vy0;
-    float32x16_t vx1;
-    float32x16_t vy1;
-    int len_rounddown32 = rounddown32(len);
-    int remain = len - len_rounddown32;
-    for (int i = 0; i < len_rounddown32; i += 32) {
-        vx0 = vload_lm_float32x16(x + i);
-        vx1 = vload_lm_float32x16(x + i + 16);
-        vy0 = vload_lm_float32x16(y + i);
-        vy1 = vload_lm_float32x16(y + i + 16);
-        vy0 = vvadd_float32x16(vx0, vy0);
-        vy1 = vvadd_float32x16(vx1, vy1);
-        vstore_lm_float32x16(z + i, vy0);
-        vstore_lm_float32x16(z + i + 16, vy1);
-    }
-    for (int i = 0; i < remain; i++) {
-      *(z + len_rounddown32 + i) = *(y + len_rounddown32 + i) + *(x + len_rounddown32 + i);
-    }
-    mfence_lm();
-}
-
-static __device__ inline void memset_lm_float(float* dst_ptr, int size) {
-    for (int i = 0; i < size; i += 16) {
-        vstore_lm_float32x16_mz(dst_ptr + i, 0, 0);
-    }
-    mfence_lm();
-}
-
-template <typename T>
-__global__ void add_bias_kernel(
-    T* data, int slot_pairs_num, int ins_num, int out_dim, const T* bias) {
-  int cid = core_id();
-  int ncores = core_num();
-  if (cid >= ncores) {
-    return;
-  }
-  int thread_id = cluster_id() * ncores + cid;
-  int total_thread = cluster_num() * ncores;
-
-  const int buf_size = 512;
-  int max_seq_len = buf_size / out_dim;
-  int bias_buff_len = roundup16(out_dim);
-
-  __simd__ T local_data_buf[buf_size];
-  __simd__ T local_bias_buf[bias_buff_len];
-
-  __simd__ T out_buf[buf_size];
-  memset_lm_float(out_buf, buf_size);
-
-  for (int64_t i = thread_id * max_seq_len; i < ins_num; i += total_thread * max_seq_len) {
-    int len = min(max_seq_len, ins_num - i);
-    for (int slot = 0; slot < slot_pairs_num; slot++) {
-      mfence();
-      GM2LM(bias + slot * out_dim, local_bias_buf,  out_dim * sizeof(T));
-
-      GM2LM(data + slot * ins_num * out_dim + i * out_dim, local_data_buf, len * out_dim * sizeof(T));
-      for (int j = 0; j < len; j++) {
-        primitive_add(local_data_buf + j * out_dim, local_bias_buf, out_buf + j * out_dim, out_dim);
-      }
-      // mfence();
-      LM2GM_ASYNC(out_buf, data + slot * ins_num * out_dim + i * out_dim, len * out_dim * sizeof(T));
-    }
-  }
-}
-
-template <typename T>
-void add_bias(xpu::Context* xpu_ctx,
-              T* data,
-              int slot_pairs_num,
-              int ins_num,
-              int out_dim,
-              const T* bias) {
-  xpu::ctx_guard RAII_GUARD(xpu_ctx);
-  auto stream = xpu_ctx->xpu_stream;              
-  add_bias_kernel<<<xpu_ctx->ncluster(), 64, stream>>>(data, slot_pairs_num, ins_num, out_dim, bias);
-  xpu_wait(xpu_ctx->xpu_stream);
-}
-
-template <typename T>
-__global__ void add_bias_grad_kernel(const T* dout_data,
-                                     int slot_pairs_num,
-                                     int ins_num,
-                                     int out_dim,
-                                     T* db_data) {
-  int cid = core_id();
-  int ncores = core_num();
-  if (cid >= ncores) {
-    return;
-  }
-  int thread_id = cluster_id() * ncores + cid;
-  int total_thread = cluster_num() * ncores;
-
-  int buf_size = roundup32(out_dim);
-  __simd__ T local_bias_buf[buf_size];
-  __simd__ T tmp_sum_buf[buf_size];
-
-  __local__ T local_data_buf[1];
-
-  memset_lm_float(local_bias_buf, buf_size);
-  memset_lm_float(tmp_sum_buf, buf_size);
-
-  __local__ T tmp_sum = static_cast<T>(0);
-  for (int i = thread_id; i < ins_num; i += total_thread) { 
-    for (int slot = 0; slot < slot_pairs_num; slot++) {
-      mfence();
-      GM2LM(db_data + slot * out_dim, local_bias_buf, out_dim * sizeof(T));
-
-      for (int index = 0; index < out_dim; index++) {
-        int select_indx = ((slot + 1) * i + 1) * index;
-        GM2LM(dout_data + select_indx, local_data_buf, sizeof(T));
-        tmp_sum_buf[index] += local_data_buf[0];
-      }
-
-      primitive_add(tmp_sum_buf, local_bias_buf, local_bias_buf, out_dim);
-
-      LM2GM_ASYNC(local_bias_buf, db_data + slot * out_dim, out_dim * sizeof(T));
-    }
-  }
-}
-
-template <typename T>
-void add_bias_grad(xpu::Context* xpu_ctx,
-                   const T* dout_data,
-                   int slot_pairs_num,
-                   int ins_num,
-                   int out_dim,
-                   T* db_data) {
-  xpu::ctx_guard RAII_GUARD(xpu_ctx);
-  auto stream = xpu_ctx->xpu_stream;   
-  add_bias_grad_kernel<<<xpu_ctx->ncluster(), 64, stream>>>(
-      dout_data, slot_pairs_num, ins_num, out_dim, db_data);
-  xpu_wait(xpu_ctx->xpu_stream);
-}
 
 template <typename T>
 class BatchFCXPUKernel : public framework::OpKernel<T> {
@@ -235,12 +95,13 @@ class BatchFCXPUKernel : public framework::OpKernel<T> {
       MatMulXPUFunction<XPUType>(xpu_context, x_ptr, y_ptr, out_ptr, fc_info, alpha);
   
       // add bias
-      add_bias<T>(xpu_context,
+      paddle::framework::add_bias<T>(xpu_context,
                   out_ptr,
                   slot_pairs_num,
                   ins_num,
                   out_dim,
                   bias_data);
+      xpu_wait(xpu_context->xpu_stream);
     }
   }
 };
@@ -302,12 +163,13 @@ class BatchFCGradOpXPUKernel : public framework::OpKernel<T> {
                                   : reinterpret_cast<XPUType*>(dw->data<T>());
 
       // add bias grad
-      add_bias_grad<T>(xpu_context,
+      paddle::framework::add_bias_grad<T>(xpu_context,
                        dout_ptr,
                        slot_pairs_num,
                        ins_num,
                        out_dim,
                        b_ptr);
+      xpu_wait(xpu_context->xpu_stream);
 
       T alpha = 1;
       XpuFcInfo info_dx;
@@ -341,15 +203,9 @@ class BatchFCGradOpXPUKernel : public framework::OpKernel<T> {
 }  // namespace paddle
 
 namespace ops = paddle::operators;
-namespace plat = paddle::platform;
-
-REGISTER_OP_KERNEL(batch_fc, KP, plat::XPUPlace,
-                   ops::BatchFCXPUKernel<float>);     
-REGISTER_OP_KERNEL(batch_fc_grad, KP, plat::XPUPlace,
-                   ops::BatchFCGradOpXPUKernel<float>);    
+namespace plat = paddle::platform; 
 
 REGISTER_OP_XPU_KERNEL(batch_fc,
                        ops::BatchFCXPUKernel<float>);      
 REGISTER_OP_XPU_KERNEL(batch_fc_grad,
                        ops::BatchFCGradOpXPUKernel<float>);  
-#endif
