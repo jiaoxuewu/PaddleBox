@@ -84,6 +84,18 @@ else()
   set(OPT_LEVEL "-O2")
 endif()
 
+if(WITH_XPU_XRE5)
+  set(DEVICE_TYPE xpu3)
+else()
+  set(DEVICE_TYPE xpu2)
+endif()
+
+if(WITH_XPU_XRE5)
+  set(DEVICE_TYPE xpu3)
+else()
+  set(DEVICE_TYPE xpu2)
+endif()
+
 message(STATUS "Build with API_ARCH=" ${API_ARCH})
 message(STATUS "Build with TOOLCHAIN_ARGS=" ${TOOLCHAIN_ARGS})
 message(STATUS "Build with HOST_SYSROOT=" ${HOST_SYSROOT})
@@ -157,7 +169,8 @@ macro(compile_kernel COMPILE_ARGS)
       -Wno-ignored-qualifiers
       -Wno-ignored-attributes
       -Wno-parentheses
-      -DNDEBUG)
+      -DNDEBUG
+      -D__XTDK_USE_STDINT_H)
 
   #include path
   get_property(
@@ -199,10 +212,10 @@ macro(compile_kernel COMPILE_ARGS)
     COMMAND ${CMAKE_COMMAND} -E make_directory kernel_build
     COMMAND
       ${XPU_CLANG} --sysroot=${CXX_DIR} -std=c++11 ${ABI_VERSION} ${OPT_LEVEL}
-      -fno-builtin -fxpu-launch-return --xpu-arch=xpu2 -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
+      -fno-builtin -fxpu-launch-return --xpu-arch=${DEVICE_TYPE} -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
       ${XPU_CXX_INCLUDES} -I. -o kernel_build/${kernel_name}.bin.o.sec
       kernel_build/${kernel_name}.xpu --xpu-device-only -c -v
-    COMMAND ${XTDK_DIR}/bin/xpu2-elfconv kernel_build/${kernel_name}.bin.o.sec
+    COMMAND ${XTDK_DIR}/bin/${DEVICE_TYPE}-elfconv kernel_build/${kernel_name}.bin.o.sec
             kernel_build/${kernel_name}.bin.o ${XPU_CLANG} --sysroot=${CXX_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${xpu_add_library_DEPENDS}
@@ -215,7 +228,7 @@ macro(compile_kernel COMPILE_ARGS)
     COMMAND ${CMAKE_COMMAND} -E make_directory kernel_build
     COMMAND
       ${XPU_CLANG} --sysroot=${CXX_DIR} -std=c++11 ${ABI_VERSION} ${OPT_LEVEL}
-      -fno-builtin -fxpu-launch-return --xpu-arch=xpu2 -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
+      -fno-builtin -fxpu-launch-return --xpu-arch=${DEVICE_TYPE} -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
       ${XPU_CXX_INCLUDES} -I. -o kernel_build/${kernel_name}.host.o
       kernel_build/${kernel_name}.xpu --xpu-host-only -c -v
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -277,7 +290,7 @@ macro(xpu_add_library TARGET_NAME)
         HOST
         ${XPU1_HOST_O_EXTRA_FLAGS}
         XPU
-        "xpu2"
+        "${DEVICE_TYPE}"
         DEPENDS
         ${cc_srcs_depends})
     endforeach()

@@ -1454,6 +1454,7 @@ template class paddle::small_vector_base<uint32_t>;
 // Both uint32_t and uint64_t instantiations are needed for 64-bit builds.
 // This instantiation will never be used in 32-bit builds, and will cause
 // warnings when sizeof(Size_T) > sizeof(size_t).
+#ifndef PADDLE_WITH_XPU_KP
 #if SIZE_MAX > UINT32_MAX
 template class paddle::small_vector_base<uint64_t>;
 
@@ -1463,6 +1464,7 @@ static_assert(sizeof(SmallVectorSizeType<char>) == sizeof(uint64_t),
 #else
 static_assert(sizeof(SmallVectorSizeType<char>) == sizeof(uint32_t),
               "Expected small_vector_base<uint32_t> variant to be in use.");
+#endif
 #endif
 
 }  // namespace paddle

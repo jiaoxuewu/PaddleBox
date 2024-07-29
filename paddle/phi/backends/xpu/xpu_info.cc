@@ -271,9 +271,12 @@ XPUVersion get_xpu_version(int dev_id) {
   if (v == K100 || v == K200) {
     VLOG(1) << "KUNLUN device " << dev_id << " is XPU1\n";
     return XPU1;
-  } else {
+  } else if (v < KL3_BEGIN) {
     VLOG(1) << "KUNLUN device " << dev_id << " is XPU2\n";
     return XPU2;
+  } else {
+    VLOG(1) << "KUNLUN device " << dev_id << " is XPU3\n";
+    return XPU3;
   }
 }
 

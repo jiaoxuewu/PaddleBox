@@ -537,9 +537,14 @@ struct InputSetter {
   template <typename Array>
   static HOSTDEVICE void Apply(
       const std::vector<const DenseTensor *> &ins_tensor, Array *ins_data) {
-    // (*ins_data)[Index] = (const _ptr_ char *)(ins_tensor[Index]->data());
-    (void)(ins_tensor);
-    (void)(ins_data);
+#ifdef PADDLE_WITH_XPU_KP
+    PADDLE_ENFORCE_EQ(0,
+                      1,
+                      paddle::platform::errors::InvalidArgument(
+                          "Not allow cast from local memory to global memory."));
+#else
+    (*ins_data)[Index] = (const _ptr_ char *)(ins_tensor[Index]->data());
+#endif
   }
 };
 

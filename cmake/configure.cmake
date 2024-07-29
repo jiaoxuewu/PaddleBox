@@ -119,6 +119,11 @@ if(WITH_XPU_KP)
   endif()
 endif()
 
+if(WITH_XPU_XRE5)
+  message(STATUS "Compile with XPU3!")
+  add_definitions(-DPADDLE_WITH_XPU_XRE5)
+endif()
+
 if(WITH_IPU)
   message(STATUS "Compile with IPU!")
   add_definitions(-DPADDLE_WITH_IPU)

@@ -377,7 +377,8 @@ void DataFeedPdboxXpuKernelHelper::CopyRankOffset(const paddle::platform::Place&
     stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
                 ->x_context()
                 ->xpu_stream;
-    CopyRankOffsetKernel<<<8, 64, stream>>>(dest, ranks, cmatchs, ad_offsets, pv_num, ins_num, max_rank, cols);
+    int cluster_num = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context()->ncluster();
+    CopyRankOffsetKernel<<<cluster_num, 64, stream>>>(dest, ranks, cmatchs, ad_offsets, pv_num, ins_num, max_rank, cols);
     xpu_wait(stream);
 }
 
@@ -396,7 +397,8 @@ void DataFeedPdboxXpuKernelHelper::FillSlotValueOffset(const paddle::platform::P
     stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
                 ->x_context()
                 ->xpu_stream;
-    FillSlotValueOffsetPadBoxKernel<<<8, 64, stream>>>(ins_num, used_slot_num, slot_value_offsets,
+    int cluster_num = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context()->ncluster();
+    FillSlotValueOffsetPadBoxKernel<<<cluster_num, 64, stream>>>(ins_num, used_slot_num, slot_value_offsets,
         uint64_offsets, uint64_slot_size, float_offsets, float_slot_size, used_slots);
     xpu_wait(stream);
 }
@@ -421,7 +423,8 @@ void DataFeedPdboxXpuKernelHelper::CopyForTensor(const paddle::platform::Place& 
     stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
                 ->x_context()
                 ->xpu_stream;
-    CopyForTensorPadBoxKernel<<<8, 64, stream>>>(used_slot_num, ins_num, dest, slot_value_offsets, uint64_feas,
+    int cluster_num = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context()->ncluster();
+    CopyForTensorPadBoxKernel<<<cluster_num, 64, stream>>>(used_slot_num, ins_num, dest, slot_value_offsets, uint64_feas,
         uint64_offsets, uint64_ins_lens, uint64_slot_size, float_feas, float_offsets,
         float_ins_lens, float_slot_size, used_slots);
 
