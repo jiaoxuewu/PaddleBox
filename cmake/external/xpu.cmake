@@ -105,7 +105,7 @@ set(XPU_PACK_DEPENCE_URL
 if(WITH_XPU_XRE5)
   add_definitions(-DPADDLE_WITH_XPU_XRE5)
   set(XPU_XRE_BASE_VERSION "5.0.9.1")
-  set(XPU_XCCL_BASE_VERSION "1.2.5.2")
+  set(XPU_XCCL_BASE_VERSION "1.2.7.2")
   set(XPU_XRE_BASE_URL
       "https://klx-sdk-release-public.su.bcebos.com/xre/kl3-release/${XPU_XRE_BASE_VERSION}"
   )
