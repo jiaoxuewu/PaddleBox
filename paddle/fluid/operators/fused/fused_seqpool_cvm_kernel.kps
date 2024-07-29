@@ -1822,7 +1822,7 @@ int sequence_sum_pool_cvm(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, lods_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, lods.data(), lods_xpu, slot_num * sizeof(TID) * (batch + 1)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
         return sequence_sum_pool_cvm_xpu2_wrapper<T, TID>(ctx,
                                     x_xpu,
                                     y_xpu,
@@ -2065,7 +2065,7 @@ int sequence_sum_pool_cvm_grad(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
          return sequence_sum_pool_cvm_grad_xpu2_wrapper<T, TID>(ctx,
                                      dy_xpu,
                                      cvm,
@@ -2576,7 +2576,7 @@ int sequence_sum_pool_cvm_with_diff_thres(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, diff_threshold_vec_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, diff_threshold_vec.data(), diff_threshold_vec_xpu, vec_len * sizeof(T)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
         return sequence_sum_pool_cvm_with_diff_thres_xpu2_wrapper<T, TID>(ctx,
                                     x_xpu,
                                     y_xpu,
@@ -2766,7 +2766,7 @@ int sequence_sum_pool_cvm_with_diff_thres_grad(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
          return sequence_sum_pool_cvm_with_diff_thres_grad_xpu2_wrapper<T, TID>(ctx,
                                      dy_xpu,
                                      cvm,
@@ -3172,7 +3172,7 @@ int sequence_sum_pool_cvm_with_conv(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, lods_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, lods.data(), lods_xpu, slot_num * sizeof(TID) * (batch + 1)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
         return sequence_sum_pool_cvm_with_conv_xpu2_wrapper<T, TID>(ctx,
                                     x_xpu,
                                     y_xpu,
@@ -3357,7 +3357,7 @@ int sequence_sum_pool_cvm_with_conv_grad(xpu::Context* ctx,
     WRAPPER_ASSERT_WORKSPACE(ctx, seq_vec_xpu);
     WRAPPER_ASSERT_SUCCESS(ctx, xpu::do_host2device(ctx, seq_vec.data(), seq_vec_xpu, slot_num * (batch_size + 1) * sizeof(TID)));
 
-    if (ctx->dev().type() == xpu::kXPU2) {
+    if (ctx->dev().type() == xpu::kXPU2 || ctx->dev().type() == xpu::kXPU3) {
          return sequence_sum_pool_cvm_with_conv_grad_xpu2_wrapper<T, TID>(ctx,
                                      dy_xpu,
                                      cvm,
