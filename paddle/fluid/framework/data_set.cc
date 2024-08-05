@@ -39,7 +39,9 @@
 USE_INT_STAT(STAT_total_feasign_num_in_mem);
 DECLARE_bool(graph_get_neighbor_id);
 DECLARE_bool(padbox_dataset_enable_unrollinstance);
-
+PADDLE_DEFINE_EXPORTED_bool(padbox_disable_ins_shuffle,
+                            false,
+                            "paddle disable ins shuffle ,default false");
 namespace paddle {
 namespace framework {
 

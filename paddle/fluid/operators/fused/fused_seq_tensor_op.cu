@@ -1,4 +1,3 @@
-#include <cublas.h>
 #include <fstream>
 #include <string>
 #include "paddle/fluid/operators/fused/fused_seq_tensor_op.h" // don't remove this

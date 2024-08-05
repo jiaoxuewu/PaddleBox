@@ -429,6 +429,7 @@ void BoxPSWorker::Initialize(const TrainerDesc& desc) {
             << ", dump thread num: " << dump_thread_num_;
   }
   VLOG(1) << "boxps_worker init device num: " << device_num_;
+
 }
   
 void BoxPSWorker::Finalize() {
@@ -1204,6 +1205,9 @@ void BoxPSWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
           str_os << name << ",";
         }
         str_os << "]";
+      }
+      if (sync_points_.find(op.get()) != sync_points_.end()) {
+        str_os << ", sync point";
       }
       str_os << "\n";
     }

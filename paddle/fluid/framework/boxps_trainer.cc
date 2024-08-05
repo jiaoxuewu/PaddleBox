@@ -150,7 +150,7 @@ void BoxPSTrainer::InitDumpEnv() {
     //   dump_futures_.emplace_back(pool->Run([this, i]() { this->DumpWork(i); }));
   // }
   // VLOG(0) << "init dump write file thread num=" << dump_thread_num_;
-localfs_mkdir(dump_fields_path_);
+    localfs_mkdir(dump_fields_path_);
 }
 // final dump env
 void BoxPSTrainer::FinalizeDumpEnv() {
