@@ -105,7 +105,7 @@ set(XPU_PACK_DEPENCE_URL
 if(WITH_XPU_XRE5)
   add_definitions(-DPADDLE_WITH_XPU_XRE5)
   set(XPU_XRE_BASE_VERSION "5.0.9.1")
-  set(XPU_XCCL_BASE_VERSION "1.2.7.2")
+  set(XPU_XCCL_BASE_VERSION "1.2.8.2")
   set(XPU_XRE_BASE_URL
       "https://klx-sdk-release-public.su.bcebos.com/xre/kl3-release/${XPU_XRE_BASE_VERSION}"
   )
@@ -133,7 +133,7 @@ if (WITH_BOX_PS OR WITH_XPU_KP)
         CACHE STRING "" FORCE)
     #"https://klx-sdk-release-public.su.bcebos.com/xdnn/release/2.6.0.1/${XPU_XDNN_DIR_NAME}.tar.gz"
     set(XPU_XDNN_URL
-        "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/xdnn_master/20240718/${XPU_XDNN_DIR_NAME}.tar.gz"
+        "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/xdnn_master/20240731/${XPU_XDNN_DIR_NAME}.tar.gz"
         CACHE STRING "" FORCE)
     set(SCALOPUS_URL
         "https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/paddlebox/20230306/scalopus.tar.gz"
