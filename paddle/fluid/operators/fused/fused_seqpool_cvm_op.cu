@@ -403,7 +403,8 @@ __global__ void FusedCVMKernelWithCVMEmbedxConcate(const size_t N,
                                       const int batch_size,
                                       const int embedding_size,
                                       const int cvm_offset,
-                                      const int embedx_concate_size) {
+                                      const int embedx_concate_size,
+                                      bool fix_ctr_to_click) {
   int concat_embedding_size = embedx_concate_size * embedding_size;
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / concat_embedding_size;
