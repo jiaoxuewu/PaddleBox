@@ -94,7 +94,7 @@ set(XPU_XCCL_URL
 #https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20240312/xctr.tar.gz
 #https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20221130/xctr.tar.gz
 set(XPU_XCTR_URL
-    https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20240701/xctr.tar.gz
+    https://klx-sdk-release-public.su.bcebos.com/xdnn_train/dev/20240807/xctr.tar.gz
     CACHE STRING "" FORCE)
 
 #"data-im.baidu.com:/home/work/var/CI_DATA/im/static/pack_paddle_depence.sh/pack_paddle_depence.sh"
