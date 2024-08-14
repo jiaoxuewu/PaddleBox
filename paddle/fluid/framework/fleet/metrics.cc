@@ -633,18 +633,19 @@ void BasicAucCalculator::computeContinueMsg() {
                            _local_label,
                            _local_total_num};
 #endif
-    _mae = local_err[0] / _local_total_num;
-    _rmse = sqrt(local_err[1] / _local_total_num);
-    _predicted_value = local_err[2] / _local_total_num;
-    _actual_value = local_err[3] / _local_total_num;
+    _size = local_err[4];
+    _mae = local_err[0] / _size;
+    _rmse = sqrt(local_err[1] / _size);
+    _predicted_value = local_err[2] / _size;
+    _actual_value = local_err[3] / _size;
   } else {
+    _size = _local_total_num;
     _mae = _local_abserr / _local_total_num;
     _rmse = sqrt(_local_sqrerr / _local_total_num);
     _predicted_value = _local_pred / _local_total_num;
     _actual_value = _local_label / _local_total_num;
   }
 
-  _size = _local_total_num;
 }
 
 void BasicAucCalculator::computeNanInfMsg() {
