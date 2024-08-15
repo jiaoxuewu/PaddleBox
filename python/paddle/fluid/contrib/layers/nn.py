@@ -1764,7 +1764,8 @@ def fused_seqpool_cvm(input,
                       embed_thres_size=0,
                       embedx_concate_size=1,
                       embedx_concate_filter=False,
-                      fill_zero=True):
+                      fill_zero=True,
+                      mask=None):
     """
      **Notes: The Op only receives List of LoDTensor as input, only support SUM pooling now.
     :attr:`input`.
@@ -1802,11 +1803,13 @@ def fused_seqpool_cvm(input,
     if quant_ratio == 0 and need_filter:
         ## quant not allow quant ratio zero set default 128
         quant_ratio = 128
-
+    if mask is None:
+        mask = paddle.empty(shape=[0], dtype='int64')
     helper.append_op(
         type="fused_seqpool_cvm",
         inputs={"X": inputs,
-                "CVM": cvm},
+                "CVM": cvm,
+                "Mask": mask},
         outputs={"Out": outs},
         attrs={
             "pooltype": pool_type.upper(),
