@@ -1579,7 +1579,12 @@ __global__ void PushCopyNNCrossDiscontinuous(const TExpandPushGetOp* op,
           GM2LM((__global_ptr__ float*)sm_src_expand_vals_ptr[lm_key2slot[j]] + lm_slot_inner_offset[j] * expand_embed_dim, 
                 lm_src_expand_vals, expand_embed_dim * sizeof(float));
           for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
-            lm_dst_vals[j * push_float_num + k] = lm_src_expand_vals[k - skip_offset - 1] * -bs;
+            // lm_dst_vals[j * push_float_num + k] = lm_src_expand_vals[k - skip_offset - 1] * -bs;
+            lm_dst_vals[j * push_float_num + k] = lm_op[0].get(lm_src_expand_vals,
+                                                                    0,
+                                                                    k - skip_offset - 1 - hidden_size,
+                                                                    hidden_size,  // hidden_size is useless
+                                                                    expand_embed_dim)  * -bs;
           }
           mfence();
         } else {
