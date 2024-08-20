@@ -1,0 +1,327 @@
+#include "xpu/kernel/xtdk.h"  // NOLINT
+#include "xpu/kernel/xtdk_math.h"            // NOLINT
+#include "xpu/kernel/xtdk_simd.h"
+#include "xpu/refactor/impl_public/wrapper_check.h"
+
+#include "paddle/fluid/operators/fused/fused_seq_tensor_kernel.h"
+#include "paddle/fluid/platform/device/xpu/xpu_header.h"
+
+namespace paddle {
+namespace framework {
+
+// uvxyz is the index, abcde is the dim
+static inline __device__ uint32_t cal_idx5dim(uint32_t u, uint32_t v,uint32_t x, uint32_t y, uint32_t z, 
+                                              uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    return z + y * e + x * d * e + v * c * d * e + u * b * c * d * e;
+
+}
+
+static inline __device__ uint32_t cal_idx4dim(uint32_t v,uint32_t x, uint32_t y, uint32_t z, 
+                                              uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    return z + y * e + x * d * e + v * c * d * e; 
+}
+
+template <typename T>
+static inline __device__ void vec_sub(const T * a, const T * b, T * c, uint32_t len) { // naive implementation
+    for (uint32_t i = 0; i < len; i++) {
+        c[i] = a[i] - b[i];
+    }
+    mfence();
+}
+
+template <>
+static inline __device__ void vec_sub(const float * a, const float * b, float * c, uint32_t len) {
+    for (uint32_t i = 0; i < len; i += 16) {
+        float32x16_t v0 = vload_lm_float32x16(a + i);
+        float32x16_t v1 = vload_lm_float32x16(b + i);
+        v0 = vvsub_float32x16(v0, v1);
+        vstore_lm_float32x16(c + i, v0);
+    }
+    mfence();
+}
+
+template <typename T>
+static inline __device__ void vec_mul(const T * a, const T * b, T * c, uint32_t len) { // naive implementation
+    for (uint32_t i = 0; i < len; i++) {
+        c[i] = a[i] * b[i];
+    }
+    mfence();
+}
+
+template <>
+static inline __device__ void vec_mul(const float * a, const float * b, float * c, uint32_t len) {
+    for (uint32_t i = 0; i < len; i += 16) {
+        float32x16_t v0 = vload_lm_float32x16(a + i);
+        float32x16_t v1 = vload_lm_float32x16(b + i);
+        v0 = vvmul_float32x16(v0, v1);
+        vstore_lm_float32x16(c + i, v0);
+    }
+    mfence();
+}
+
+template <typename T>
+static inline __device__ void reduce_sum_lm(T * a, uint32_t len) {
+    for (uint32_t i = 1; i < len; ++i) {
+        a[0] += a[i];
+    }
+}
+
+template <>
+static inline __device__ void reduce_sum_lm(float *a, uint32_t len) {
+    if (len < 16) {
+        for (uint32_t i = 1; i < len; ++i) {
+            a[0] += a[i];
+        }
+    } else {
+        float32x16_t v0 = vload_lm_float32x16(a);
+        uint32_t i = 16;
+        for (; i <= len - 16; i += 16) {
+            float32x16_t v1 = vload_lm_float32x16(a + i);
+            v0 = vvadd_float32x16(v0, v1);
+        }
+        vstore_lm_float32x16(a, v0);
+        mfence();
+        for (uint32_t j = 1; j < 16; ++j) {
+            a[0] += a[j];
+        }
+        for (;i < len; ++i) {
+            a[0] += a[i];
+        }
+    }
+}
+
+template <typename T>
+__global__ void cal_ad_slot_session_kernel(const T* input,
+                                           const T* ad_input,
+                                           T* din_output,
+                                           T* ad_slot_session_output,
+                                           const uint32_t batch_num, 
+                                           const uint32_t ins_num, 
+                                           const uint32_t slot_num,
+                                           const uint32_t max_length,
+                                           const uint32_t fea_emb_dim,
+                                           const uint32_t ad_slot_num,
+                                           const uint32_t ad_slot_offset) {
+    uint32_t cid = core_id();
+    uint32_t ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    uint32_t thread_id = cluster_id() * ncores + cid;
+    uint32_t nthreads = cluster_num() * ncores;
+
+    const uint32_t local_buffer_size = 128;
+    __simd__ T local_input[local_buffer_size];
+    __simd__ T local_ad_input[local_buffer_size];
+    
+    __simd__ T local_din_vec[local_buffer_size];
+
+    const uint32_t total_ad_slot_cnt = ins_num * batch_num * ad_slot_num;
+    const uint32_t piece_of_ad_seq_dim = ad_slot_num * fea_emb_dim;
+
+    for (uint32_t total_ad_slot_idx = thread_id; total_ad_slot_idx < total_ad_slot_cnt; total_ad_slot_idx += nthreads) {
+        uint32_t ins_idx = total_ad_slot_idx / (batch_num * ad_slot_num);
+        uint32_t batch_idx = total_ad_slot_idx / ad_slot_num % batch_num; // which batch in ins
+        uint32_t ad_slot_idx = total_ad_slot_idx % ad_slot_num; // which ad slot in batch
+
+        for (uint32_t fea_idx = 0; fea_idx < fea_emb_dim; fea_idx += local_buffer_size) {
+            uint32_t handle_fea_len = min(local_buffer_size, fea_emb_dim - fea_idx);
+            
+            uint32_t ad_fea_begin_idx = cal_idx4dim(ins_idx, batch_idx, ad_slot_idx, fea_idx, 
+                                                    ins_num, batch_num, ad_slot_num, fea_emb_dim);
+
+            GM2LM(&ad_input[ad_fea_begin_idx], local_ad_input, handle_fea_len * sizeof(T));
+            for (uint32_t max_len_idx = 0; max_len_idx < max_length; ++max_len_idx) {
+                uint32_t all_slot_idx = ad_slot_idx + ad_slot_offset; // which slot in all slot
+                uint32_t ins_offset = cal_idx5dim(ins_idx, batch_idx, all_slot_idx, max_len_idx, fea_idx,
+                                                  ins_num, batch_num, slot_num, max_length, fea_emb_dim);
+
+                GM2LM(&input[ins_offset], local_input, handle_fea_len * sizeof(T));
+
+                uint32_t fea_concat_start_idx = cal_idx5dim(batch_idx, ins_idx, max_len_idx, ad_slot_idx, fea_idx,
+                                                            batch_num, ins_num, max_length, ad_slot_num * 4, fea_emb_dim);
+
+                LM2GM(local_input, &din_output[fea_concat_start_idx], handle_fea_len * sizeof(T));
+                LM2GM(local_ad_input, &din_output[fea_concat_start_idx + piece_of_ad_seq_dim], handle_fea_len * sizeof(T));
+
+                vec_sub(local_input, local_ad_input, local_din_vec, handle_fea_len);
+                LM2GM(local_din_vec, &din_output[fea_concat_start_idx + 2 * piece_of_ad_seq_dim], handle_fea_len * sizeof(T));
+
+                vec_mul(local_input, local_ad_input, local_din_vec, handle_fea_len);
+                LM2GM(local_din_vec, &din_output[fea_concat_start_idx + 3 * piece_of_ad_seq_dim], handle_fea_len * sizeof(T));
+
+                uint32_t ad_slot_session_out_start_idx = cal_idx5dim(batch_idx, ins_idx, max_len_idx, ad_slot_idx, fea_idx,
+                                                                     batch_num, ins_num, max_length, ad_slot_num, fea_emb_dim);
+
+                LM2GM(local_input, &ad_slot_session_output[ad_slot_session_out_start_idx], handle_fea_len * sizeof(T));
+            }        
+        }
+    }
+    
+}
+
+template <typename T>
+__global__ void cal_sideinfo_kernel(const T* input,
+                                  T* side_info_output,
+                                  const size_t batch_num,
+                                  const size_t ins_num, 
+                                  const size_t slot_num,
+                                  const size_t max_length,
+                                  const size_t fea_emb_dim,
+                                  const size_t sideinfo_slot_num,
+                                  const size_t sideinfo_slot_offset) {
+    uint32_t cid = core_id();
+    uint32_t ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    uint32_t thread_id = cluster_id() * ncores + cid;
+    uint32_t nthreads = cluster_num() * ncores;
+
+    const uint32_t local_buffer_size = 256;
+    __local__ T local_input[local_buffer_size];
+
+    const uint32_t total_side_info_slot_cnt = ins_num * batch_num * sideinfo_slot_num;
+
+    for (uint32_t side_info_all_slot_idx = thread_id; side_info_all_slot_idx < total_side_info_slot_cnt; side_info_all_slot_idx += nthreads) {
+        uint32_t ins_idx = side_info_all_slot_idx / (batch_num * sideinfo_slot_num);
+        uint32_t batch_idx = side_info_all_slot_idx / sideinfo_slot_num % batch_num; // which batch in ins
+        uint32_t side_info_slot_idx = side_info_all_slot_idx % sideinfo_slot_num; // which slot in batch
+
+        uint32_t total_slot_idx = sideinfo_slot_offset + side_info_slot_idx;
+
+        for (uint32_t fea_idx = 0; fea_idx < fea_emb_dim; fea_idx += local_buffer_size) {
+            uint32_t handle_fea_len = min(local_buffer_size, fea_emb_dim - fea_idx);
+
+            for (uint32_t max_len_idx = 0; max_len_idx < max_length; ++max_len_idx) {
+                uint32_t input_offset = cal_idx5dim(ins_idx, batch_idx, total_slot_idx, max_len_idx, fea_idx,
+                                                    ins_num, batch_num, slot_num, max_length, fea_emb_dim);
+
+                GM2LM(&input[input_offset], local_input, handle_fea_len * sizeof(T));
+                uint32_t output_offset = cal_idx5dim(batch_idx, ins_idx, max_len_idx, side_info_slot_idx, fea_idx,
+                                                     batch_num, ins_num, max_length, sideinfo_slot_num, fea_emb_dim);
+
+                LM2GM(local_input, &side_info_output[output_offset], handle_fea_len * sizeof(T));
+            }
+        }
+    }
+}
+
+template <typename T>
+__global__ void reduce_sum_max_length(const T* input,
+                                      T* mask_output,
+                                      const size_t batch_count,
+                                      const size_t ins_num,
+                                      const size_t slot_num,
+                                      const size_t max_length,
+                                      const size_t fea_emb_dim) {
+    uint32_t cid = core_id();
+    uint32_t ncores = core_num();
+    if (cid >= ncores) {
+        return;
+    }
+    uint32_t thread_id = cluster_id() * ncores + cid;
+    uint32_t nthreads = cluster_num() * ncores;
+
+    const uint32_t local_buffer_size = 512;
+    __simd__ T local_input[local_buffer_size];
+    __local__ T thread_sum = 0;
+
+    const uint32_t mask_len = batch_count * ins_num * max_length;
+
+    for (int i = thread_id; i < mask_len; i += nthreads) {
+        thread_sum = 0;
+        int batch_idx = i / (ins_num * max_length);
+        int ins_idx = (i / max_length) % ins_num;
+        int max_len_idx = i % max_length;
+
+        for (int slot_idx = 0; slot_idx < slot_num; ++slot_idx) {
+            for (uint32_t fea_idx = 0; fea_idx < fea_emb_dim; fea_idx += local_buffer_size) {
+                uint32_t handle_fea_len = min(local_buffer_size, fea_emb_dim - fea_idx);
+                uint32_t input_idx = cal_idx5dim(ins_idx, batch_idx, slot_idx, max_len_idx, fea_idx,
+                                                 ins_num, batch_count, slot_num, max_length, fea_emb_dim);
+                GM2LM(&input[input_idx], local_input, handle_fea_len * sizeof(T));
+                reduce_sum_lm(local_input, handle_fea_len);
+                mfence();
+                thread_sum += local_input[0];
+                mfence();
+            }
+        }
+
+        if (fabs(thread_sum) > 1e-8) {
+            thread_sum = 1.0;
+        } else {
+            thread_sum = 0.0;
+        }
+        mfence();
+        LM2GM(&thread_sum, &mask_output[i], sizeof(T));
+    }
+}
+
+template <typename T>
+void cal_ad_slot_session(const T* input, 
+                         const T* ad_input,
+                         T* din_output,
+                         T* ad_slot_session_output,
+                         const uint32_t batch_num, 
+                         const uint32_t ins_num, 
+                         const uint32_t slot_num,
+                         const uint32_t max_length,
+                         const uint32_t fea_emb_dim,
+                         const uint32_t ad_slot_num,
+                         const uint32_t ad_slot_offset,
+                         xpu::Context* ctx) {
+    int ret = cal_ad_slot_session_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(input, ad_input, din_output, 
+                                                                                   ad_slot_session_output,
+                                                                                   batch_num, ins_num, slot_num, 
+                                                                                   max_length, fea_emb_dim, ad_slot_num,
+                                                                                   ad_slot_offset);
+    CHECK(ret == XPU_SUCCESS) << "cal_ad_slot_session_kernel launch failed";
+}
+
+template <typename T>
+void cal_sideinfo(const T* input,
+                  T* side_info_output,
+                  const size_t batch_num,
+                  const size_t ins_num, 
+                  const size_t slot_num,
+                  const size_t max_length,
+                  const size_t fea_emb_dim,
+                  const size_t sideinfo_slot_num,
+                  const size_t sideinfo_slot_offset,
+                  xpu::Context* ctx) {
+    int ret = cal_sideinfo_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(input, side_info_output, batch_num, ins_num,
+                                                                            slot_num, max_length, fea_emb_dim, 
+                                                                            sideinfo_slot_num, sideinfo_slot_offset);
+    CHECK(ret == XPU_SUCCESS) << "cal_sideinfo_kernel launch failed";
+}
+
+template <typename T>
+void cal_ad_mask(const T* input,
+                 T* mask_output,
+                 const size_t batch_count,
+                 const size_t ins_num,
+                 const size_t slot_num,
+                 const size_t max_length,
+                 const size_t fea_emb_dim,
+                 xpu::Context* ctx) {
+    int ret = reduce_sum_max_length<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(input, mask_output, batch_count, ins_num,
+                                                                              slot_num, max_length, fea_emb_dim);
+    CHECK(ret == XPU_SUCCESS) << "cal_ad_mask_kernel launch failed";
+}
+
+#define DEFINE_FUSED_SEQ_TENSOR_OP_WITH_TYPE(type) \
+template void cal_ad_slot_session<type>(const type * input, const type * ad_input, type * din_output, \
+                                  type * ad_slot_session_output, const uint32_t batch_num, const uint32_t ins_num, \
+                                  const uint32_t slot_num, const uint32_t max_length, const uint32_t fea_emb_dim, \
+                                  const uint32_t ad_slot_num, const uint32_t ad_slot_offset, xpu::Context* ctx); \
+template void cal_sideinfo<type>(const type * input, type * side_info_output, const size_t batch_num, const size_t ins_num, \
+                           const size_t slot_num, const size_t max_length, const size_t fea_emb_dim, \
+                           const size_t sideinfo_slot_num, const size_t sideinfo_slot_offset, xpu::Context* ctx); \
+template void cal_ad_mask<type>(const type * input, type * mask_output, const size_t batch_count, const size_t ins_num, \
+                          const size_t slot_num, const size_t max_length, const size_t fea_emb_dim, xpu::Context* ctx);
+
+DEFINE_FUSED_SEQ_TENSOR_OP_WITH_TYPE(float);
+
+}
+}
