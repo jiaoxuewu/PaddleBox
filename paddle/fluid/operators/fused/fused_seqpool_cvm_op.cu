@@ -1066,7 +1066,7 @@ class FusedSeqpoolCVMGradCUDAKernel : public framework::OpKernel<T> {
     auto out_grads = ctx.MultiInput<LoDTensor>(framework::GradVarName("Out"));
     auto in_grads = ctx.MultiOutput<LoDTensor>(framework::GradVarName("X"));
     auto *cvm = ctx.Input<LoDTensor>("CVM");
-    auto *mask = ctx.Input<LoDTensor>("Mask");
+    auto *mask = ctx.Input<LoDTensor>("GradMask");
     std::string pooltype = ctx.Attr<std::string>("pooltype");
     auto use_cvm = ctx.Attr<bool>("use_cvm");
     const int cvm_offset = ctx.Attr<int>("cvm_offset");

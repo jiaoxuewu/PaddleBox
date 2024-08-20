@@ -117,7 +117,7 @@ class FusedSeqpoolCVMOpMaker : public framework::OpProtoAndCheckerMaker {
     AddInput("CVM",
              "(Tensor),  a 2-D Tensor with shape [N x 2], where N is the batch "
              "size, 2 is show and click.");
-    AddInput("Mask",
+    AddInput("GradMask",
              "(Tensor),  a 1-D Tensor with shape [N x 1], where N is the batch "
              "size, 1 is mask.");
     AddOutput("Out",
@@ -230,7 +230,7 @@ class FusedSeqpoolCVMGradOpMaker : public framework::SingleGradOpMaker<T> {
     op_desc_ptr->SetType("fused_seqpool_cvm_grad");
     op_desc_ptr->SetInput("X", this->Input("X"));
     op_desc_ptr->SetInput("CVM", this->Input("CVM"));
-    op_desc_ptr->SetInput("Mask", this->Input("Mask"));
+    op_desc_ptr->SetInput("GradMask", this->Input("GradMask"));
 
     op_desc_ptr->SetInput(framework::GradVarName("Out"),
                           this->OutputGrad("Out"));
