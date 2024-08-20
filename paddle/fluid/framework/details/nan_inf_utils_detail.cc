@@ -753,9 +753,9 @@ bool CheckOpHasNanOrInfRet(const framework::OperatorBase& op,
       auto* var = exec_scope.FindVar(vname);
       if (var == nullptr || !(var->IsInitialized())) continue;
       CheckVarHasNanOrInfRet(op.Type(), var, vname, place);
-      if (CheckBatchNanOrInfRet(place)) {
-        VLOG(0) << "dj-debug:check input nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
-      }
+    //   if (CheckBatchNanOrInfRet(place)) {
+    //     VLOG(0) << "dj-debug:check input nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
+    //   }
     }
   } else {
     for (auto& vname : op.OutputVars(true)) {
@@ -770,9 +770,9 @@ bool CheckOpHasNanOrInfRet(const framework::OperatorBase& op,
       auto* var = exec_scope.FindVar(vname);
       if (var == nullptr || !(var->IsInitialized())) continue;
       CheckVarHasNanOrInfRet(op.Type(), var, vname, place);
-      if (CheckBatchNanOrInfRet(place)) {
-        VLOG(0) << "dj-debug:check output nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
-      }
+    //   if (CheckBatchNanOrInfRet(place)) {
+    //     VLOG(0) << "dj-debug:check output nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
+    //   }
     }
   }
   if (g_check_nan_inf_ret) {
