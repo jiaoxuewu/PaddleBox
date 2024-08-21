@@ -3197,6 +3197,10 @@ int SlotPaddleBoxDataFeed::Next() {
       VLOG(3) << "finish reading, batch size zero, thread_id=" << thread_id_;
     }
 
+#ifdef PADDLE_WITH_XPU_KP
+    CHECK(prepare_next_batch_rt.get() == 0);
+#endif
+
     if (FLAGS_enable_async_datafeed_batch && offset_index_ < static_cast<int>(batch_offsets_.size())) {
       auto & new_batch = batch_offsets_[offset_index_];
       if (new_batch.second != 0) {
@@ -3206,17 +3210,16 @@ int SlotPaddleBoxDataFeed::Next() {
         slot_pv_tensor_buf_next_->set_buffer_done(std::move(prefetch_done));
       }
     }
-
-#ifdef PADDLE_WITH_XPU_KP
-    CHECK(prepare_next_batch_rt.get() == 0);
-#endif
     next_timer_.Pause();
-
     return this->batch_size_;
   } else {
     this->batch_size_ = batch.second;
     batch_timer_.Resume();
     PutToFeedSlotVec(&records_[batch.first], this->batch_size_);
+
+#ifdef PADDLE_WITH_XPU_KP
+    CHECK(prepare_next_batch_rt.get() == 0);
+#endif
     // prefetch next batch
     if (FLAGS_enable_async_datafeed_batch && offset_index_ < static_cast<int>(batch_offsets_.size())) {
       auto & new_batch = batch_offsets_[offset_index_];
@@ -3234,9 +3237,6 @@ int SlotPaddleBoxDataFeed::Next() {
     }
 #endif
     batch_timer_.Pause();
-#ifdef PADDLE_WITH_XPU_KP
-    CHECK(prepare_next_batch_rt.get() == 0);
-#endif
     next_timer_.Pause();
 
     return this->batch_size_;
