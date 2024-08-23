@@ -109,7 +109,7 @@ class FusedSeqpoolCVMOpXPUKernel : public framework::OpKernel<T> {
         if (clk_filter) {
           out[i]->Resize({bs, (embedding_size - 1) * embedx_concate_size});
         } else {
-          out[i]->Resize({bs, embedding_size});
+          out[i]->Resize({bs, embedding_size * embedx_concate_size});
         }
       } else {
         out[i]->Resize({bs, (embedding_size - cvm_offset - embed_thres_size) * embedx_concate_size});

@@ -575,6 +575,8 @@ XPUOpMap& get_kl2_ops() {
         XPUKernelSet({pOpKernelType(vartype::FP32, XPUPlace())})},
       {"fused_seqpool_cvm_grad",
        XPUKernelSet({pOpKernelType(vartype::FP32, XPUPlace())})},
+      {"fused_seq_tensor",
+        XPUKernelSet({pOpKernelType(vartype::FP32, XPUPlace())})},
       {"fused_seqpool_cvm_with_diff_thres",
         XPUKernelSet({pOpKernelType(vartype::FP32, XPUPlace())})},
       {"fused_seqpool_cvm_with_diff_thres_grad",
