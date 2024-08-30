@@ -209,6 +209,7 @@ struct SlotRecordObject {
   std::string user_id_;
   uint64_t user_id_sign_;
   uint64_t cur_timestamp_;
+  uint64_t show_timestamp_;
 
 
   ~SlotRecordObject() { clear(true); }
@@ -507,7 +508,8 @@ struct BatchCPUValue {
   std::vector<int> h_rank;
   std::vector<int> h_cmatch;
   std::vector<int> h_ad_offset;
-  std::vector<uint64_t> h_timestamp;
+  std::vector<uint64_t> h_cur_timestamp;
+  std::vector<uint64_t> h_show_timestamp;
   std::vector<uint64_t> h_train_mask;
 };
 
@@ -1137,7 +1139,8 @@ class DataFeed {
 
   LoDTensor* rank_offset_;
   LoDTensor* ads_offset_;
-  LoDTensor* ads_timestamp_;
+  LoDTensor* ads_cur_timestamp_;
+  LoDTensor* ads_show_timestamp_;
   LoDTensor* ads_train_mask_;
 
   // the batch size defined by user
@@ -2235,7 +2238,8 @@ class SlotPaddleBoxDataFeed : public DataFeed {
 
   std::string rank_offset_name_;
   std::string ads_offset_name_;
-  std::string ads_timestamp_name_;
+  std::string ads_cur_timestamp_name_;
+  std::string ads_show_timestamp_name_;
   std::string ads_train_mask_name_;
   int pv_batch_size_ = 0;
   int use_slot_size_ = 0;
@@ -2359,6 +2363,7 @@ paddle::framework::Archive<AR>& operator<<(paddle::framework::Archive<AR>& ar,
   ar << r->user_id_;
   ar << r->user_id_sign_;
   ar << r->cur_timestamp_;
+  ar << r->show_timestamp_;
   
   return ar;
 }
@@ -2374,6 +2379,7 @@ paddle::framework::Archive<AR>& operator>>(paddle::framework::Archive<AR>& ar,
   ar >> r->user_id_;
   ar >> r->user_id_sign_;
   ar >> r->cur_timestamp_;
+  ar >> r->show_timestamp_;
 
   return ar;
 }

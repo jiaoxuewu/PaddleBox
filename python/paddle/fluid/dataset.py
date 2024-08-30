@@ -136,11 +136,18 @@ class DatasetBase(object):
         """
         self.proto_desc.ads_offset = ads_offset
     
-    def set_ads_timestamp(self, ads_timestamp):
+
+    def set_ads_cur_timestamp(self, ads_cur_timestamp):
         """
-        set ads_timestamp
+        set ads_cur_timestamp
         """
-        self.proto_desc.ads_timestamp = ads_timestamp
+        self.proto_desc.ads_cur_timestamp = ads_cur_timestamp
+    
+    def set_ads_show_timestamp(self, ads_show_timestamp):
+        """
+        set ads_show_timestamp
+        """
+        self.proto_desc.ads_show_timestamp = ads_show_timestamp
 
     def set_ads_train_mask(self, ads_train_mask):
         """

@@ -2842,7 +2842,7 @@ void PadBoxSlotDataset::PreprocessInstance() {
               [](const SlotRecord& lhs, const SlotRecord& rhs) {
                 return lhs->user_id_sign_ < rhs->user_id_sign_ ||
                        lhs->user_id_sign_ == rhs->user_id_sign_ && lhs->user_id_ < rhs->user_id_ ||
-                       lhs->user_id_sign_ == rhs->user_id_sign_ && lhs->user_id_ == rhs->user_id_ && lhs->cur_timestamp_ < rhs->cur_timestamp_;
+                       lhs->user_id_sign_ == rhs->user_id_sign_ && lhs->user_id_ == rhs->user_id_ && lhs->show_timestamp_ < rhs->show_timestamp_;
             }
     );
     merge_by_sid_ = false;
@@ -2938,7 +2938,7 @@ void PadBoxSlotDataset::PreprocessInstance() {
       train_timestamp_range_.first > 0) {
     VLOG(1) << "train before filter pv_ins size: " << input_pv_ins_.size();
     for (auto& pv : input_pv_ins_) {
-      if (pv->ads.back()->cur_timestamp_ < train_timestamp_range_.first) {
+      if (pv->ads.back()->show_timestamp_ < train_timestamp_range_.first) {
         delete pv;
         pv = NULL;
       }
@@ -2956,7 +2956,7 @@ void PadBoxSlotDataset::PreprocessInstance() {
     size_t all_pv_ins_size = input_pv_ins_.size();
 
     for (auto& pv : input_pv_ins_) {
-      if (pv->ads.back()->cur_timestamp_ < test_timestamp_range_.first) {
+      if (pv->ads.back()->show_timestamp_ < test_timestamp_range_.first) {
         delete pv;
         pv = NULL;
       }
@@ -2982,7 +2982,7 @@ void PadBoxSlotDataset::PreprocessInstance() {
       }
       for (auto ins : input_pv_ins_[i]->ads) {
         ofs << ins->user_id_sign_ << ":" << ins->user_id_ << ":"
-            << ins->cur_timestamp_ << " ";
+            << ins->cur_timestamp_ << ":" <<  ins->show_timestamp_ << " ";
       }
       ofs << "\n";
     }
