@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/fused/fused_concat_op.h"
+#include "paddle/fluid/operators/fused/fused_concat_kernel.h"
 #ifdef PADDLE_WITH_BOX_PS
 #include "paddle/fluid/framework/fleet/box_wrapper.h"
 #else
@@ -82,7 +83,8 @@ class FusedConcatOpXPUKernel : public framework::OpKernel<T> {
 #ifdef TRACE_PROFILE
     TRACE_SCOPE_START("xpu::fused_concat", xpu_wait(xpu_context->xpu_stream););
 #endif
-    int r = xpu::fused_concat<T>(xpu_context,
+    // int r = xpu::fused_concat<T>(xpu_context,
+    int r = paddle::framework::fused_concat<T>(xpu_context,
                                     cpu_x_addr_vec,
                                     cpu_y_addr,
                                     batch_size,
@@ -132,7 +134,8 @@ class FusedConcatGradOpXPUKernel : public framework::OpKernel<T> {
     
     // output
     auto cpu_dy_addr = out_grad->data<T>();
-    int r = xpu::fused_concat_grad<T>(xpu_context,
+    // int r = xpu::fused_concat_grad<T>(xpu_context,
+    int r = paddle::framework::fused_concat_grad<T>(xpu_context,
                                         cpu_dy_addr,
                                         cpu_dx_list,
                                         batch_size,

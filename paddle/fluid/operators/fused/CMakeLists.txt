@@ -15,10 +15,15 @@ if(WITH_XPU)
               SRCS fused_seq_tensor_kernel.h fused_seq_tensor_kernel.kps
               DEPS resnet_unit_op) 
 
+  xpu_library(fused_concat_kernel
+              SRCS fused_concat_kernel.h fused_concat_kernel.kps
+              DEPS resnet_unit_op)
+
   register_operators(
     DEPS
     fused_seqpool_cvm_kernel
     fused_seq_tensor_kernel
+    fused_concat_kernel
     EXCLUDES
     fused_bn_activation_op
     conv_fusion_op
