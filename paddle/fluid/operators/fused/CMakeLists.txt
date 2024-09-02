@@ -10,59 +10,65 @@ if(WITH_XPU)
   xpu_library(fused_seqpool_cvm_kernel
               SRCS fused_seqpool_cvm_kernel.h fused_seqpool_cvm_kernel.kps
               DEPS resnet_unit_op)
-register_operators(
-  DEPS
-  fused_seqpool_cvm_kernel
-  EXCLUDES
-  fused_bn_activation_op
-  conv_fusion_op
-  fusion_transpose_flatten_concat_op
-  fusion_conv_inception_op
-  fused_fc_elementwise_layernorm_op
-  multihead_matmul_op
-  skip_layernorm_op
-  yolo_box_head_op
-  yolo_box_post_op
-  fused_embedding_eltwise_layernorm_op
-  fusion_group_op
-  fusion_gru_op
-  fusion_lstm_op
-  fused_bn_add_activation_op
-  fused_attention_op
-  fused_transformer_op
-  fused_feedforward_op
-  fused_multi_transformer_op
-  fused_bias_dropout_residual_layer_norm_op
-  resnet_unit_op
-  fused_gemm_epilogue_op
-  fused_gate_attention_op
-  resnet_basic_block_op)
+
+  xpu_library(fused_seq_tensor_kernel
+              SRCS fused_seq_tensor_kernel.h fused_seq_tensor_kernel.kps
+              DEPS resnet_unit_op) 
+
+  register_operators(
+    DEPS
+    fused_seqpool_cvm_kernel
+    fused_seq_tensor_kernel
+    EXCLUDES
+    fused_bn_activation_op
+    conv_fusion_op
+    fusion_transpose_flatten_concat_op
+    fusion_conv_inception_op
+    fused_fc_elementwise_layernorm_op
+    multihead_matmul_op
+    skip_layernorm_op
+    yolo_box_head_op
+    yolo_box_post_op
+    fused_embedding_eltwise_layernorm_op
+    fusion_group_op
+    fusion_gru_op
+    fusion_lstm_op
+    fused_bn_add_activation_op
+    fused_attention_op
+    fused_transformer_op
+    fused_feedforward_op
+    fused_multi_transformer_op
+    fused_bias_dropout_residual_layer_norm_op
+    resnet_unit_op
+    fused_gemm_epilogue_op
+    fused_gate_attention_op
+    resnet_basic_block_op)
 else()
-register_operators(
-  EXCLUDES
-  fused_bn_activation_op
-  conv_fusion_op
-  fusion_transpose_flatten_concat_op
-  fusion_conv_inception_op
-  fused_fc_elementwise_layernorm_op
-  multihead_matmul_op
-  skip_layernorm_op
-  yolo_box_head_op
-  yolo_box_post_op
-  fused_embedding_eltwise_layernorm_op
-  fusion_group_op
-  fusion_gru_op
-  fusion_lstm_op
-  fused_bn_add_activation_op
-  fused_attention_op
-  fused_transformer_op
-  fused_feedforward_op
-  fused_multi_transformer_op
-  fused_bias_dropout_residual_layer_norm_op
-  resnet_unit_op
-  fused_gemm_epilogue_op
-  fused_gate_attention_op
-  resnet_basic_block_op)
+  register_operators(
+    EXCLUDES
+    fused_bn_activation_op
+    conv_fusion_op
+    fusion_transpose_flatten_concat_op
+    fusion_conv_inception_op
+    fused_fc_elementwise_layernorm_op
+    multihead_matmul_op
+    skip_layernorm_op
+    yolo_box_head_op
+    yolo_box_post_op
+    fused_embedding_eltwise_layernorm_op
+    fusion_group_op
+    fusion_gru_op
+    fusion_lstm_op
+    fused_bn_add_activation_op
+    fused_attention_op
+    fused_transformer_op
+    fused_feedforward_op
+    fused_multi_transformer_op
+    fused_bias_dropout_residual_layer_norm_op
+    resnet_unit_op
+    fused_gemm_epilogue_op
+    fused_gate_attention_op
+    resnet_basic_block_op)
 endif()
 
 # fusion_gru_op does not have CUDA kernel
