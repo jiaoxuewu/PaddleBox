@@ -61,7 +61,7 @@ void BasicAucCalculator::add_unlock_data_with_sample(double pred, int label, flo
   PADDLE_ENFORCE_EQ(label * label, label,
       platform::errors::PreconditionNotMet(
           "label must be equal to 0 or 1, but its value is: %d", label));
-          
+
   int pos = std::min(static_cast<int>(pred * _table_size), _table_size - 1);
   _local_abserr += fabs(pred - label);
   _local_sqrerr += (pred - label) * (pred - label);
@@ -102,6 +102,15 @@ void BasicAucCalculator::add_unlock_data_with_continue_label(double pred,
   _local_pred += pred;
   _local_label += label;
   _local_total_num += 1.0;
+}
+
+void BasicAucCalculator::add_unlock_data_with_continue_value(
+    const std::vector<double>& value) {
+  _local_abserr += value[0];
+  _local_sqrerr += value[1];
+  _local_pred += value[2];
+  _local_label += value[3];
+  _local_total_num += value[4];
 }
 
 void BasicAucCalculator::add_nan_inf_unlock_data(float pred, int label){
@@ -192,9 +201,9 @@ void BasicAucCalculator::add_mask_data(const float* d_pred,
 }
 // add float mask data
 void BasicAucCalculator::add_float_mask_data(const float* d_pred,
-                                             const float* d_label,
+    const float* d_label,
                                              const int64_t* d_mask, int batch_size,
-                                             const paddle::platform::Place& place) {
+    const paddle::platform::Place& place) {
   if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
     thread_local std::vector<float> h_pred;
     thread_local std::vector<float> h_label;
@@ -354,7 +363,7 @@ void BasicAucCalculator::compute() {
 
   // add debug info print
   if (FLAGS_enable_debug_print_metrics_info) {
-    LOG(WARNING) << "total ins num: " << total_ins_num 
+    LOG(WARNING) << "total ins num: " << total_ins_num
                  << ", local ins num: " << _local_total_num 
                  << ", fp: " << fp
                  << ", tp: " << tp
@@ -367,7 +376,7 @@ void BasicAucCalculator::compute() {
   PADDLE_ENFORCE_EQ(total_ins_num,
                     _size,
                     platform::errors::InvalidArgument(
-                      "The table ins num not equal real total num."));
+                        "The table ins num not equal real total num."));
   calculate_bucket_error(table[0], table[1]);
 }
 
@@ -450,8 +459,8 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
 }
 
 void BasicAucCalculator::add_nan_inf_data(const float* d_pred,
-                                          const int64_t* d_label,
-                                          int batch_size,
+    const int64_t* d_label,
+    int batch_size,
                                           const paddle::platform::Place& place){
   if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
     thread_local std::vector<float> h_pred;

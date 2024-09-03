@@ -1293,6 +1293,9 @@ void BoxPSWorker::TrainFiles() {
   if (FLAGS_padbox_enable_gc && max_memory_size >= 0 && !unused_vars_.empty()) {
     gc = CreateGarbageCollector(place_, max_memory_size);
   }
+  platform::Timer monitor_timer;
+  monitor_timer.Reset();
+
   while ((batch_size = PackBatchTask()) > 0) {
     VLOG(2) << "[" << device_id_
             << "]begin running ops, batch size:" << batch_size
@@ -1334,7 +1337,9 @@ void BoxPSWorker::TrainFiles() {
       }
     }
 #endif
+    monitor_timer.Resume();
     AddAucMonitor(thread_scope_, place_);
+    monitor_timer.Pause();
 
     accum_num += batch_size;
     if (gc) {
@@ -1344,6 +1349,7 @@ void BoxPSWorker::TrainFiles() {
     }
     ++step;
   }
+  VLOG(0) << "AddAucMonitor cost time=" << monitor_timer.ElapsedSec();
   // sync param step
   if (sync_mode_ > 0) {
     SyncParam();

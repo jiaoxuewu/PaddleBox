@@ -67,7 +67,7 @@ if(WITH_BOX_PS)
   if(WITH_GPU)
     nv_library(
       box_wrapper
-      SRCS box_wrapper.cc box_wrapper.cu box_wrapper_impl.cc metrics.cc
+      SRCS box_wrapper.cc box_wrapper.cu box_wrapper_impl.cc metrics.cc metrics.cu
       DEPS framework_proto lod_tensor box_ps)
   endif()
   if(WITH_ROCM)
@@ -79,7 +79,7 @@ if(WITH_BOX_PS)
   if(WITH_XPU)
   	cc_library(
    	   box_wrapper
-      SRCS box_wrapper.cc box_wrapper_impl.cc metrics.cc
+      SRCS box_wrapper.cc box_wrapper_impl.cc metrics.cc metrics.cu
       DEPS framework_proto lod_tensor box_ps)
   endif()
 else()
@@ -96,7 +96,7 @@ if(WITH_GLOO)
     DEPS framework_proto variable_helper scope gloo)
   cc_library(
     metrics
-    SRCS metrics.cc
+    SRCS metrics.cc metrics.cu
     DEPS gloo_wrapper)
 else()
   cc_library(
@@ -105,7 +105,7 @@ else()
     DEPS framework_proto variable_helper scope)
   cc_library(
     metrics
-    SRCS metrics.cc
+    SRCS metrics.cc metrics.cu
     DEPS gloo_wrapper)
 endif()
 

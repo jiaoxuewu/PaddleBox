@@ -822,13 +822,97 @@ class ContinueMultiMaskMetricMsg : public MetricMsg {
             mask_varvalue_list_[val_idx]) {
           flag = false;
           break;
-        }
+  }
       }
       if (flag) {
         cal->add_unlock_data_with_continue_label(pred_data[ins_idx],
                                                  label_data[ins_idx]);
       }
     }
+  }
+
+ protected:
+  std::vector<int> mask_varvalue_list_;
+  std::vector<std::string> mask_varname_list_;
+  std::string cmatch_rank_varname_;
+};
+
+class GPUContinueMultiMaskMetricMsg : public MetricMsg {
+ public:
+  GPUContinueMultiMaskMetricMsg(const std::string& label_varname,
+                                const std::string& pred_varname,
+                                int metric_phase,
+                                const std::string& mask_varname_list,
+                                const std::string& mask_varvalue_list,
+                                int bucket_size = 1000000,
+                                bool mode_collect_in_gpu = false,
+                                int max_batch_size = 0) {
+    label_varname_ = label_varname;
+    pred_varname_ = pred_varname;
+    mask_varname_list_ = string::split_string(mask_varname_list, " ");
+    const std::vector<std::string> tmp_val_lst =
+        string::split_string(mask_varvalue_list, " ");
+    for (const auto& it : tmp_val_lst) {
+      mask_varvalue_list_.emplace_back(atoi(it.c_str()));
+    }
+    PADDLE_ENFORCE_EQ(
+        mask_varname_list_.size(),
+        mask_varvalue_list_.size(),
+        platform::errors::PreconditionNotMet(
+            "mast var num[%zu] should be equal to mask val num[%zu]",
+            mask_varname_list_.size(),
+            mask_varvalue_list_.size()));
+
+    metric_phase_ = metric_phase;
+    calculator = new BasicAucCalculator(mode_collect_in_gpu);
+    calculator->init(bucket_size);
+  }
+  virtual ~GPUContinueMultiMaskMetricMsg() {}
+  void add_data(const Scope* exe_scope,
+                const paddle::platform::Place& place) override {
+    std::vector<double> value(5);
+    const float* label_data = NULL;
+    int label_len = 0;
+    const float* pred_data = NULL;
+    int pred_len = 0;
+    std::vector<const int64_t*> mask_data_list(mask_varname_list_.size());
+
+    get_data<float>(exe_scope, label_varname_, &label_data, &label_len);
+    get_data<float>(exe_scope, pred_varname_, &pred_data, &pred_len);
+    PADDLE_ENFORCE_EQ(label_len,
+                      pred_len,
+                      platform::errors::PreconditionNotMet(
+                          "the predict data length should be consistent with "
+                          "the label data length"));
+
+    for (size_t name_idx = 0; name_idx < mask_varname_list_.size();
+         ++name_idx) {
+      int mask_len = 0;
+      get_data<int64_t>(exe_scope,
+                        mask_varname_list_[name_idx],
+                        &mask_data_list[name_idx],
+                        &mask_len);
+      PADDLE_ENFORCE_EQ(
+          label_len,
+          mask_len,
+          platform::errors::PreconditionNotMet(
+              "the label data length[%d] should be consistent with "
+              "the mask data[%zu] length",
+              label_len,
+              mask_len));
+    }
+    auto cal = GetCalculator();
+
+    cal->computeThreadValue(label_data,
+                            pred_data,
+                            label_len,
+                            mask_data_list,
+                            mask_varvalue_list_.data(),
+                            mask_varvalue_list_.size(),
+                            value,
+                            place);
+    std::lock_guard<std::mutex> lock(cal->table_mutex());
+    cal->add_unlock_data_with_continue_value(value);
   }
 
  protected:
@@ -1111,6 +1195,16 @@ void BoxWrapper::InitMetric(const std::string& method,
                                                          bucket_size,
                                                          mode_collect_in_gpu,
                                                          max_batch_size));
+  } else if (method == "GPUContinueMultiMaskCalculator") {
+    metric_lists_.emplace(name,
+                          new GPUContinueMultiMaskMetricMsg(label_varname,
+                                                            pred_varname,
+                                                            metric_phase,
+                                                            mask_varname,
+                                                            cmatch_rank_group,
+                                                            bucket_size,
+                                                            mode_collect_in_gpu,
+                                                            max_batch_size));
   } else {
     PADDLE_THROW(platform::errors::Unimplemented(
         "PaddleBox only support AucCalculator, MultiTaskAucCalculator, "
