@@ -323,6 +323,9 @@ void BindDataset(py::module *m) {
       .def("set_need_time_info",
            &framework::Dataset::SetNeedTimeInfo,
            py::call_guard<py::gil_scoped_release>())
+      .def("set_shuffle_and_sort",
+           &framework::Dataset::SetShuffleAndSort,
+           py::call_guard<py::gil_scoped_release>())
       .def("set_train_timestamp_range",
            &framework::Dataset::SetTrainTimestamp,
            py::call_guard<py::gil_scoped_release>())

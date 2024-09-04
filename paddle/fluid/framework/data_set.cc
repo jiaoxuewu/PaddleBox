@@ -235,6 +235,11 @@ void DatasetImpl<T>::SetNeedTimeInfo(bool need_time_info) {
 }
 
 template <typename T>
+void DatasetImpl<T>::SetShuffleAndSort(bool shuffle_and_sort) {
+  shuffle_and_sort_ = shuffle_and_sort;
+}
+
+template <typename T>
 void DatasetImpl<T>::SetTestMode(bool is_test) {
   is_test_ = is_test;
 }
@@ -3004,18 +3009,7 @@ void PadBoxSlotDataset::PreprocessInstance() {
   if (FLAGS_dump_pv_ins) {
     static int index = 0;
     std::string file_name = "pv_ins_" + std::to_string(index++) + ".txt";
-    std::ofstream ofs(file_name);
-    for (size_t i = 0; i < input_pv_ins_.size(); ++i) {
-      if (merge_by_uid_split_method_ == 2) {
-        ofs << "zero_mask_num:" << input_pv_ins_[i]->get_zero_mask_num() << " ";
-      }
-      for (auto ins : input_pv_ins_[i]->ads) {
-        ofs << ins->user_id_sign_ << ":" << ins->user_id_ << ":"
-            << ins->cur_timestamp_ << ":" <<  ins->show_timestamp_ << " ";
-      }
-      ofs << "\n";
-    }
-    ofs.close();
+    dump_pv_ins(file_name);
   }
 }
 // restore
@@ -3133,6 +3127,78 @@ void PadBoxSlotDataset::DynamicAdjustReadersNum(int thread_num) {
   PrepareTrain();
 }
 
+int PadBoxSlotDataset::SortPvInsByPosition(std::vector<size_t>& idxs) {
+  int travel_num = 0;
+  for (size_t i = 1; i < idxs.size(); ++i) {
+    auto idx = idxs[i];
+    auto pv = input_pv_ins_[idx];
+    auto timestamp = pv->ads.back()->show_timestamp_;
+    size_t j = i;
+    while (j > 0 &&
+           timestamp < input_pv_ins_[idxs[j - 1]]->ads.back()->show_timestamp_) {
+      input_pv_ins_[idxs[j]] = input_pv_ins_[idxs[j - 1]];
+      travel_num++;
+      j--;
+    }
+    input_pv_ins_[idxs[j]] = pv;
+  }
+  if (travel_num > 0) {
+    VLOG(0) << "user " << input_pv_ins_[idxs[0]]->ads[0]->user_id_
+            << ", travel pv nums: " << travel_num
+            << ", total ins num: " << idxs.size();
+  }
+  return travel_num;
+}
+
+void PadBoxSlotDataset::dump_pv_ins(std::string file_name){
+    std::ofstream ofs(file_name);
+    for (size_t i = 0; i < input_pv_ins_.size(); ++i) {
+      if (merge_by_uid_split_method_ == 2) {
+        ofs << "zero_mask_num:" << input_pv_ins_[i]->get_zero_mask_num() << " ";
+      }
+      for (auto ins : input_pv_ins_[i]->ads) {
+        ofs << ins->user_id_sign_ << ":" << ins->user_id_ << ":"
+            << ins->cur_timestamp_ << ":" <<  ins->show_timestamp_ << " ";
+      }
+      ofs << "\n";
+    }
+    ofs.close();
+}
+
+void PadBoxSlotDataset::SortPvInsInSameUid(void) {
+  if (input_pv_ins_.empty()) {
+    return;
+  }
+  if (FLAGS_dump_pv_ins) {
+    static int before_shuffle_sort_pv_ins_ = 0;
+    std::string file_name = "before_shuffle_sort_pv_ins_" + std::to_string(before_shuffle_sort_pv_ins_++) + ".txt";
+    dump_pv_ins(file_name);
+  }
+  std::unordered_map<std::string, std::vector<size_t>> uid_2_pvs;
+  // same uid sort by last timestamp(first timestamp may be same, like
+  // [0,0)->[0,256] [0,256)->[256,512]) the number of travel pv
+  int travel_num = 0;
+  for (size_t i = 0; i < input_pv_ins_.size(); ++i) {
+    std::string uid = input_pv_ins_[i]->ads[0]->user_id_;
+    if (uid_2_pvs.find(uid) == uid_2_pvs.end()) {
+      uid_2_pvs[uid] = {i};
+    } else {
+      uid_2_pvs[uid].push_back(i);
+    }
+  }
+  for (auto& uid_pvs : uid_2_pvs) {
+    if (uid_pvs.second.size() > 1) {
+      travel_num += SortPvInsByPosition(uid_pvs.second);
+    }
+  }
+  VLOG(0) << "total travel pv num: " << travel_num;
+  if (FLAGS_dump_pv_ins) {
+    static int shuffle_sort_pv_ins_ = 0;
+    std::string file_name = "shuffle_sort_pv_ins_" + std::to_string(shuffle_sort_pv_ins_++) + ".txt";
+    dump_pv_ins(file_name);
+  }
+}
+
 // prepare train do something
 void PadBoxSlotDataset::PrepareTrain(void) {
   auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
@@ -3147,6 +3213,9 @@ void PadBoxSlotDataset::PrepareTrain(void) {
                    BoxWrapper::LocalRandomEngine());
     }
     // 分数据到各线程里面
+    if (shuffle_and_sort_) {
+      SortPvInsInSameUid();
+    }
 
     if(FLAGS_compute_batch_by_seq_length){
       int batchsize = reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[0].get())

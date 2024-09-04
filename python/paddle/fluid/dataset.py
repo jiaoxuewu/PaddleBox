@@ -129,20 +129,19 @@ class DatasetBase(object):
 
         """
         self.proto_desc.rank_offset = rank_offset
-    
+
     def set_ads_offset(self, ads_offset):
         """
         set ads_offset
         """
         self.proto_desc.ads_offset = ads_offset
-    
 
     def set_ads_cur_timestamp(self, ads_cur_timestamp):
         """
         set ads_cur_timestamp
         """
         self.proto_desc.ads_cur_timestamp = ads_cur_timestamp
-    
+
     def set_ads_show_timestamp(self, ads_show_timestamp):
         """
         set ads_show_timestamp
@@ -465,6 +464,7 @@ class InMemoryDataset(DatasetBase):
             self.merge_by_uid_split_size, self.merge_by_uid_split_train_size)
         self.dataset.set_invalid_users(self.invalid_users)
         self.dataset.set_need_time_info(self.need_time_info)
+        self.dataset.set_shuffle_and_sort(self.shuffle_and_sort)
         self.dataset.set_train_timestamp_range(self.train_timestamp_range)
         self.dataset.set_test_mode(self.test_mode)
         self.dataset.set_test_timestamp_range(self.test_timestamp_range)
@@ -645,19 +645,23 @@ class InMemoryDataset(DatasetBase):
         """
         self.invalid_users = invalid_users
     
-
     def set_need_time_info(self, need_time_info):
         """
         Set need_time_info
         """
         self.need_time_info = need_time_info
-    
+
+    def set_shuffle_and_sort(self, shuffle_and_sort):
+        """
+        Set shuffle_and_sort
+        """
+        self.shuffle_and_sort = shuffle_and_sort
+
     def set_train_timestamp_range(self, train_timestamp_range):
         """
         Set train timestamp range
         """
         self.train_timestamp_range = train_timestamp_range
-
 
     def set_test_mode(self, test_mode):
         """
@@ -1486,6 +1490,7 @@ class PadBoxSlotDataset(BoxPSDataset):
         self.test_mode = False
         self.invalid_users = {""}
         self.need_time_info = False
+        self.shuffle_and_sort = False
         self.train_timestamp_range = (0, 0)
         self.test_timestamp_range = (0, 0)
         self.enable_pv_merge = False
