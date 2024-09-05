@@ -822,7 +822,7 @@ class ContinueMultiMaskMetricMsg : public MetricMsg {
             mask_varvalue_list_[val_idx]) {
           flag = false;
           break;
-  }
+        }
       }
       if (flag) {
         cal->add_unlock_data_with_continue_label(pred_data[ins_idx],

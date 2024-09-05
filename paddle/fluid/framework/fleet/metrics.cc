@@ -200,9 +200,11 @@ void BasicAucCalculator::add_mask_data(const float* d_pred,
   }
 }
 // add float mask data
-void BasicAucCalculator::add_float_mask_data(const float* d_pred,
+void BasicAucCalculator::add_float_mask_data(
+    const float* d_pred,
     const float* d_label,
-                                             const int64_t* d_mask, int batch_size,
+    const int64_t* d_mask,
+    int batch_size,
     const paddle::platform::Place& place) {
   if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
     thread_local std::vector<float> h_pred;
@@ -458,9 +460,10 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
   }
 }
 
+
 void BasicAucCalculator::add_nan_inf_data(const float* d_pred,
-    const int64_t* d_label,
-    int batch_size,
+                                          const int64_t* d_label,
+                                          int batch_size,
                                           const paddle::platform::Place& place){
   if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
     thread_local std::vector<float> h_pred;
@@ -595,7 +598,7 @@ BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
   return {tp, fp, auc};
 }
 
-void BasicAucCalculator::reset_nan_inf(){
+void BasicAucCalculator::reset_nan_inf() {
   _nan_cnt = 0;
   _inf_cnt = 0;
   _nan_rate = 0;
