@@ -42,6 +42,10 @@ DECLARE_bool(dump_pv_ins);
 DECLARE_bool(padbox_dataset_enable_unrollinstance);
 DECLARE_bool(compute_batch_by_seq_length);
 DECLARE_bool(enable_pv_merge_in_update);
+DECLARE_bool(enable_update_filter_ins);
+PADDLE_DEFINE_EXPORTED_bool(enable_update_filter_ins,
+                            false,
+                            "paddle disable ins shuffle ,default false");
 
 PADDLE_DEFINE_EXPORTED_bool(padbox_disable_ins_shuffle,
                             false,
@@ -2392,6 +2396,8 @@ void PadBoxSlotDataset::PreLoadIntoMemory() {
   }
 }
 void PadBoxSlotDataset::WaitPreLoadDone() {
+  VLOG(0) << "passid = " << pass_id_
+          << ", PadBoxSlotDataset::WaitPreLoadDone() begin";
   for (auto& f : wait_futures_) {
     f.get();
   }
@@ -2506,6 +2512,10 @@ void PadBoxSlotDataset::ReleaseMemory() {
     }
     input_pv_ins_.clear();
     input_pv_ins_.shrink_to_fit();
+  }
+  if (!filter_input_records_.empty()) {
+    filter_input_records_.clear();
+    filter_input_records_.shrink_to_fit();
   }
   timeline.Pause();
   VLOG(1) << "DatasetImpl<T>::ReleaseMemory() end, cost time="
@@ -2835,6 +2845,10 @@ void PadBoxSlotDataset::PreprocessInstance() {
     }
     input_pv_ins_.clear();
   }
+  if (!filter_input_records_.empty()){
+    // same memeory as input_records_
+    filter_input_records_.clear();
+  }
 
   size_t all_records_num = input_records_.size();
   if (merge_by_uid_){
@@ -2933,6 +2947,21 @@ void PadBoxSlotDataset::PreprocessInstance() {
       input_pv_ins_.push_back(pv_instance);
     }
   }
+  
+  if (FLAGS_enable_update_filter_ins){
+    for (size_t i = 0; i < all_records_num; ++i) {
+      auto& ins = input_records_[i];
+      if (!is_test_ && 
+          ins->show_timestamp_ >= train_timestamp_range_.first &&
+          ins->show_timestamp_ < train_timestamp_range_.second ||
+          is_test_ && 
+          ins->show_timestamp_ >= test_timestamp_range_.first &&
+          ins->show_timestamp_ < test_timestamp_range_.second) {
+        filter_input_records_.push_back(ins);
+      }
+    }
+  }
+
   if (!is_test_ &&
       train_timestamp_range_.second > train_timestamp_range_.first &&
       train_timestamp_range_.first > 0) {
@@ -3162,9 +3191,15 @@ void PadBoxSlotDataset::PrepareTrain(void) {
     }
   } else {
     if (!FLAGS_padbox_disable_ins_shuffle) {
-      std::shuffle(input_records_.begin(),
-                   input_records_.end(),
-                   BoxWrapper::LocalRandomEngine());
+      if (FLAGS_enable_update_filter_ins) {
+        std::shuffle(filter_input_records_.begin(),
+                     filter_input_records_.end(),
+                     BoxWrapper::LocalRandomEngine());
+      } else {
+        std::shuffle(input_records_.begin(),
+                     input_records_.end(),
+                     BoxWrapper::LocalRandomEngine());
+      }
     }
     // 分数据到各线程里面
     int batchsize = reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[0].get())
@@ -3175,7 +3210,11 @@ void PadBoxSlotDataset::PrepareTrain(void) {
       SlotPaddleBoxDataFeed* feed =
           reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[i].get());
       feed->SetEnablePvMerge(false);
-      feed->SetSlotRecord(&input_records_[0]);
+      if (FLAGS_enable_update_filter_ins) {
+        feed->SetSlotRecord(&filter_input_records_[0]);
+      } else {
+        feed->SetSlotRecord(&input_records_[0]);
+      }
       feed->SetNeedTimeInfo(need_time_info_);
     }
     for (size_t i = 0; i < offset.size(); ++i) {

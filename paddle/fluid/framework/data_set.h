@@ -39,6 +39,7 @@ DECLARE_int32(padbox_max_shuffle_wait_count);
 DECLARE_bool(enable_shuffle_by_searchid);
 DECLARE_bool(padbox_dataset_disable_shuffle);
 DECLARE_bool(padbox_dataset_disable_polling);
+DECLARE_bool(enable_update_filter_ins);
 namespace boxps {
 class PSAgentBase;
 }
@@ -317,7 +318,12 @@ class DatasetImpl : public Dataset {
   }
   Channel<T>& GetInputChannelRef() { return input_channel_; }
   // aucrunner need
-  virtual std::vector<T>& GetInputRecord() { return input_records_; }
+  virtual std::vector<T>& GetInputRecord() { 
+    if (FLAGS_enable_update_filter_ins){
+        return filter_input_records_;
+    }
+    return input_records_; 
+  }
   // disable shuffle
   virtual void SetDiablePolling(bool disable) {}
   virtual void SetDisableShuffle(bool disable) {}
@@ -390,6 +396,7 @@ class DatasetImpl : public Dataset {
   int64_t global_index_ = 0;
   std::vector<std::shared_ptr<ThreadPool>> consume_task_pool_;
   std::vector<T> input_records_;  // only for paddleboxdatafeed
+  std::vector<T> filter_input_records_;  // only for paddleboxdatafeed
   std::vector<std::string> use_slots_;
   bool enable_heterps_ = false;
   int gpu_graph_mode_ = 0;
@@ -495,6 +502,9 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   virtual int64_t GetMemoryDataSize() {
     if (input_records_.empty()) {
       return total_ins_num_;
+    }
+    if (FLAGS_enable_update_filter_ins) {
+      return filter_input_records_.size();
     }
     return input_records_.size();
   }
