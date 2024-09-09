@@ -269,13 +269,13 @@ XPUVersion get_xpu_version(int dev_id) {
   PADDLE_ENFORCE_XPU_SUCCESS(xpu_device_get_attr(&v, XPUATTR_MODEL, dev_id));
 
   if (v == K100 || v == K200) {
-    VLOG(4) << "KUNLUN device " << dev_id << " is XPU1\n";
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU1\n";
     return XPU1;
   } else if (v < KL3_BEGIN) {
-    VLOG(4) << "KUNLUN device " << dev_id << " is XPU2\n";
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU2\n";
     return XPU2;
   } else {
-    VLOG(4) << "KUNLUN device " << dev_id << " is XPU3\n";
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU3\n";
     return XPU3;
   }
 }

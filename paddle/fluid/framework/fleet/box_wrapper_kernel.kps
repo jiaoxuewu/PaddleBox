@@ -935,7 +935,7 @@ __global__ void PullCopy(const TEmbedxOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int total_local_mem = 7000;
+  const int total_local_mem = 6500;
   const int buf_length = total_local_mem / ((hidden_size + pull_float_num + 3) * 4);
   int per_thread_len = roundup_div(total_length, nthreads);
   int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
@@ -1017,7 +1017,7 @@ __global__ void PullCopyMerged(const TEmbedxOp* op,
   int thread_id = cluster_id() * ncores + cid;
   int nthreads = cluster_num() * ncores;
 
-  const int total_local_mem = 7000;
+  const int total_local_mem = 6500;
   const int buf_length = total_local_mem / ((hidden_size + pull_float_num + 3) * 4);
   const int same_key_idx_buf_len = buf_length;
   int per_thread_len = roundup_div(merged_length, nthreads);
@@ -1129,7 +1129,7 @@ inline void FeaturePullCopy(const paddle::platform::Place& place,
     }
   }
   
-  CHECK(7000/ ((hidden_size + pull_float_num + 3)*4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " pull_float_num " << pull_float_num;
+  CHECK(6500 / ((hidden_size + pull_float_num + 3) * 4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " pull_float_num " << pull_float_num;
   if (xpu_merged_idx == nullptr) {
     PullCopy<TEmbedxOp><<<8, 64, stream>>>(d_op,
                                   scale,
@@ -1757,7 +1757,7 @@ __global__ void PushCopy(unsigned long long* src_vals,
     int nthreads = cluster_num() * ncores;
 
     //const int buf_length = 40; // max 2048 float
-    const int total_local_mem = 7000;
+    const int total_local_mem = 6500;
     const int buf_length = total_local_mem / ((hidden_size + push_float_num + 3) * 4);
     int per_thread_len = roundup_div(total_length, nthreads);
     int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
@@ -1921,7 +1921,7 @@ void BoxWrapperKernel::CopyForPush(
     CHECK(false) << "FeaturePushCopyVariable not implement";
   } else {
     // FeaturePushCopy
-    CHECK(7000/ ((hidden_size + push_float_num + 3)*4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " push_float_num " << push_float_num;
+    CHECK(6500 / ((hidden_size + push_float_num + 3) * 4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " push_float_num " << push_float_num;
     PushCopy<<<8, 64, stream>>>(reinterpret_cast<unsigned long long*>(gm_src_ptr), push_grad_values, push_offset,
         push_float_num_, c_total_length, hidden_size, batch_size, total_dims,
         skip_offset, cvm_offset, key2slot, slots, slot_num);
