@@ -60,7 +60,7 @@ class BasicAucCalculator {
   void reset();
   // add single data in CPU with LOCK, deprecated
   void add_unlock_data(double pred, int label);
-  void add_unlock_data(double pred, int label, float sample_scale);
+  void add_unlock_data_with_sample(double pred, int label, float sample_scale);
   void add_unlock_data_with_float_label(double pred, double label);
   void add_unlock_data_with_continue_label(double pred, double label);
   void add_nan_inf_unlock_data(float pred, int label);

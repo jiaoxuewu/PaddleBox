@@ -1173,6 +1173,9 @@ void BoxPSWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
         }
         str_os << "]";
       }
+      if (sync_points_.find(op.get()) != sync_points_.end()) {
+        str_os << ", sync point";
+      }
       str_os << "\n";
     }
     auto box_ptr = BoxWrapper::GetInstance();

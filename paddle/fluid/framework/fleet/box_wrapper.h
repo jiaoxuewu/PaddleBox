@@ -47,6 +47,7 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/string/string_helper.h"
+#include "paddle/phi/common/data_type.h"
 #define BUF_SIZE 1024 * 1024
 
 DECLARE_bool(padbox_auc_runner_mode);
@@ -327,6 +328,11 @@ class MetricMsg {
         true,
         platform::errors::InvalidArgument(
             "Error: monitor var `%s` uninitialized Tensor.", varname.c_str()));
+    PADDLE_ENFORCE_EQ(
+        paddle::experimental::SizeOf(gpu_tensor.dtype()),
+        sizeof(T),
+        platform::errors::InvalidArgument(
+            "Error: monitor var `%s` type error.", varname.c_str()));
     *data = gpu_tensor.data<T>();
     *len = gpu_tensor.numel();
   }
@@ -345,6 +351,11 @@ class MetricMsg {
         true,
         platform::errors::InvalidArgument(
             "Error: monitor var `%s` uninitialized Tensor.", varname.c_str()));
+    PADDLE_ENFORCE_EQ(
+        paddle::experimental::SizeOf(gpu_tensor.dtype()),
+        sizeof(T),
+        platform::errors::InvalidArgument(
+            "Error: monitor var `%s` type error.", varname.c_str()));
     auto* gpu_data = gpu_tensor.data<T>();
     auto len = gpu_tensor.numel();
     data->resize(len);
