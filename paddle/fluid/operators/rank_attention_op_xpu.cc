@@ -57,7 +57,7 @@ class RankAttention2XPUKernel : public framework::OpKernel<T> {
 
         T* out_data = Out->mutable_data<T>(ctx.GetPlace());
 
-        int ret = xpu::rank_attention2<T>(dev_ctx.x_context(), ins_num, x_fea_dim, X->data<T>(),
+        int ret = baidu::xpu::xctr::rank_attention2<T>(dev_ctx.x_context(), ins_num, x_fea_dim, X->data<T>(),
                                           max_rank, rank_offset->data<int>(), para_row, para_col,
                                           param->data<T>(), out_data);
         PADDLE_ENFORCE_EQ(
@@ -93,7 +93,7 @@ class RankAttention2GradXPUKernel : public framework::OpKernel<T> {
         T* drank_para_ptr = drank_para->mutable_data<T>(ctx.GetPlace());
         phi::funcs::set_constant(dev_ctx, drank_para, 0.0);
 
-        int ret = xpu::rank_attention2_grad<T>(
+        int ret = baidu::xpu::xctr::rank_attention2_grad<T>(
             dev_ctx.x_context(), para_row, para_col, drank_para_ptr, ins_num, x_fea_dim,
             X->data<T>(), max_rank, rank_offset->data<int>(), dout->data<T>());
         PADDLE_ENFORCE_EQ(
