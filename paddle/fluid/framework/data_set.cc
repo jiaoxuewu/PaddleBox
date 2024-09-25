@@ -41,6 +41,7 @@ DECLARE_bool(graph_get_neighbor_id);
 DECLARE_bool(dump_pv_ins);
 DECLARE_bool(padbox_dataset_enable_unrollinstance);
 DECLARE_bool(compute_batch_by_seq_length);
+DECLARE_int32(pv_max_batch_size);
 DECLARE_bool(enable_pv_merge_in_update);
 DECLARE_bool(enable_update_filter_ins);
 PADDLE_DEFINE_EXPORTED_bool(enable_update_filter_ins,
@@ -59,6 +60,11 @@ PADDLE_DEFINE_EXPORTED_bool(compute_batch_by_seq_length,
 PADDLE_DEFINE_EXPORTED_bool(enable_pv_merge_in_update,
     false,
     "paddle compute batch by seq length, default false");
+
+PADDLE_DEFINE_EXPORTED_int32(
+    pv_max_batch_size,
+    -1,
+    "paddle compute batch by pv_size and max_batch_size, -1 means no work");
 namespace paddle {
 namespace framework {
 
@@ -435,14 +441,19 @@ static void compute_pv_batch_num(const std::vector<int>& pv_length_vec,
                                  const int max_seq_length,
                                  const int batch_size,
                                  const int thread_num,
-                                 std::vector<std::pair<int, int>>* offset) {
+                                 std::vector<std::pair<int, int>>* offset,
+                                 const int pv_size) {
   if (pv_length_vec.size() == 0) {
     return;
   }
   int batch_ins_num = 0;
   offset->push_back({0, 1});
   for (size_t i = 1; i < pv_length_vec.size(); ++i) {
-    if (batch_ins_num + pv_length_vec[i] < batch_size) {
+    if (FLAGS_pv_max_batch_size > 0 &&
+            batch_ins_num + pv_length_vec[i] < FLAGS_pv_max_batch_size &&
+            offset->back().second < pv_size ||
+        FLAGS_pv_max_batch_size <= 0 &&
+            batch_ins_num + pv_length_vec[i] < batch_size) {
       offset->back().second += 1;
       batch_ins_num += pv_length_vec[i];
     } else {
@@ -456,7 +467,7 @@ static void compute_pv_batch_num(const std::vector<int>& pv_length_vec,
     int offset_split_index = static_cast<int>(offset->size() - 1);
     int split_left_num =
         total_instance_num - offset->at(offset_split_index).first;
-    while (split_left_num < need_batch_num) {
+    while (split_left_num < need_batch_num || offset_split_index % thread_num != 0) {
       need_batch_num += 1;
       offset_split_index -= 1;
       split_left_num =
@@ -3041,7 +3052,8 @@ static int compute_paddlebox_thread_pv_batch_nccl(
     const std::vector<int>& seq_length_vec,
     const int max_seq_lenth,
     const int minibatch_size,
-    std::vector<std::pair<int, int>>* nccl_offsets) {
+    std::vector<std::pair<int, int>>* nccl_offsets,
+    const int pv_size) {
   int thread_avg_batch_num = 0;
   if (seq_length_vec.size() < static_cast<size_t>(thr_num)) {
     LOG(WARNING) << "compute_paddlebox_thread_pv_batch_nccl total ins num:["
@@ -3052,7 +3064,7 @@ static int compute_paddlebox_thread_pv_batch_nccl(
 
   auto& offset = (*nccl_offsets);
   // split data avg by thread num
-  compute_pv_batch_num(seq_length_vec, max_seq_lenth, minibatch_size, thr_num, &offset);
+  compute_pv_batch_num(seq_length_vec, max_seq_lenth, minibatch_size, thr_num, &offset, pv_size);
   thread_avg_batch_num = static_cast<int>(offset.size() / thr_num);
   const int total_instance_num = seq_length_vec.size();
   return nccl_batch(thread_avg_batch_num, total_instance_num, thr_num, offset);
@@ -3217,15 +3229,17 @@ void PadBoxSlotDataset::PrepareTrain(void) {
       SortPvInsInSameUid();
     }
 
-    if(FLAGS_compute_batch_by_seq_length){
+    if(FLAGS_compute_batch_by_seq_length || FLAGS_pv_max_batch_size > 0){
       int batchsize = reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[0].get())
               ->GetBatchSize();
+      int pv_size = reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[0].get())
+              ->GetPvBatchSize();
       std::vector<int> pv_length_vec(input_pv_ins_.size());
       for(size_t i = 0; i < input_pv_ins_.size(); ++i){
         pv_length_vec[i] = input_pv_ins_[i]->ads.size();
       }
       compute_paddlebox_thread_pv_batch_nccl(
-          thread_num_, pv_length_vec, merge_by_uid_split_size_, batchsize, &offset);
+          thread_num_, pv_length_vec, merge_by_uid_split_size_, batchsize, &offset, pv_size);
     } else {
       int batchsize = reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[0].get())
               ->GetPvBatchSize();
