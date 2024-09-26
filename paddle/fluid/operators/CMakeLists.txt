@@ -105,7 +105,8 @@ set(OP_HEADER_DEPS ${OP_HEADER_DEPS} phi phi_api_utils gather_scatter_kernel bac
 
 if(WITH_XPU)
     xpu_library(batch_fc_kernel
-              SRCS batch_fc_kernel.h batch_fc_kernel.kps)
+              SRCS batch_fc_kernel.h batch_fc_kernel.kps
+              DEPS resnet_unit_op)
     register_operators(EXCLUDES py_layer_op py_func_op warpctc_op dgc_op load_combine_op lstm_op run_program_op eye_op quantize_linear_op
               recurrent_op save_combine_op sparse_attention_op sync_batch_norm_op spectral_op ${OP_MKL_DEPS} DEPS ${OP_HEADER_DEPS} batch_fc_kernel)
 else()

@@ -381,8 +381,8 @@ void BasicAucCalculator::compute() {
                  << ", sqr: " << _local_sqrerr;
   }
 
-  PADDLE_ENFORCE_EQ(total_ins_num,
-                    _size,
+  PADDLE_ENFORCE_LT(abs(total_ins_num - _size),
+                    0.5,
                     platform::errors::InvalidArgument(
                       "The table ins num not equal real total num."));
   calculate_bucket_error(table[0], table[1]);
