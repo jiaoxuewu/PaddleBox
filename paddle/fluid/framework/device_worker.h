@@ -916,7 +916,6 @@ protected:
   virtual void DumpField(const Scope& scope,
                          int dump_mode,
                          int dump_interval = 10000);
-
  private:
   void OpenDump(const int &tid);
   void WriteDump(const int &tid, const std::string& buf);

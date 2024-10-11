@@ -25,6 +25,11 @@
 #endif
 
 #if defined(PADDLE_WITH_PSLIB) || defined(PADDLE_WITH_PSCORE) || defined(PADDLE_WITH_BOX_PS)
+
+PADDLE_DEFINE_EXPORTED_bool(enable_debug_print_metrics_info,
+                            false,
+                            "enable debug print metrics info, default false");
+
 namespace paddle {
 namespace framework {
 
@@ -39,11 +44,13 @@ void BasicAucCalculator::add_unlock_data(double pred, int label) {
       platform::errors::PreconditionNotMet(
           "label must be equal to 0 or 1, but its value is: %d", label));
 
-  int pos = static_cast<int>(pred * _table_size);
+  int pos = std::min(static_cast<int>(pred * _table_size), _table_size - 1);
   _local_abserr += fabs(pred - label);
   _local_sqrerr += (pred - label) * (pred - label);
   _local_pred += pred;
-  ++_table[label][pos];
+  _local_label += label;
+  _table[label][pos] += 1.0;
+  _local_total_num += 1.0;
 }
 
 void BasicAucCalculator::add_unlock_data(double pred, int label, float sample_scale) {
@@ -54,12 +61,14 @@ void BasicAucCalculator::add_unlock_data(double pred, int label, float sample_sc
   PADDLE_ENFORCE_EQ(label * label, label,
       platform::errors::PreconditionNotMet(
           "label must be equal to 0 or 1, but its value is: %d", label));
-
-  int pos = static_cast<int>(pred * _table_size);
+          
+  int pos = std::min(static_cast<int>(pred * _table_size), _table_size - 1);
   _local_abserr += fabs(pred - label);
   _local_sqrerr += (pred - label) * (pred - label);
   _local_pred += pred * sample_scale;
+  _local_label += label;
   _table[label][pos] += sample_scale;
+  _local_total_num += sample_scale;
 }
 
 void BasicAucCalculator::add_unlock_data_with_float_label(double pred, double label) {
@@ -68,7 +77,7 @@ void BasicAucCalculator::add_unlock_data_with_float_label(double pred, double la
   PADDLE_ENFORCE_LE(pred, 1.0, platform::errors::PreconditionNotMet(
                                    "pred should be lower than 1"));
 
-  int pos = static_cast<int>(pred * _table_size);
+  int pos = std::min(static_cast<int>(pred * _table_size), _table_size - 1);
   PADDLE_ENFORCE_GE(
       pos, 0,
       platform::errors::PreconditionNotMet(
@@ -80,8 +89,10 @@ void BasicAucCalculator::add_unlock_data_with_float_label(double pred, double la
   _local_abserr += fabs(pred - label);
   _local_sqrerr += (pred - label) * (pred - label);
   _local_pred += pred;
+  _local_label += label;
   _table[0][pos] += 1 - label;
   _table[1][pos] += label;
+  _local_total_num += 1.0;
 }
 
 void BasicAucCalculator::add_unlock_data_with_continue_label(double pred,
@@ -90,7 +101,7 @@ void BasicAucCalculator::add_unlock_data_with_continue_label(double pred,
   _local_sqrerr += (pred - label) * (pred - label);
   _local_pred += pred;
   _local_label += label;
-  ++_local_total_num;
+  _local_total_num += 1.0;
 }
 
 void BasicAucCalculator::add_nan_inf_unlock_data(float pred, int label){
@@ -324,38 +335,56 @@ void BasicAucCalculator::compute() {
     fp = newfp;
     tp = newtp;
   }
-
   if (fp < 1e-3 || tp < 1e-3) {
     _auc = -0.5;  // which means all nonclick or click
   } else {
     _auc = area / (fp * tp);
   }
-
+  double total_ins_num = _local_total_num;
   if (node_size > 1) {
 #ifdef PADDLE_WITH_BOX_PS
     // allreduce sum
-    double local_err[3] = {_local_abserr, _local_sqrerr, _local_pred};
-    boxps::MPICluster::Ins().allreduce_sum(local_err, 3);
+    double local_err[5] = {
+      _local_abserr, _local_sqrerr, _local_pred, _local_label, _local_total_num};
+    boxps::MPICluster::Ins().allreduce_sum(local_err, 5);
 #elif defined(PADDLE_WITH_GLOO)
     // allreduce sum
-    std::vector<double> local_err_temp{_local_abserr, _local_sqrerr, _local_pred};
+    std::vector<double> local_err_temp{
+      _local_abserr, _local_sqrerr, _local_pred, _local_label, _local_total_num};
     auto local_err = gloo_wrapper->AllReduce(local_err_temp, "sum");
 #else
     // allreduce sum
-    double local_err[3] = {_local_abserr, _local_sqrerr, _local_pred};
+    double local_err[5] = {
+      _local_abserr, _local_sqrerr, _local_pred, _local_label, _local_total_num};
 #endif
     _mae = local_err[0] / (fp + tp);
     _rmse = sqrt(local_err[1] / (fp + tp));
     _predicted_ctr = local_err[2] / (fp + tp);
+    total_ins_num = local_err[4];
   } else {
     _mae = _local_abserr / (fp + tp);
     _rmse = sqrt(_local_sqrerr / (fp + tp));
     _predicted_ctr = _local_pred / (fp + tp);
   }
   _actual_ctr = tp / (fp + tp);
-
   _size = fp + tp;
 
+  // add debug info print
+  if (FLAGS_enable_debug_print_metrics_info) {
+    LOG(WARNING) << "total ins num: " << total_ins_num 
+                 << ", local ins num: " << _local_total_num 
+                 << ", fp: " << fp
+                 << ", tp: " << tp
+                 << ", label: " << _local_label
+                 << ", pred: " << _local_pred
+                 << ", abs: " << _local_abserr 
+                 << ", sqr: " << _local_sqrerr;
+  }
+
+  PADDLE_ENFORCE_LT(abs(total_ins_num - _size),
+                    0.5,
+                    platform::errors::InvalidArgument(
+                      "The table ins num not equal real total num."));
   calculate_bucket_error(table[0], table[1]);
 }
 
