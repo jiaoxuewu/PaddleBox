@@ -1,3 +1,5 @@
+#include <type_traits>
+
 #include "xpu/kernel/xtdk.h"  // NOLINT
 #include "xpu/kernel/xtdk_math.h"            // NOLINT
 #include "xpu/kernel/xtdk_simd.h"
@@ -24,713 +26,398 @@ static __device__ inline void memset_value_float(float* lm, int size, float valu
     mfence_lm();
 }
 
-// normal
-// need_filter:false && quant_ratio_valid:false
-template <typename T, bool need_filter, bool embed_threshold_filter,
-            bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
-struct pooling_engine {
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
+// filter
+template <typename T, bool need_filter, typename std::enable_if<need_filter, int>::type = 0>
+static __device__ inline bool do_filter(const T* local_x, float show_coeff, float clk_coeff, float threshold) {
+    auto &show = local_x[0];
+    auto &click = local_x[1];
 
-            float32x16_t v_src1 = vload_lm_float32x16(local_x);
-            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
-            float32x16_t v_dst1 = vload_lm_float32x16(sum);
-            float32x16_t v_dst2 = vload_lm_float32x16(sum + 16);
-            v_dst1 = vvadd_float32x16(v_src1, v_dst1);
-            v_dst2 = vvadd_float32x16(v_src2, v_dst2);
-            vstore_lm_float32x16(sum, v_dst1);
-            vstore_lm_float32x16(sum + 16, v_dst2);
-        }
+    if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+        return true;
     }
-};
+    return false;
+}
 
-// normal
-// need_filter:false && quant_ratio_valid:false
-template <typename T, bool need_filter, bool embed_threshold_filter,
-            bool embedx_concate_filter, bool quant_ratio_valid, typename T2>
+// no filter
+template <typename T, bool need_filter, typename std::enable_if<!need_filter, int>::type = 0>
+static __device__ inline bool do_filter(const T* local_x, float show_coeff, float clk_coeff, float threshold) {
+    return false;
+}
+
+// embed_threshold_filter
+template <typename T, bool embed_theshold_filter, typename std::enable_if<embed_theshold_filter, int>::type = 0>
+static __device__ inline bool do_embed_threshold_filter(const T* local_x, int cvm_offset, int dim, 
+                                                        int embed_thres_size, float embed_threshold) {
+    auto &embedw = local_x[cvm_offset]; 
+    auto embedx_weight_score = 0.0; 
+    
+    int embed_thres_size_ = embed_thres_size; 
+    if (embed_thres_size == 0) { 
+        embed_thres_size_ = dim - cvm_offset; 
+    } 
+    
+    for (int cvm_i = cvm_offset + 1; cvm_i < cvm_offset + embed_thres_size_; cvm_i++) { 
+        embedx_weight_score += local_x[cvm_i] * local_x[cvm_i];
+        // pow(fabs(local_x[cvm_i]), 2); 
+    } 
+    embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw); 
+    if (embedx_weight_score < embed_threshold) { 
+        return true;
+    }
+    return false;
+}
+
+// no embed_threshold_filter
+template <typename T, bool embed_theshold_filter, typename std::enable_if<!embed_theshold_filter, int>::type = 0>
+static __device__ inline bool do_embed_threshold_filter(const T* local_x, int cvm_offset, int dim, 
+                                                        int embed_thres_size, float embed_threshold) {
+    return false;
+}
+
+// sum & quant
+template <bool quant_valid, typename std::enable_if<quant_valid, int>::type = 0>
+static __device__ inline void do_vec_sum(const float32x16_t & v_src1, const float32x16_t & v_src2, 
+                                         float32x16_t & v_dst1, float32x16_t & v_dst2, 
+                                         float32x16_t & v_scale, int quant_ratio, float quant_ratio_reciprocal, 
+                                         int valid_len) {
+    
+    float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
+    float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
+    __simd__ float lm_float[32];
+    vstore_lm_float32x16(lm_float, v_temp1);
+    vstore_lm_float32x16(lm_float + 16, v_temp2);
+    mfence_lm();
+    // static_cast<int>
+    for(int r = 0; r < valid_len; r++){
+        lm_float[r] = (float)(int(lm_float[r]));
+    }
+    mfence_lm();
+    v_temp1 = vload_lm_float32x16(lm_float);
+    v_temp2 = vload_lm_float32x16(lm_float + 16);
+
+    v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
+    v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
+}
+
+// sum not quant
+template <bool quant_valid, typename std::enable_if<!quant_valid, int>::type = 0>
+static __device__ inline void do_vec_sum(const float32x16_t & v_src1, const float32x16_t & v_src2, 
+                                         float32x16_t & v_dst1, float32x16_t & v_dst2,
+                                         float32x16_t &v_scale, int quant_ratio, float quant_ratio_reciprocal, 
+                                         int valid_len) {
+    v_dst1 = vvadd_float32x16(v_src1, v_dst1);
+    v_dst2 = vvadd_float32x16(v_src2, v_dst2);
+}
+
+
+// quant for copy (concat only)
+template <bool quant_valid, typename std::enable_if<quant_valid, int>::type = 0>
+static __device__ inline void do_vec_quant(float32x16_t & v_src1, float32x16_t & v_src2, 
+                                           float32x16_t & v_scale, int quant_ratio, float quant_ratio_reciprocal,
+                                           int valid_len) {
+
+    float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
+    float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
+    __simd__ float lm_float[32];
+    vstore_lm_float32x16(lm_float, v_temp1);
+    vstore_lm_float32x16(lm_float + 16, v_temp2);
+    mfence_lm();
+
+    for(int r = 0; r < valid_len; r++) {
+        lm_float[r] = (float)(int(lm_float[r]));
+    }
+
+    mfence_lm();
+    v_src1 = vload_lm_float32x16(lm_float);
+    v_src2 = vload_lm_float32x16(lm_float + 16);
+    // local_result = v_temp1 / static_cast<float>(quant_ratio)
+    v_src1 = vvmul_float32x16(quant_ratio_reciprocal, v_src1);
+    v_src2 = vvmul_float32x16(quant_ratio_reciprocal, v_src2);
+}
+
+template <bool quant_valid, typename std::enable_if<!quant_valid, int>::type = 0>
+static __device__ inline void do_vec_quant(float32x16_t & v_src1, float32x16_t & v_src2, 
+                                           float32x16_t &v_scale, int quant_ratio, float quant_ratio_reciprocal, 
+                                           int valid_len) {
+    // do nothing
+}
+
+// convert cvm type interger to float
+template <typename T, typename T2, bool use_cvm, typename std::enable_if<use_cvm, int>::type = 0>
+static __device__ inline void convert_cvm_type(const T2* sum_show_clk, T* sum, int cvm_offset) {
+    mfence_lm();
+    // cvm_offset = [0, 2]
+    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+        sum[cvm_i] = static_cast<T>(sum_show_clk[cvm_i]);
+    }
+}
+
+template <typename T, typename T2, bool use_cvm, typename std::enable_if<!use_cvm, int>::type = 0>
+static __device__ inline void convert_cvm_type(const T2* sum_show_clk, T* sum, int cvm_offset) {
+    // no use cvm, do nothing
+}
+
+// cvm sum (no concat)
+template <typename T, typename T2, bool use_cvm, typename std::enable_if<use_cvm, int>::type = 0>
+static __device__ inline void cvm_sum(
+        const T* local_x, T2* sum_show_clk, int cvm_offset) {
+    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
+        sum_show_clk[cvm_i] += local_x[cvm_i];
+    }
+}
+
+// no need cvm sum (no concat)
+template <typename T, typename T2, bool use_cvm, typename std::enable_if<!use_cvm, int>::type = 0>
+static __device__ inline void cvm_sum(
+        const T* local_x, T2* sum_show_clk, int cvm_offset) {
+    // do nothing
+}
+
+/**
+ * cvm_post_process: handle showclk and copy to dst(LM2GM), no concat only
+ */
+// use_cvm = false
+template <typename T, bool use_cvm, bool show_filter, 
+          typename std::enable_if<!use_cvm, int>::type = 0>
+static __device__ inline void cvm_post_process(
+        T* sum_result, int seqid, int out_dim_size, int dim_start_offset,
+        bool fix_ctr_to_click, __global_ptr__ T* cur_y) {
+    mfence();
+    LM2GM_ASYNC(sum_result + dim_start_offset, cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
+    mfence();
+}
+
+// use_cvm = true, show_filter = true
+template <typename T, bool use_cvm, bool show_filter, 
+          typename std::enable_if<use_cvm, int>::type = 0, 
+          typename std::enable_if<show_filter, int>::type = 0>
+static __device__ inline void cvm_post_process(
+        T* sum_result, int seqid, int out_dim_size, int dim_start_offset,
+        bool fix_ctr_to_click, __global_ptr__ T* cur_y) {
+    // show, skip clk(mv show pos to clk)
+    sum_result[dim_start_offset] = (float)log(sum_result[0] + 1);
+    mfence();
+    LM2GM_ASYNC(&sum_result[dim_start_offset], cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
+    mfence();
+}
+
+// use_cvm = true, show_filter = false
+template <typename T, bool use_cvm, bool show_filter, 
+          typename std::enable_if<use_cvm, int>::type = 0, 
+          typename std::enable_if<!show_filter, int>::type = 0>
+static __device__ inline void cvm_post_process(T* sum_result, int seqid, int out_dim_size, int dim_start_offset,
+                                                bool fix_ctr_to_click, __global_ptr__ T* cur_y) {
+
+    sum_result[0] = (T)log(sum_result[0] + 1);
+    // log(show + 1)
+    if (fix_ctr_to_click) {
+        sum_result[1] = (T)log(sum_result[1] + 1);
+    } else {
+        sum_result[1] = (T)log(sum_result[1] + 1) - sum_result[0];
+    }
+    
+    mfence();
+    LM2GM_ASYNC(sum_result, cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
+    mfence();
+}
+
+
+// concat cvm_engine
+template <typename T, bool use_cvm, bool show_filter,
+          typename std::enable_if<use_cvm, int>::type = 0,
+          typename std::enable_if<!show_filter, int>::type = 0>
+static __device__ inline void cvm_calculate(T* cvm_input, T* cvm_dst, int cvm_offset, bool fix_ctr_to_click) {
+    cvm_dst[0] = (T)log(cvm_input[0] + 1); // log(show)
+
+    if (fix_ctr_to_click) {
+        cvm_dst[1] = (T)log(cvm_input[1] + 1); // log(clk)
+    } else {
+        cvm_dst[1] = (T)log(cvm_input[1] + 1) - cvm_dst[0]; // ctr: log(clk) - log(show)
+    }
+}
+
+// cvm (show only)
+template <typename T, bool use_cvm, bool show_filter,
+          typename std::enable_if<use_cvm, int>::type = 0,
+          typename std::enable_if<show_filter, int>::type = 0>
+static __device__ inline void cvm_calculate(T* cvm_input, T* cvm_dst, int cvm_offset, bool fix_ctr_to_click) {
+    // skip_clk
+    cvm_dst[1] = (T)log(cvm_input[0] + 1);
+}
+
+// no cvm
+template <typename T, bool use_cvm, bool show_filter,
+          typename std::enable_if<!use_cvm, int>::type = 0>
+static __device__ inline void cvm_calculate(T* cvm_input, T* cvm_dst, int cvm_offset, bool fix_ctr_to_click) {
+    // do nothing
+}
+
+// fill with padding_val
+template <typename T>
+static __device__ inline void fill_with_padding_val(T* local_result, int local_result_len, float padding_value, 
+                                                    __global_ptr__ T* fill_start_y, int total_fill_len) {
+    // int total_fill_len = (embedx_concate_size - concate_index) * out_dim_size;
+    if (total_fill_len <= 0) {
+        return;
+    }
+
+    memset_value_float(local_result, local_result_len, padding_value);
+    
+    for (int i = 0; i < total_fill_len; i += local_result_len) {
+        int fill_len = min(total_fill_len - i, local_result_len);
+        LM2GM_ASYNC(local_result, fill_start_y + i, fill_len * sizeof(T));
+        mfence();            
+    }
+}
+
+// =============== pooling engine (no concat / concat)===============
+template <typename T, bool use_cvm, bool need_filter, bool embed_threshold_filter, bool show_filter,
+            bool embedx_concate_filter, bool quant_ratio_valid, typename T2> 
 struct pooling_engine_with_large_dim {
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-
-            for(int k = 0; k < dim ; k += 32){
-                float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
-                float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
-                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
-                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
-                v_dst1 = vvadd_float32x16(v_src1, v_dst1);
-                v_dst2 = vvadd_float32x16(v_src2, v_dst2);
-                vstore_lm_float32x16(sum + k, v_dst1);
-                vstore_lm_float32x16(sum + k + 16, v_dst2);
-            }
-        }
-    }
+    // Use specialized template
 };
 
-// embed quant filter
-// quant_ratio_valid:true && need_filter:true && embed_threshold_filter:true && embedx_concate_filter:false
-template <typename T, typename T2>
-struct pooling_engine<T, true, true, false, true, T2>{
+// no concat pooling engine with large dim
+template <typename T, bool use_cvm, bool need_filter, bool embed_threshold_filter, 
+          bool show_filter, bool quant_ratio_valid, typename T2> 
+struct pooling_engine_with_large_dim<T, use_cvm, need_filter, embed_threshold_filter, 
+                                     show_filter, false, quant_ratio_valid, T2> {
     static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
+                                              T* sum,
+                                              T2* sum_show_clk,
+                                              int len,
+                                              int dim,
+                                              int quant_ratio,
+                                              float quant_ratio_reciprocal,
+                                              float show_coeff,
+                                              float clk_coeff,
+                                              float threshold,
+                                              int cvm_offset,
+                                              float embed_threshold,
+                                              int embed_thres_size,
+                                              int embedx_concate_size,
+                                              float32x16_t &v_scale,
+                                            __global_ptr__ T* cur_x) {
+        // using cvm_engine_type = cvm_engine<T, use_cvm, false, show_filter, T2>;
         for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
             sum_show_clk[cvm_i] = sum[cvm_i];
         }
-
         for (int j = 0; j < len; j++) {
             mfence();
             GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-            auto &show = local_x[0];
-            auto &click = local_x[1];
 
-            if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+            if (do_filter<T, need_filter>(local_x, show_coeff, clk_coeff, threshold)) {
                 continue;
             }
 
-            auto &embedw = local_x[cvm_offset]; 
-            auto embedx_weight_score = 0.0; 
-            
-            int embed_thres_size_ = embed_thres_size; 
-            if (embed_thres_size == 0) { 
-                embed_thres_size_ = dim - cvm_offset; 
-            } 
-            
-            for (int cvm_i = cvm_offset + 1; cvm_i < cvm_offset + embed_thres_size_; cvm_i++) { 
-                embedx_weight_score += local_x[cvm_i] * local_x[cvm_i];
-                    // pow(fabs(local_x[cvm_i]), 2); 
-            } 
-            embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw); 
-            if (embedx_weight_score < embed_threshold) { 
-                continue; 
-            } 
-                         
-            float32x16_t v_src1 = vload_lm_float32x16(local_x);
-            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
-            // val * quant_ratio + 0.5
-            float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-            float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-            __simd__ float lm_float[32];
-            vstore_lm_float32x16(lm_float, v_temp1);
-            vstore_lm_float32x16(lm_float + 16, v_temp2);
-            mfence_lm();
-            // static_cast<int>
-            for(int r = cvm_offset; r < dim; r++){
-                lm_float[r] = (float)(int(lm_float[r]));
-            }
-            mfence_lm();
-            v_temp1 = vload_lm_float32x16(lm_float);
-            v_temp2 = vload_lm_float32x16(lm_float + 16);
-            float32x16_t v_dst1 = vload_lm_float32x16(sum);
-            float32x16_t v_dst2 = vload_lm_float32x16(sum + 16);
-            // v_temp1 / static_cast<float>(quant_ratio) + sum
-            v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-            v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
-            vstore_lm_float32x16(sum, v_dst1);
-            vstore_lm_float32x16(sum + 16, v_dst2);
-
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
-            }
-        }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
-    }
-};
-
-// embed quant filter
-// quant_ratio_valid:true && need_filter:true && embed_threshold_filter:true && embedx_concate_filter:false
-template <typename T, typename T2>
-struct pooling_engine_with_large_dim<T, true, true, false, true, T2>{
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum_show_clk[cvm_i] = sum[cvm_i];
-        }
-
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-            auto &show = local_x[0];
-            auto &click = local_x[1];
-
-            if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+            if (do_embed_threshold_filter<T, embed_threshold_filter>(local_x, cvm_offset, dim, 
+                    embed_thres_size, embed_threshold)) {
                 continue;
             }
 
-            auto &embedw = local_x[cvm_offset]; 
-            auto embedx_weight_score = 0.0; 
-            
-            int embed_thres_size_ = embed_thres_size; 
-            if (embed_thres_size == 0) { 
-                embed_thres_size_ = dim - cvm_offset; 
-            } 
-            
-            for (int cvm_i = cvm_offset + 1; cvm_i < cvm_offset + embed_thres_size_; cvm_i++) { 
-                embedx_weight_score += local_x[cvm_i] * local_x[cvm_i];
-                    // pow(fabs(local_x[cvm_i]), 2); 
-            } 
-            embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw); 
-            if (embedx_weight_score < embed_threshold) { 
-                continue; 
-            } 
-
-            __simd__ float lm_float[32];
             for(int k = 0; k < dim ; k += 32) {
                 float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
                 float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
-                // val * quant_ratio + 0.5
-                float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-                float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-
-                vstore_lm_float32x16(lm_float, v_temp1);
-                vstore_lm_float32x16(lm_float + 16, v_temp2);
-                mfence_lm();
-                // static_cast<int>
-                for(int r = 0; r < 32; r++){
-                    lm_float[r] = (float)(int(lm_float[r]));
-                }
-                mfence_lm();
-                v_temp1 = vload_lm_float32x16(lm_float);
-                v_temp2 = vload_lm_float32x16(lm_float + 16);
                 float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
                 float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
-                // v_temp1 / static_cast<float>(quant_ratio) + sum
-                v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-                v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
+
+                int valid_len = min(dim - k, 32);
+                // int valid_len = 32;
+                do_vec_sum<(need_filter || quant_ratio_valid)>(v_src1, v_src2, v_dst1, v_dst2, v_scale, 
+                                                               quant_ratio, quant_ratio_reciprocal,
+                                                               valid_len);
                 vstore_lm_float32x16(sum + k, v_dst1);
                 vstore_lm_float32x16(sum + k + 16, v_dst2);
             }
-
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
-            }
+            cvm_sum<T, T2, use_cvm>(local_x, sum_show_clk, cvm_offset);
         }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
+        convert_cvm_type<T, T2, use_cvm>(sum_show_clk, sum, cvm_offset);
     }
 };
 
-// quant need filter
-// quant_ratio_valid:true && need_filter:true && embed_threshold_filter:false
-template <typename T, bool embedx_concate_filter, typename T2>
-struct pooling_engine<T, true, false, embedx_concate_filter, true, T2>{
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum_show_clk[cvm_i] = sum[cvm_i];
-        }
-
+// concat pooling engine with large dim
+template <typename T, bool use_cvm, bool need_filter, bool embed_threshold_filter, 
+          bool show_filter, bool quant_ratio_valid, typename T2> 
+struct pooling_engine_with_large_dim<T, use_cvm, need_filter, embed_threshold_filter, 
+                                     show_filter, true, quant_ratio_valid, T2> {
+    static __device__ inline void concat_pooling(T* local_x,
+                                                 T* local_result,
+                                                 T2* sum_show_clk,
+                                                 int len,
+                                                 int seqid,
+                                                 int in_dim_size,
+                                                 int out_dim_size,
+                                                 int dim_start_offset,
+                                                 int & concate_index, 
+                                                 int quant_ratio,
+                                                 float quant_ratio_reciprocal,
+                                                 float show_coeff,
+                                                 float clk_coeff,
+                                                 float threshold,
+                                                 int cvm_offset,
+                                                 float embed_threshold,
+                                                 int embed_thres_size,
+                                                 int embedx_concate_size,
+                                                 float32x16_t &v_scale,
+                                                 __global_ptr__ T* cur_x,
+                                                 __global_ptr__ T* cur_y,
+                                                 bool fix_ctr_to_click) {
+        //using cvm_engine_type = cvm_engine<T, use_cvm, true, show_filter, T2>;
+        // __simd__ float lm_float[32];
         for (int j = 0; j < len; j++) {
             mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-            auto &show = local_x[0];
-            auto &click = local_x[1];
+            GM2LM(cur_x + j * in_dim_size, local_x, in_dim_size * sizeof(T));
 
-            if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+            if (do_filter<T, need_filter>(local_x, show_coeff, clk_coeff, threshold)) {
                 continue;
             }
 
-            float32x16_t v_src1 = vload_lm_float32x16(local_x);
-            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
-            // val * quant_ratio + 0.5
-            float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-            float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-            __simd__ float lm_float[32];
-            vstore_lm_float32x16(lm_float, v_temp1);
-            vstore_lm_float32x16(lm_float + 16, v_temp2);
-            mfence_lm();
-            // static_cast<int>
-            for(int r = cvm_offset; r < dim; r++){
-                lm_float[r] = (float)(int(lm_float[r]));
-            }
-            mfence_lm();
-            v_temp1 = vload_lm_float32x16(lm_float);
-            v_temp2 = vload_lm_float32x16(lm_float + 16);
-            float32x16_t v_dst1 = vload_lm_float32x16(sum);
-            float32x16_t v_dst2 = vload_lm_float32x16(sum + 16);
-            // v_temp1 / static_cast<float>(quant_ratio) + sum
-            v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-            v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
-            vstore_lm_float32x16(sum, v_dst1);
-            vstore_lm_float32x16(sum + 16, v_dst2);
-
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
-            }
-        }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
-    }
-};
-
-// quant need filter
-// quant_ratio_valid:true && need_filter:true && embed_threshold_filter:false
-template <typename T, bool embedx_concate_filter, typename T2>
-struct pooling_engine_with_large_dim<T, true, false, embedx_concate_filter, true, T2>{
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum_show_clk[cvm_i] = sum[cvm_i];
-        }
-
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-            auto &show = local_x[0];
-            auto &click = local_x[1];
-
-            if ((show - click) * show_coeff + click * clk_coeff < threshold) {
+            if (do_embed_threshold_filter<T, embed_threshold_filter>(local_x, cvm_offset, in_dim_size, 
+                    embed_thres_size, embed_threshold)) {
                 continue;
             }
 
-            __simd__ float lm_float[32];
-            for(int k = 0; k < dim ; k += 32) {
-                float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
-                float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
-                // val * quant_ratio + 0.5
-                float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-                float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-                vstore_lm_float32x16(lm_float, v_temp1);
-                vstore_lm_float32x16(lm_float + 16, v_temp2);
-                mfence_lm();
-                // static_cast<int>
-                for(int r = 0; r < 32; r++) {
-                    lm_float[r] = (float)(int(lm_float[r]));
+            if (concate_index < embedx_concate_size) {
+                // copy embedx
+                for(int k = 0; k < in_dim_size ; k += 32) {
+                    float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
+                    float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
+
+                    int valid_len = min(in_dim_size - k, 32);
+                    do_vec_quant<(need_filter || quant_ratio_valid)>(v_src1, v_src2, v_scale, quant_ratio, 
+                                                                     quant_ratio_reciprocal, valid_len);
+
+                    vstore_lm_float32x16(local_result + k, v_src1);
+                    vstore_lm_float32x16(local_result + k + 16, v_src2);
                 }
+
+                // copy cvm
                 mfence_lm();
-                v_temp1 = vload_lm_float32x16(lm_float);
-                v_temp2 = vload_lm_float32x16(lm_float + 16);
-                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
-                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
-                // v_temp1 / static_cast<float>(quant_ratio) + sum
-                v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-                v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
-                vstore_lm_float32x16(sum + k, v_dst1);
-                vstore_lm_float32x16(sum + k + 16, v_dst2);
-            }
+                cvm_calculate<T, use_cvm, show_filter>(local_x, local_result, cvm_offset, fix_ctr_to_click);
+                mfence();
 
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
+                int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
+                LM2GM_ASYNC(&local_result[dim_start_offset], cur_y + cur_y_index, out_dim_size * sizeof(T));
+                mfence();
+                concate_index += 1;
             }
         }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
     }
 };
+// =============== end pooling engine (no concat / concat) ===============
 
-// quant not filter
-// quant_ratio_valid:true && need_filter:false
-template <typename T, bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
-struct pooling_engine<T, false, embed_threshold_filter, embedx_concate_filter, true, T2>{
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum_show_clk[cvm_i] = sum[cvm_i];
-        }
-
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-
-            float32x16_t v_src1 = vload_lm_float32x16(local_x);
-            float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
-            // val * quant_ratio + 0.5
-            float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-            float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-            __simd__ float lm_float[32];
-            vstore_lm_float32x16(lm_float, v_temp1);
-            vstore_lm_float32x16(lm_float + 16, v_temp2);
-            mfence_lm();
-            // static_cast<int>
-            for(int r = cvm_offset; r < dim; r++){
-                lm_float[r] = (float)(int(lm_float[r]));
-            }
-            mfence_lm();
-            v_temp1 = vload_lm_float32x16(lm_float);
-            v_temp2 = vload_lm_float32x16(lm_float + 16);
-            float32x16_t v_dst1 = vload_lm_float32x16(sum);
-            float32x16_t v_dst2 = vload_lm_float32x16(sum + 16);
-            // v_temp1 / static_cast<float>(quant_ratio) + sum
-            v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-            v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
-            vstore_lm_float32x16(sum, v_dst1);
-            vstore_lm_float32x16(sum + 16, v_dst2);
-
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
-            }
-        }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
-    }
-};
-
-// quant not filter
-// quant_ratio_valid:true && need_filter:false
-template <typename T, bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
-struct pooling_engine_with_large_dim<T, false, embed_threshold_filter, embedx_concate_filter, true, T2>{
-    static __device__ inline void sum_pooling(T* local_x,
-                                        T* sum,
-                                        T2* sum_show_clk,
-                                        int len,
-                                        int dim,
-                                        int quant_ratio,
-                                        float quant_ratio_reciprocal,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        float32x16_t &v_scale,
-                                        __global_ptr__ T* cur_x) {
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum_show_clk[cvm_i] = sum[cvm_i];
-        }
-
-        for (int j = 0; j < len; j++) {
-            mfence();
-            GM2LM(cur_x + j * dim, local_x, dim * sizeof(T));
-
-            __simd__ float lm_float[32];
-            for(int k = 0; k < dim ; k += 32) {
-                float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
-                float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
-                // val * quant_ratio + 0.5
-                float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-                float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-                vstore_lm_float32x16(lm_float, v_temp1);
-                vstore_lm_float32x16(lm_float + 16, v_temp2);
-                mfence_lm();
-                // static_cast<int>
-                for(int r = 0; r < 32; r++) {
-                    lm_float[r] = (float)(int(lm_float[r]));
-                }
-                mfence_lm();
-                v_temp1 = vload_lm_float32x16(lm_float);
-                v_temp2 = vload_lm_float32x16(lm_float + 16);
-                float32x16_t v_dst1 = vload_lm_float32x16(sum + k);
-                float32x16_t v_dst2 = vload_lm_float32x16(sum + k + 16);
-                // v_temp1 / static_cast<float>(quant_ratio) + sum
-                v_dst1 = svmac_float32x16(quant_ratio_reciprocal, v_temp1, v_dst1);
-                v_dst2 = svmac_float32x16(quant_ratio_reciprocal, v_temp2, v_dst2);
-                vstore_lm_float32x16(sum + k, v_dst1);
-                vstore_lm_float32x16(sum + k + 16, v_dst2);
-            }
-
-            // cvm_offset = [0, 2]
-            for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                sum_show_clk[cvm_i] += local_x[cvm_i];
-            }
-        }
-
-        mfence_lm();
-        // cvm_offset = [0, 2]
-        for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-            sum[cvm_i] = (float)sum_show_clk[cvm_i];
-        }
-    }
-};
-
-// not need show click input
-// embedx_concate_filter=false, use_cvm=false
-template <typename T, bool embedx_concate_filter, bool use_cvm, bool show_filter, typename T2>
-struct cvm_engine {
-    static __device__ inline void cvm(T* sum_result,
-                                    int seqid, int out_dim_size,
-                                    int dim_start_offset,
-                                    bool fix_ctr_to_click,
-                                    __global_ptr__ T* cur_y) {
-        mfence();
-        LM2GM_ASYNC(sum_result + dim_start_offset, cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
-    }
-};
-
-// skip click
-// embedx_concate_filter=false, use_cvm=true, clk_filter=false
-template <typename T, typename T2>
-struct cvm_engine<T, false, true, false, T2> {
-    static __device__ inline void cvm(T* sum_result,
-                                    int seqid, int out_dim_size,
-                                    int dim_start_offset,
-                                    bool fix_ctr_to_click,
-                                    __global_ptr__ T* cur_y) {
-        // ctr = log(click + 1) - log(show + 1)
-        sum_result[1] = (float)log(sum_result[1] + 1) - (float)log(sum_result[0] + 1);
-
-        // log(show + 1)
-        sum_result[0] = (float)log(sum_result[0] + 1);
-
-        // fix_ctr_to_click: click += show
-        if (fix_ctr_to_click) {
-            sum_result[dim_start_offset + 1] += sum_result[dim_start_offset + 0];
-        }
-
-        mfence();
-        LM2GM_ASYNC(sum_result, cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
-    }
-};
-
-// embedx_concate_filter=false, use_cvm=true, clk_filter=true
-template <typename T, typename T2>
-struct cvm_engine<T, false, true, true, T2> {
-    static __device__ inline void cvm(T* sum_result,
-                                    int seqid, int out_dim_size,
-                                    int dim_start_offset,
-                                    bool fix_ctr_to_click,
-                                    __global_ptr__ T* cur_y) {
-        // show
-        // skip click offset + 1
-        sum_result[dim_start_offset] = (float)log(sum_result[0] + 1);
-        mfence();
-        LM2GM_ASYNC(sum_result + dim_start_offset, cur_y + seqid * out_dim_size, out_dim_size * sizeof(T));
-    }
-};
-
-// embedx_concate_filter=true, use_cvm=true, clk_filter=true
-template <typename T, typename T2>
-struct cvm_engine<T, true, true, true, T2> {
-    static __device__ inline void concat_cvm(T* sum_result, 
-                                    int out_dim_size, 
-                                    int dim_start_offset,
-                                    int cur_y_index,
-                                    __global_ptr__ T* cur_y) {
-        // use cvm
-        // skip click offset + 1
-        sum_result[dim_start_offset] = (float)log(sum_result[0] + 1);
-
-        mfence();
-        LM2GM_ASYNC(sum_result + dim_start_offset, cur_y + cur_y_index, out_dim_size * sizeof(T));
-    }
-};
-
-// embedx_concate_filter=true, use_cvm=true, clk_filter=false
-template <typename T, typename T2>
-struct cvm_engine<T, true, true, false, T2> {
-    static __device__ inline void concat_cvm(T* sum_result, 
-                                    int out_dim_size, 
-                                    int dim_start_offset,
-                                    int cur_y_index,
-                                    __global_ptr__ T* cur_y) {
-        // use cvm
-        // ctr = log(click + 1) - log(show + 1)
-        sum_result[1] = (float)log(sum_result[1] + 1) - (float)log(sum_result[0] + 1); 
-
-        // log(show + 1)
-        sum_result[0] = (float)log(sum_result[0] + 1);
-
-        mfence();
-        LM2GM_ASYNC(sum_result, cur_y + cur_y_index, out_dim_size * sizeof(T));
-    }
-};
-
-// not need show click input
-// embedx_concate_filter=true, use_cvm=false
-template <typename T, bool show_filter, typename T2>
-struct cvm_engine<T, true, false, show_filter, T2> {
-    static __device__ inline void concat_cvm(T* sum_result,
-                                    int out_dim_size,
-                                    int dim_start_offset,
-                                    int cur_y_index,
-                                    __global_ptr__ T* cur_y) {
-        // no cvm
-        mfence();
-        LM2GM_ASYNC(sum_result + dim_start_offset, cur_y + cur_y_index, out_dim_size * sizeof(T));
-    }
-};
-
-// embedx_concate_filter:false
-template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid,
-            bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
-struct do_sum_pooling_and_cvm {
-    static __device__ inline void kernel(T* local_x,
-                                T* local_result, int local_result_len,
-                                float padding_value,
-                                T2* sum_show_clk,
-                                int batch_start, int batch_end,
-                                int in_dim_size, int out_dim_size,
-                                int dim_start_offset,
-                                int seqid,
-                                int max_seq_len,
-                                int quant_ratio,
-                                float quant_ratio_reciprocal,
-                                float32x16_t &v_scale,
-                                float show_coeff,
-                                float clk_coeff,
-                                float threshold,
-                                int cvm_offset,
-                                float embed_threshold,
-                                int embed_thres_size,
-                                int embedx_concate_size,
-                                bool fix_ctr_to_click,
-                                __global_ptr__ T* cur_x,
-                                __global_ptr__ T* cur_y) {
-        // first: sum pool
-        for (int i = batch_start; i < batch_end; i += max_seq_len) {
-            // int len = min<int64_t>(batch_end - i, max_seq_len);
-            int len = min(batch_end - i, max_seq_len);
-            if (len <= 0)
-                continue;
-            mfence();
-            pooling_engine<T, need_filter, embed_threshold_filter, embedx_concate_filter, quant_ratio_valid, T2>::sum_pooling(
-                                        local_x, local_result, sum_show_clk, len,
-                                        in_dim_size,
-                                        quant_ratio, quant_ratio_reciprocal,
-                                        show_coeff, clk_coeff, threshold, cvm_offset,
-                                        embed_threshold, embed_thres_size,
-                                        embedx_concate_size,
-                                        v_scale,
-                                        cur_x + i * in_dim_size);
-        }
-        mfence();
-        // second: cvm
-        cvm_engine<T, embedx_concate_filter, use_cvm, clk_filter, T2>::cvm(local_result,
-                                            seqid, out_dim_size,
-                                            dim_start_offset,
-                                            fix_ctr_to_click,
-                                            cur_y);
-    }
-};
-
-// embedx_concate_filter:false
+// =============== do sum_pooling_and_cvm_with_large_dim (no concat / concat) =================
 template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid,
             bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
 struct do_sum_pooling_and_cvm_with_large_dim {
+    // Use specialized template
+};
+
+// embedx_concate_filter:false
+template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid,
+            bool embed_threshold_filter, typename T2>
+struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter, 
+                                             quant_ratio_valid, embed_threshold_filter, false, T2> {
     static __device__ inline void kernel(T* local_x,
                                 T* local_result, int local_result_len,
                                 float padding_value,
@@ -753,6 +440,8 @@ struct do_sum_pooling_and_cvm_with_large_dim {
                                 bool fix_ctr_to_click,
                                 __global_ptr__ T* cur_x,
                                 __global_ptr__ T* cur_y) {
+        static_assert(std::is_same<T, float>::value, "sumpooling recently only support for float value");
+        // using cvm_engine_type = cvm_engine<T, use_cvm, false, clk_filter, T2>;
         // first: sum pool
         for (int i = batch_start; i < batch_end; i += max_seq_len) {
             // int len = min<int64_t>(batch_end - i, max_seq_len);
@@ -760,421 +449,120 @@ struct do_sum_pooling_and_cvm_with_large_dim {
             if (len <= 0)
                 continue;
             mfence();
-            pooling_engine_with_large_dim<T, need_filter, embed_threshold_filter, embedx_concate_filter, quant_ratio_valid, T2>::sum_pooling(
-                                        local_x, local_result, sum_show_clk, len,
-                                        in_dim_size,
-                                        quant_ratio, quant_ratio_reciprocal,
-                                        show_coeff, clk_coeff, threshold, cvm_offset,
-                                        embed_threshold, embed_thres_size,
-                                        embedx_concate_size,
-                                        v_scale,
-                                        cur_x + i * in_dim_size);
+            pooling_engine_with_large_dim<T, use_cvm, need_filter, embed_threshold_filter, clk_filter,
+                                          false, quant_ratio_valid, T2>::sum_pooling(local_x, 
+                                                                              local_result, 
+                                                                              sum_show_clk, 
+                                                                              len,
+                                                                              in_dim_size,
+                                                                              quant_ratio, 
+                                                                              quant_ratio_reciprocal,
+                                                                              show_coeff, 
+                                                                              clk_coeff, 
+                                                                              threshold, 
+                                                                              cvm_offset,
+                                                                              embed_threshold, 
+                                                                              embed_thres_size,
+                                                                              embedx_concate_size,
+                                                                              v_scale,
+                                                                              cur_x + i * in_dim_size);
         }
         mfence();
-        // second: cvm
-        cvm_engine<T, embedx_concate_filter, use_cvm, clk_filter, T2>::cvm(local_result,
-                                            seqid, out_dim_size,
-                                            dim_start_offset,
-                                            fix_ctr_to_click,
-                                            cur_y);
+        // fix cvm val by log(show or clk) and copy to GM 
+        cvm_post_process<T, use_cvm, clk_filter>(local_result, seqid, out_dim_size, dim_start_offset, 
+                                                  fix_ctr_to_click, cur_y);
     }
 };
 
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=false
-template <typename T, bool quant_ratio_valid, bool need_filter, bool embed_threshold_filter>
-struct sum_pooling_concate {
-    static __device__ inline bool filter(T* local_x, 
-                                    int in_dim_size,
-                                    float show_coeff,
-                                    float clk_coeff,
-                                    float threshold,
-                                    int cvm_offset,
-                                    float embed_threshold) {
-        // do nothing
-        return false;
-    }
-};
 
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=false
-template <typename T>
-struct sum_pooling_concate<T, true, true, false> {
-    static __device__ inline bool filter(T* local_x, 
-                                    int in_dim_size,
-                                    float show_coeff,
-                                    float clk_coeff,
-                                    float threshold,
-                                    int cvm_offset,
-                                    float embed_threshold) {
-        auto &show = local_x[0];
-        auto &click = local_x[1];
-        if ((show - click) * show_coeff + click * clk_coeff < threshold) { 
-            return true;
-        }
-        return false;
-    }
-};
-
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=true
-template <typename T>
-struct sum_pooling_concate<T, true, true, true> {
-    static __device__ inline bool filter(T* local_x, 
-                                    int in_dim_size,
-                                    float show_coeff,
-                                    float clk_coeff,
-                                    float threshold,
-                                    int cvm_offset,
-                                    float embed_threshold) {
-        auto &show = local_x[0];
-        auto &click = local_x[1];
-        if ((show - click) * show_coeff + click * clk_coeff < threshold) { 
-            return true;
-        }
-            
-        auto &embedw = local_x[cvm_offset]; 
-        auto embedx_weight_score = 0.0; 
-        for (int cvm_i = cvm_offset + 1; cvm_i < in_dim_size; cvm_i++) { 
-            embedx_weight_score += local_x[cvm_i] * local_x[cvm_i];
-                // pow(fabs(local_x[cvm_i]), 2); 
-        } 
-        embedx_weight_score = sqrt(embedx_weight_score) + fabs(embedw); 
-        if (embedx_weight_score < embed_threshold) { 
-            return true;
-        } 
-        return false;
-    }
-};
-
-// 1)FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=true
-// 2)FusedSeqpoolKernelQuantFilterEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=false
-// 3)FusedSeqpoolKernelQuantEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=false
-template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid, 
-            bool embed_threshold_filter, typename T2>
-struct do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, true, T2> {
-    static __device__ inline void kernel(T* local_x,
-                                T* local_result, int local_result_len,
-                                float padding_value,
-                                T2* sum_show_clk,
-                                int batch_start, int batch_end,
-                                int in_dim_size, int out_dim_size,
-                                int dim_start_offset,
-                                int seqid,
-                                int max_seq_len,
-                                int quant_ratio,
-                                float quant_ratio_reciprocal,
-                                float32x16_t &v_scale,
-                                float show_coeff,
-                                float clk_coeff,
-                                float threshold,
-                                int cvm_offset,
-                                float embed_threshold,
-                                int embed_thres_size,
-                                int embedx_concate_size,
-                                bool fix_ctr_to_click,
-                                __global_ptr__ T* cur_x,
-                                __global_ptr__ T* cur_y) {
-        int concate_index = 0;
-        for (int i = batch_start; i < batch_end; i += max_seq_len) {
-            // int len = min<int64_t>(batch_end - i, max_seq_len);
-            int len = min(batch_end - i, max_seq_len);
-            if (len <= 0)
-                continue;
-            mfence();
-
-            for (int j = 0; j < len; j++) {
-                mfence();
-                GM2LM(cur_x + (i + j) * in_dim_size, local_x, in_dim_size * sizeof(T));
-                
-                bool is_filter = sum_pooling_concate<T, quant_ratio_valid, need_filter, embed_threshold_filter>::filter(
-                    local_x, in_dim_size, show_coeff, clk_coeff, threshold, cvm_offset, embed_threshold);
-                if (is_filter) {
-                    continue;
-                }
-                
-                if (concate_index < embedx_concate_size) {
-                    // first: sum pool
-                    // copy
-                    float32x16_t v_src1 = vload_lm_float32x16(local_x);
-                    float32x16_t v_src2 = vload_lm_float32x16(local_x + 16);
-                    // val * quant_ratio + 0.5
-                    float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-                    float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-                    __simd__ float lm_float[32];
-                    vstore_lm_float32x16(lm_float, v_temp1);
-                    vstore_lm_float32x16(lm_float + 16, v_temp2);
-                    mfence_lm();
-                    // static_cast<int>
-                    for(int r = cvm_offset; r < in_dim_size; r++){
-                        lm_float[r] = (float)(int(lm_float[r]));
-                    }
-                    mfence_lm();
-                    v_temp1 = vload_lm_float32x16(lm_float);
-                    v_temp2 = vload_lm_float32x16(lm_float + 16);
-                    // local_result = v_temp1 / static_cast<float>(quant_ratio)
-                    v_temp1 = vvmul_float32x16(quant_ratio_reciprocal, v_temp1);
-                    v_temp2 = vvmul_float32x16(quant_ratio_reciprocal, v_temp2);
-                    vstore_lm_float32x16(local_result, v_temp1);
-                    vstore_lm_float32x16(local_result + 16, v_temp2);
-
-                    mfence_lm();
-                    // cvm_offset = [0, 2]
-                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                        local_result[cvm_i] = local_x[cvm_i];
-                    }
-
-                    // second: cvm
-                    int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
-                    cvm_engine<T, true, use_cvm, clk_filter, T2>::concat_cvm(local_result,
-                                                        out_dim_size, dim_start_offset,
-                                                        cur_y_index,
-                                                        cur_y);
-                    mfence();
-                    concate_index += 1;
-                }
-            }
-        }
-
-        mfence();
-
-        // second: cvm
-        for (int i = concate_index; i < embedx_concate_size; i++) {
-            memset_value_float(local_result, local_result_len, padding_value);
-            int cur_y_index = seqid * embedx_concate_size * out_dim_size + i * out_dim_size;
-            LM2GM_ASYNC(local_result, cur_y + cur_y_index, out_dim_size * sizeof(T));
-            mfence();
-        }
-    }
-};
-
-// 1)FusedSeqpoolKernelEmbedQuantFilterEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=true
-// 2)FusedSeqpoolKernelQuantFilterEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=true && embed_threshold_filter=false
-// 3)FusedSeqpoolKernelQuantEmbedxConcate
-// embedx_concate_filter:true && quant_ratio_valid=true && need_filter=false
-template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid, 
-            bool embed_threshold_filter, typename T2>
-struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, true, T2> {
-    static __device__ inline void kernel(T* local_x,
-                                T* local_result, int local_result_len,
-                                float padding_value,
-                                T2* sum_show_clk,
-                                int batch_start, int batch_end,
-                                int in_dim_size, int out_dim_size,
-                                int dim_start_offset,
-                                int seqid,
-                                int max_seq_len,
-                                int quant_ratio,
-                                float quant_ratio_reciprocal,
-                                float32x16_t &v_scale,
-                                float show_coeff,
-                                float clk_coeff,
-                                float threshold,
-                                int cvm_offset,
-                                float embed_threshold,
-                                int embed_thres_size,
-                                int embedx_concate_size,
-                                bool fix_ctr_to_click,
-                                __global_ptr__ T* cur_x,
-                                __global_ptr__ T* cur_y) {
-        int concate_index = 0;
-        for (int i = batch_start; i < batch_end; i += max_seq_len) {
-            // int len = min<int64_t>(batch_end - i, max_seq_len);
-            int len = min(batch_end - i, max_seq_len);
-            if (len <= 0)
-                continue;
-            mfence();
-
-            for (int j = 0; j < len; j++) {
-                mfence();
-                GM2LM(cur_x + (i + j) * in_dim_size, local_x, in_dim_size * sizeof(T));
-                
-                bool is_filter = sum_pooling_concate<T, quant_ratio_valid, need_filter, embed_threshold_filter>::filter(
-                    local_x, in_dim_size, show_coeff, clk_coeff, threshold, cvm_offset, embed_threshold);
-                if (is_filter) { 
-                    continue; 
-                } 
-    
-               if (concate_index < embedx_concate_size) {
-                    // first: sum pool
-                    // copy
-                    __simd__ float lm_float[32];
-                    for(int k = 0; k < in_dim_size ; k += 32) {
-                        float32x16_t v_src1 = vload_lm_float32x16(local_x + k);
-                        float32x16_t v_src2 = vload_lm_float32x16(local_x + k + 16);
-                        // val * quant_ratio + 0.5
-                        float32x16_t v_temp1 = svmac_float32x16(quant_ratio, v_src1, v_scale);
-                        float32x16_t v_temp2 = svmac_float32x16(quant_ratio, v_src2, v_scale);
-
-                        vstore_lm_float32x16(lm_float, v_temp1);
-                        vstore_lm_float32x16(lm_float + 16, v_temp2);
-                        mfence_lm();
-                        // static_cast<int>
-                        for(int r = 0; r < 32; r++) {
-                            lm_float[r] = (float)(int(lm_float[r]));
-                        }
-                        mfence_lm();
-                        v_temp1 = vload_lm_float32x16(lm_float);
-                        v_temp2 = vload_lm_float32x16(lm_float + 16);
-                        // local_result = v_temp1 / static_cast<float>(quant_ratio)
-                        v_temp1 = vvmul_float32x16(quant_ratio_reciprocal, v_temp1);
-                        v_temp2 = vvmul_float32x16(quant_ratio_reciprocal, v_temp2);
-                        vstore_lm_float32x16(local_result + k, v_temp1);
-                        vstore_lm_float32x16(local_result + k + 16, v_temp2);
-                    }
-
-                    mfence_lm();
-                    // cvm_offset = [0, 2]
-                    for (int cvm_i = 0; cvm_i < cvm_offset; cvm_i++) {
-                        local_result[cvm_i] = local_x[cvm_i];
-                        sum_show_clk[cvm_i] = local_x[cvm_i];
-                    }
-
-                    // second: cvm
-                    int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
-                    cvm_engine<T, true, use_cvm, clk_filter, T2>::concat_cvm(local_result,
-                                                        out_dim_size, dim_start_offset,
-                                                        cur_y_index,
-                                                        cur_y);
-                    mfence();
-                    concate_index += 1;
-                }
-            }
-        }
-
-        mfence();
-
-        // second: cvm
-        for (int i = concate_index; i < embedx_concate_size; i++) {
-            memset_value_float(local_result, local_result_len, padding_value);
-            int cur_y_index = seqid * embedx_concate_size * out_dim_size + i * out_dim_size;
-            LM2GM_ASYNC(local_result, cur_y + cur_y_index, out_dim_size * sizeof(T));
-            mfence();
-        }
-    }
-};
-
+// embedx_concate_filter:true
 template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid,
-            bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
-__global__ void seq_sum_pooling_cvm_fwd(unsigned long long* x_addr,
-                                        unsigned long long* y_addr,
-                                        int* sequence_addr,
-                                        uint32_t batch,
-                                        uint32_t in_dim_size,
-                                        uint32_t slot_num,
-                                        float padding_value,
-                                        int quant_ratio,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        bool fix_ctr_to_click) {
-    int cid = core_id();
-    int ncores = core_num();
-    if (cid >= ncores) {
-        return;
-    }
-    int thread_id = cluster_id() * ncores + cid;
-    int total_thread = cluster_num() * ncores;
-    const int buf_size = 512;
-    const int local_result_len = 32;
+            bool embed_threshold_filter, typename T2>
+struct do_sum_pooling_and_cvm_with_large_dim<T, use_cvm, clk_filter, need_filter, 
+                                             quant_ratio_valid, embed_threshold_filter, true, T2> {
+    static __device__ inline void kernel(T* local_x,
+                                T* local_result, int local_result_len,
+                                float padding_value,
+                                T2* sum_show_clk,
+                                int batch_start, int batch_end,
+                                int in_dim_size, int out_dim_size,
+                                int dim_start_offset,
+                                int seqid,
+                                int max_seq_len,
+                                int quant_ratio,
+                                float quant_ratio_reciprocal,
+                                float32x16_t &v_scale,
+                                float show_coeff,
+                                float clk_coeff,
+                                float threshold,
+                                int cvm_offset,
+                                float embed_threshold,
+                                int embed_thres_size,
+                                int embedx_concate_size,
+                                bool fix_ctr_to_click,
+                                __global_ptr__ T* cur_x,
+                                __global_ptr__ T* cur_y) {
+        static_assert(std::is_same<T, float>::value, "sumpooling recently only support for float value");
+        //using cvm_engine_type = cvm_engine<T, use_cvm, true, clk_filter, T2>;
+        // first: sum pool
+        int concate_index = 0;
+        for (int i = batch_start; i < batch_end; i += max_seq_len) {
+            int len = min(batch_end - i, max_seq_len);
+            if (len <= 0)
+                continue;
 
-    int max_seq_len = buf_size / in_dim_size;
-    __simd__ T local_x[local_result_len];
-    T2 sum_show_clk[2];
-
-    __simd__ T local_result[local_result_len];
-    __local__ int sequence_lm[2];
-
-    int max_slot_num = 200;
-    uint64_t x_list[max_slot_num];
-    uint64_t y_list[max_slot_num];
-
-    float quant_ratio_reciprocal = quant_ratio > 0 ? 1.0 / quant_ratio : quant_ratio;
-    int out_dim_size = use_cvm ? (clk_filter ? (in_dim_size - 1) : in_dim_size) : \
-                        (in_dim_size - cvm_offset - embed_thres_size);
-    int dim_start_offset = in_dim_size - out_dim_size;
-
-    float32x16_t v_scale = vset_zero();
-    v_scale = svadd_float32x16(0.5, v_scale);
-
-    int batch_start = 0;
-    int batch_end = 0;
-
-    for (int slot_len_offset = 0; slot_len_offset < slot_num; slot_len_offset += max_slot_num) {
-        int slot_len = min(slot_num - slot_len_offset, max_slot_num);
-        GM2LM(x_addr + slot_len_offset, x_list, slot_len * sizeof(uint64_t));
-        GM2LM(y_addr + slot_len_offset, y_list, slot_len * sizeof(uint64_t));
-
-        for (int slot_id = 0; slot_id < slot_len; slot_id++) {
-            __global_ptr__ T* cur_x = reinterpret_cast<__global_ptr__ T*>(x_list[slot_id]);
-            __global_ptr__ T* cur_y = reinterpret_cast<__global_ptr__ T*>(y_list[slot_id]);
-            // int count = roundup_div(batch, total_thread);
-            for (int64_t seqid = thread_id; seqid < batch; seqid += total_thread) {
-                    mfence();
-                    GM2LM(sequence_addr + (slot_len_offset + slot_id) * (batch + 1) + seqid, sequence_lm, 2 * sizeof(int));
-
-                    memset_value_float(local_result, local_result_len, padding_value);
-                    memset_value_float(local_x, local_result_len, padding_value);
-
-                    sum_show_clk[0] = 0.0;
-                    sum_show_clk[1] = 0.0;
-
-                    batch_start = sequence_lm[0];
-                    batch_end = sequence_lm[1];
-
-                    do_sum_pooling_and_cvm<T, use_cvm, clk_filter, need_filter, quant_ratio_valid, embed_threshold_filter, embedx_concate_filter, T2>::kernel(
-                        local_x,
-                        local_result, local_result_len,
-                        padding_value,
-                        sum_show_clk,
-                        batch_start, batch_end,
-                        in_dim_size, out_dim_size,
-                        dim_start_offset,
-                        seqid,
-                        max_seq_len,
-                        quant_ratio,
-                        quant_ratio_reciprocal,
-                        v_scale,
-                        show_coeff,
-                        clk_coeff,
-                        threshold,
-                        cvm_offset,
-                        embed_threshold,
-                        embed_thres_size,
-                        embedx_concate_size,
-                        fix_ctr_to_click,
-                        cur_x,
-                        cur_y
-                );
-            }
+            mfence();
+            pooling_engine_with_large_dim<T, use_cvm, need_filter, embed_threshold_filter, clk_filter,
+                                          true, quant_ratio_valid, T2>::concat_pooling(local_x,
+                                                                                       local_result,
+                                                                                       sum_show_clk,
+                                                                                       len,
+                                                                                       seqid,
+                                                                                       in_dim_size,
+                                                                                       out_dim_size,
+                                                                                       dim_start_offset,
+                                                                                       concate_index, 
+                                                                                       quant_ratio,
+                                                                                       quant_ratio_reciprocal,
+                                                                                       show_coeff,
+                                                                                       clk_coeff,
+                                                                                       threshold,
+                                                                                       cvm_offset,
+                                                                                       embed_threshold,
+                                                                                       embed_thres_size,
+                                                                                       embedx_concate_size,
+                                                                                       v_scale,
+                                                                                       cur_x + i * in_dim_size,
+                                                                                       cur_y,
+                                                                                       fix_ctr_to_click);
         }
+        mfence();
+        
+        int cur_y_index = seqid * embedx_concate_size * out_dim_size + concate_index * out_dim_size;
+        int total_fill_len = (embedx_concate_size - concate_index) * out_dim_size;
+        fill_with_padding_val<T>(local_result, local_result_len, padding_value, cur_y + cur_y_index, total_fill_len);
     }
-}
+};
+// =============== end do sum_pooling_and_cvm_with_large_dim (no concat / concat) =================
 
 template <typename T, bool use_cvm, bool clk_filter, bool need_filter, bool quant_ratio_valid,
             bool embed_threshold_filter, bool embedx_concate_filter, typename T2>
 __global__ void seq_sum_pooling_cvm_fwd_with_large_dim(unsigned long long* x_addr,
-                                        unsigned long long* y_addr,
-                                        int* sequence_addr,
-                                        uint32_t batch,
-                                        uint32_t in_dim_size,
-                                        uint32_t slot_num,
-                                        float padding_value,
-                                        int quant_ratio,
-                                        float show_coeff,
-                                        float clk_coeff,
-                                        float threshold,
-                                        int cvm_offset,
-                                        float embed_threshold,
-                                        int embed_thres_size,
-                                        int embedx_concate_size,
-                                        bool fix_ctr_to_click) {
+                                                      unsigned long long* y_addr,
+                                                      int* sequence_addr,
+                                                      uint32_t batch,
+                                                      uint32_t in_dim_size,
+                                                      uint32_t slot_num,
+                                                      float padding_value,
+                                                      int quant_ratio,
+                                                      float show_coeff,
+                                                      float clk_coeff,
+                                                      float threshold,
+                                                      int cvm_offset,
+                                                      float embed_threshold,
+                                                      int embed_thres_size,
+                                                      int embedx_concate_size,
+                                                      bool fix_ctr_to_click) {
     int cid = core_id();
     int ncores = core_num();
     if (cid >= ncores) {
@@ -1694,59 +1082,32 @@ static int sequence_sum_pool_cvm_xpu2_wrapper(xpu::Context* ctx,
             is_float = 1;
         }
     }
-    if(dim <= 32){
-        auto func_kernel = seq_sum_pooling_cvm_fwd<T, true, true, true, true, true, true, float>;
-        if(is_float) {
-            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
-                                                embed_threshold_filter, embedx_concate_filter, float);
-        } else {
-            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
-                                                embed_threshold_filter, embedx_concate_filter, double);
-        }
-        int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
-                                                                        xpu_y_addr_ptr,
-                                                                        lods_vec,
-                                                                        batch,
-                                                                        dim,
-                                                                        slot_num,
-                                                                        padding_value,
-                                                                        quant_ratio,
-                                                                        show_coeff,
-                                                                        clk_coeff,
-                                                                        threshold,
-                                                                        cvm_offset,
-                                                                        embed_threshold,
-                                                                        embed_thres_size,
-                                                                        embedx_concate_size,
-                                                                        fix_ctr_to_click);
-        KERNEL_ASSERT_SUCCESS(ctx, ret);
+
+    auto func_kernel = seq_sum_pooling_cvm_fwd_with_large_dim<T, true, true, true, true, true, true, float>;
+    if(is_float) {
+        XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
+                                            embed_threshold_filter, embedx_concate_filter, float);
     } else {
-        auto func_kernel = seq_sum_pooling_cvm_fwd_with_large_dim<T, true, true, true, true, true, true, float>;
-        if(is_float) {
-            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
-                                                embed_threshold_filter, embedx_concate_filter, float);
-        } else {
-            XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
-                                                embed_threshold_filter, embedx_concate_filter, double);
-        }
-        int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
-                                                                    xpu_y_addr_ptr,
-                                                                    lods_vec,
-                                                                    batch,
-                                                                    dim,
-                                                                    slot_num,
-                                                                    padding_value,
-                                                                    quant_ratio,
-                                                                    show_coeff,
-                                                                    clk_coeff,
-                                                                    threshold,
-                                                                    cvm_offset,
-                                                                    embed_threshold,
-                                                                    embed_thres_size,
-                                                                    embedx_concate_size,
-                                                                    fix_ctr_to_click);
-        KERNEL_ASSERT_SUCCESS(ctx, ret);
+        XPU2_KERNEL_SUM_POOL_CVM_INTERFACE(seq_sum_pooling_cvm_fwd_with_large_dim, T, use_cvm, clk_filter, need_filter, quant_ratio_valid,
+                                            embed_threshold_filter, embedx_concate_filter, double);
     }
+    int ret = func_kernel<<<ctx->ncluster(), 64, ctx->xpu_stream>>>(xpu_x_addr_ptr,
+                                                                xpu_y_addr_ptr,
+                                                                lods_vec,
+                                                                batch,
+                                                                dim,
+                                                                slot_num,
+                                                                padding_value,
+                                                                quant_ratio,
+                                                                show_coeff,
+                                                                clk_coeff,
+                                                                threshold,
+                                                                cvm_offset,
+                                                                embed_threshold,
+                                                                embed_thres_size,
+                                                                embedx_concate_size,
+                                                                fix_ctr_to_click);
+    KERNEL_ASSERT_SUCCESS(ctx, ret);
 
     return xpu::SUCCESS;
 }
