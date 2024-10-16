@@ -3272,6 +3272,22 @@ void PadBoxSlotDataset::PrepareTrain(void) {
       reinterpret_cast<SlotPaddleBoxDataFeed*>(readers_[i % thread_num_].get())
           ->AddBatchOffset(offset[i]);
     }
+    // record batch info
+    if (box_ptr->RecordBatchInsInfo()) {
+      for (size_t i = 0; i < offset.size(); ++i) {
+        size_t batch_all_ins_count = 0;
+        size_t batch_train_ins_count = 0;
+        for (int pv_index = offset[i].first;
+             pv_index < offset[i].first + offset[i].second;
+             ++pv_index) {
+          batch_all_ins_count += input_pv_ins_[pv_index]->ads.size();
+          batch_train_ins_count += input_pv_ins_[pv_index]->ads.size() -
+                                   input_pv_ins_[pv_index]->zero_mask_num_;
+        }
+        box_ptr->AddBatchInsInfo(batch_all_ins_count, batch_train_ins_count);
+      }
+    }
+
   } else {
     if (!FLAGS_padbox_disable_ins_shuffle) {
       if (FLAGS_enable_update_filter_ins) {

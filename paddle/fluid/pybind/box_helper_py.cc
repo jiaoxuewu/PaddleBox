@@ -160,6 +160,12 @@ void BindBoxWrapper(py::module* m) {
       .def("print_device_info",
            &framework::BoxWrapper::PrintDeviceInfo,
            py::call_guard<py::gil_scoped_release>())
+      .def("set_batch_max_ins_number",
+           &framework::BoxWrapper::SetBatchMaxInsNumber,
+           py::call_guard<py::gil_scoped_release>())
+      .def("show_batch_ins_info",
+           &framework::BoxWrapper::ShowBatchInsInfo,
+           py::call_guard<py::gil_scoped_release>())
       .def("merge_multi_models",
            &framework::BoxWrapper::MergeMultiModels,
            py::call_guard<py::gil_scoped_release>());

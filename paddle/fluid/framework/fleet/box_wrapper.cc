@@ -366,6 +366,59 @@ void BoxWrapper::AddReplaceFeasign(boxps::PSAgentBase* p_agent,
 
   VLOG(0) << "End AddReplaceFeasign: " << timer.ElapsedMS();
 }
+
+void BoxWrapper::SetBatchMaxInsNumber(int batch_max_ins) {
+  if (batch_max_ins > 0) {
+    batch_max_ins_ = batch_max_ins;
+    batch_all_ins_.resize(batch_max_ins + 1);
+    batch_train_ins_.resize(batch_max_ins + 1);  // [0, max_ins]
+    std::fill(batch_all_ins_.begin(), batch_all_ins_.end(), 0);
+    std::fill(batch_train_ins_.begin(), batch_train_ins_.end(), 0);
+  }
+}
+
+void BoxWrapper::AddBatchInsInfo(size_t all_ins_number,
+                                 size_t train_ins_number) {
+  if (all_ins_number < batch_all_ins_.size() &&
+      train_ins_number < batch_train_ins_.size()) {
+    batch_all_ins_[all_ins_number] += 1;
+    batch_train_ins_[train_ins_number] += 1;
+  } else {
+    VLOG(0) << "all_ins_number: " << all_ins_number
+            << ", or batch_max_ins_: " << batch_all_ins_.size()
+            << ", out of range";
+  }
+}
+
+void BoxWrapper::ShowBatchInsInfo() {
+  if (batch_max_ins_ <= 0) {
+    VLOG(0) << "batch_max_ins_ not set, no batch info to show";
+    return;
+  }
+  std::ostringstream oss;
+
+  // show all ins info
+  oss << "[";
+  for (auto number : batch_all_ins_) {
+    oss << number << " ";
+  }
+  oss << "]";
+  std::cout << "batch all ins: " << oss.str() << std::endl;
+
+  // show train ins info
+  oss.str("");
+  oss << "[";
+  for (auto number : batch_train_ins_) {
+    oss << number << " ";
+  }
+  oss << "]";
+  std::cout << "batch train ins: " << oss.str() << std::endl;
+
+  // reset all and train info array
+  std::fill(batch_all_ins_.begin(), batch_all_ins_.end(), 0);
+  std::fill(batch_train_ins_.begin(), batch_train_ins_.end(), 0);
+}
+
 //================================ auc
 //============================================
 
