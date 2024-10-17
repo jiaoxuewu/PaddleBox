@@ -22,23 +22,23 @@ void cal_ad_slot_session(const T* input,
 template <typename T>
 void cal_sideinfo(const T* input,
                   T* side_info_output,
-                  const size_t batch_num,
-                  const size_t ins_num, 
-                  const size_t slot_num,
-                  const size_t max_length,
-                  const size_t fea_emb_dim,
-                  const size_t sideinfo_slot_num,
-                  const size_t sideinfo_slot_offset,
+                  const uint32_t batch_num,
+                  const uint32_t ins_num, 
+                  const uint32_t slot_num,
+                  const uint32_t max_length,
+                  const uint32_t fea_emb_dim,
+                  const uint32_t sideinfo_slot_num,
+                  const uint32_t sideinfo_slot_offset,
                   xpu::Context* ctx);
 
 template <typename T>
 void cal_ad_mask(const T* input,
                  T* mask_output,
-                 const size_t batch_count,
-                 const size_t ins_num,
-                 const size_t slot_num,
-                 const size_t max_length,
-                 const size_t fea_emb_dim,
+                 const uint32_t batch_count,
+                 const uint32_t ins_num,
+                 const uint32_t slot_num,
+                 const uint32_t max_length,
+                 const uint32_t fea_emb_dim,
                  xpu::Context* ctx);
 
 }

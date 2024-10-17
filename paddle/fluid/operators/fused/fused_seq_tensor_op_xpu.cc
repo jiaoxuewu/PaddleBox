@@ -61,10 +61,10 @@ class FusedSeqTensorXPUKernel : public framework::OpKernel<T> {
    auto ad_slot_offset = ctx.Attr<int64_t>("ad_slot_offset");
    
    auto input_dims = input->dims();
-   size_t ins_num = input_dims[0];
-   size_t sideinfo_slot_num = slot_num - ad_slot_num;
+   uint32_t ins_num = input_dims[0];
+   uint32_t sideinfo_slot_num = slot_num - ad_slot_num;
 
-   size_t sideinfo_slot_offset = 0;
+   uint32_t sideinfo_slot_offset = 0;
     if (ad_slot_offset == 0) {
       sideinfo_slot_offset = ad_slot_num;
     }
