@@ -3274,15 +3274,25 @@ void PadBoxSlotDataset::PrepareTrain(void) {
     }
     // record batch info
     if (box_ptr->RecordBatchInsInfo()) {
+      uint64_t start_timestamp =
+          is_test_ ? test_timestamp_range_.first : train_timestamp_range_.first;
+
       for (size_t i = 0; i < offset.size(); ++i) {
         size_t batch_all_ins_count = 0;
         size_t batch_train_ins_count = 0;
         for (int pv_index = offset[i].first;
              pv_index < offset[i].first + offset[i].second;
              ++pv_index) {
-          batch_all_ins_count += input_pv_ins_[pv_index]->ads.size();
-          batch_train_ins_count += input_pv_ins_[pv_index]->ads.size() -
-                                   input_pv_ins_[pv_index]->zero_mask_num_;
+          const auto& pv_ads = input_pv_ins_[pv_index]->ads;
+          auto low = std::lower_bound(
+              pv_ads.begin() + input_pv_ins_[pv_index]->zero_mask_num_,
+              pv_ads.end(),
+              start_timestamp,
+              [](const SlotRecord& lhd, const uint64_t timstamp) {
+                return lhd->show_timestamp_ < timstamp;
+              });  //
+          batch_all_ins_count += pv_ads.size();
+          batch_train_ins_count += pv_ads.end() - low;
         }
         box_ptr->AddBatchInsInfo(batch_all_ins_count, batch_train_ins_count);
       }
