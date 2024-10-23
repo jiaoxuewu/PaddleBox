@@ -10,6 +10,7 @@ set(XPU_RT_LIB_NAME "libxpurt.so")
 if(WITH_XPU_XRE5)
   set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.2")
   set(XPU_CUDA_RT_LIB_NAME "libcudart.so")
+  set(XPU_CUDA_LIB_NAME "libxpucuda.so.1")
 else()
   set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.1")
 endif()
@@ -172,6 +173,7 @@ set(XPU_API_PLUGIN "${XPU_LIB_DIR}/${XPU_API_PLUGIN_NAME}")
 set(XPU_RT_LIB "${XPU_LIB_DIR}/${XPU_RT_LIB_NAME}")
 set(XPU_RT_ALIAS_LIB "${XPU_LIB_DIR}/${XPU_RT_ALIAS_LIB_NAME}")
 set(XPU_CUDA_RT_LIB "${XPU_LIB_DIR}/${XPU_CUDA_RT_LIB_NAME}")
+set(XPU_CUDA_LIB "${XPU_LIB_DIR}/${XPU_CUDA_LIB_NAME}")
 set(XPU_ML_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_LIB_NAME}")
 set(XPU_ML_ALIAS_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_ALIAS_LIB_NAME}")
 
@@ -209,6 +211,7 @@ ExternalProject_Add(
   BUILD_BYPORDUCTS ${XPU_XBLAS_LIB}
   BUILD_BYPRODUCTS ${XPU_XFA_LIB}
   BUILD_BYPRODUCTS ${XPU_CUDA_RT_LIB}
+  BUILD_BYPRODUCTS ${XPU_CUDA_LIB}
   BUILD_BYPRODUCTS ${XPU_RT_LIB})
 
 include_directories(${XPU_INC_DIR})
@@ -242,7 +245,7 @@ if(WITH_XPU_BKCL)
 endif()
 
 if(WITH_XPU_XRE5)
-  target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_XBLAS_LIB} ${XPU_XFA_LIB} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} ${XPU_CUDA_RT_LIB} -Wl,--pop-state)
+  target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_XBLAS_LIB} ${XPU_XFA_LIB} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} ${XPU_CUDA_RT_LIB} ${XPU_CUDA_LIB} -Wl,--pop-state)
 else()
   target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} -Wl,--pop-state)
 endif()
