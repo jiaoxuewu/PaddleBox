@@ -9,6 +9,7 @@ set(XPU_API_PLUGIN_NAME  "libxpuplugin.so")
 set(XPU_RT_LIB_NAME "libxpurt.so")
 if(WITH_XPU_XRE5)
   set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.2")
+  set(XPU_CUDA_RT_LIB_NAME "libcudart.so")
 else()
   set(XPU_RT_ALIAS_LIB_NAME "libxpurt.so.1")
 endif()
@@ -18,7 +19,7 @@ set(XPU_XBLAS_LIB_NAME "libxpu_blas.so")
 set(XPU_XFA_LIB_NAME "libxpu_flash_attention.so")
 
 if(NOT DEFINED XPU_XHPC_BASE_DATE)
-  set(XPU_XHPC_BASE_DATE "20240809")
+  set(XPU_XHPC_BASE_DATE "20241022")
 endif()
 
 if(NOT DEFINED XPU_BASE_URL)
@@ -110,8 +111,9 @@ set(XPU_PACK_DEPENCE_URL
 
 if(WITH_XPU_XRE5)
   add_definitions(-DPADDLE_WITH_XPU_XRE5)
-  set(XPU_XRE_BASE_VERSION "5.0.9.1")
-  set(XPU_XCCL_BASE_VERSION "1.2.8.2")
+  set(XPU_XRE_BASE_VERSION "5.0.21.5")
+  set(XPU_XCCL_BASE_VERSION "3.0.0.1")
+  set(XPU_XCCL_DIR_NAME "xccl_bdcentos_x86_64")
   set(XPU_XRE_BASE_URL
       "https://klx-sdk-release-public.su.bcebos.com/xre/kl3-release/${XPU_XRE_BASE_VERSION}"
   )
@@ -121,6 +123,7 @@ if(WITH_XPU_XRE5)
 else()
   set(XPU_XRE_BASE_VERSION "4.0.28.1")
   set(XPU_XCCL_BASE_VERSION "1.2.0.5")
+  set(XPU_XCCL_DIR_NAME "xccl_rdma-bdcentos_x86_64")
   set(XPU_XRE_BASE_URL
       "https://klx-sdk-release-public.su.bcebos.com/xre/release/${XPU_XRE_BASE_VERSION}"
   )
@@ -138,7 +141,6 @@ set(XPU_XTDK_DIR_NAME "xtdk-llvm15-bdcentos7_x86_64")
 if (WITH_BOX_PS OR WITH_XPU_KP)
     # set(XPU_XHPC_URL "${XPU_BASE_URL}/${XPU_XHPC_DIR_NAME}.tar.gz")    
     set(XPU_XDNN_DIR_NAME "xdnn-bdcentos_x86_64")
-    set(XPU_XCCL_DIR_NAME "xccl_rdma-bdcentos_x86_64")
     set(XPU_XRE_URL
         "${XPU_XRE_BASE_URL}/${XPU_XRE_DIR_NAME}.tar.gz"
         CACHE STRING "" FORCE)
@@ -169,6 +171,7 @@ set(XPU_API_LIB "${XPU_LIB_DIR}/${XPU_API_LIB_NAME}")
 set(XPU_API_PLUGIN "${XPU_LIB_DIR}/${XPU_API_PLUGIN_NAME}")
 set(XPU_RT_LIB "${XPU_LIB_DIR}/${XPU_RT_LIB_NAME}")
 set(XPU_RT_ALIAS_LIB "${XPU_LIB_DIR}/${XPU_RT_ALIAS_LIB_NAME}")
+set(XPU_CUDA_RT_LIB "${XPU_LIB_DIR}/${XPU_CUDA_RT_LIB_NAME}")
 set(XPU_ML_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_LIB_NAME}")
 set(XPU_ML_ALIAS_LIB "${THIRD_PARTY_PATH}/xpu/src/extern_xpu/${XPU_XRE_DIR_NAME}/so/${XPU_ML_ALIAS_LIB_NAME}")
 
@@ -205,6 +208,7 @@ ExternalProject_Add(
   BUILD_BYPRODUCTS ${XPU_API_PLUGIN}
   BUILD_BYPORDUCTS ${XPU_XBLAS_LIB}
   BUILD_BYPRODUCTS ${XPU_XFA_LIB}
+  BUILD_BYPRODUCTS ${XPU_CUDA_RT_LIB}
   BUILD_BYPRODUCTS ${XPU_RT_LIB})
 
 include_directories(${XPU_INC_DIR})
@@ -238,7 +242,7 @@ if(WITH_XPU_BKCL)
 endif()
 
 if(WITH_XPU_XRE5)
-  target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_XBLAS_LIB} ${XPU_XFA_LIB} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} -Wl,--pop-state)
+  target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_XBLAS_LIB} ${XPU_XFA_LIB} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} ${XPU_CUDA_RT_LIB} -Wl,--pop-state)
 else()
   target_link_libraries(xpulib -Wl,--push-state,--no-as-needed ${XPU_API_LIB} ${XPU_API_PLUGIN} ${XPU_RT_LIB} ${XPU_BKCL_LIB} ${XPU_ML_LIB} -Wl,--pop-state)
 endif()

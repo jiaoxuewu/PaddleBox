@@ -40,6 +40,8 @@ mkdir -p xpu/lib
 
 cp -r $XRE_DIR_NAME/include/xpu/* xpu/include/xpu/
 cp -r $XRE_DIR_NAME/so/libxpurt* xpu/lib/
+cp -r $XRE_DIR_NAME/so/libcuda* xpu/lib/
+
 # cp -r $XDNN_DIR_NAME/include/xpu/* xpu/include/xpu/
 # cp -r $XDNN_DIR_NAME/so/libxpuapi.so xpu/lib/
 cp -r $XCCL_DIR_NAME/include/* xpu/include/xpu/
