@@ -30,14 +30,6 @@ class FusedCausalMaskOp : public framework::OperatorWithKernel {
                    "CausalMaskOutput",
                    "CausalMaskOutput",
                    "FusedCausalMask");
-
-    const framework::DDim seq_info_dims = ctx->GetInputDim("SeqInfoInput");
-    PADDLE_ENFORCE_EQ(seq_info_dims.size(),
-                      1,
-                      platform::errors::InvalidArgument(
-                          "The input tensor X's dimensions of FusedCausalMaskOp"
-                          "should be 1, but received %d.",
-                          seq_info_dims.size()));
   }
 
  protected:

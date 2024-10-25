@@ -62,7 +62,7 @@ class TestFusedCausalMask(unittest.TestCase):
 
     def generate_data(self):
         seq_info = list(random.randint(1, 512) for i in range(40))
-        seq_info = [0] + list(itertools.accumulate(seq_info))
+        seq_info = [[0]] + [[i] for i in list(itertools.accumulate(seq_info))]
         # seq_info = [0, 4, 10]
         x_data = np.array(seq_info, dtype="int32")
         return x_data
