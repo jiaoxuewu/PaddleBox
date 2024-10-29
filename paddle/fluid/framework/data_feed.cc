@@ -3862,60 +3862,6 @@ void SlotPaddleBoxDataFeed::GetRankOffsetGPU(const int pv_num,
                                                value.d_ad_offset.data<int>(), col);
 #endif
 #endif
-#endif
-}
-
-<<<<<<< HEAD
-// todo: copy
-void SlotPaddleBoxDataFeed::GetTimestampGPU(const int pv_num, const int ins_num) {
-    auto stream = dynamic_cast<phi::GPUContext*>(
-          platform::DeviceContextPool::Instance().Get(this->place_))
-          ->stream();
-    auto& buf = pack_->cpu_value();
-    int64_t* tensor_ptr_cur = ads_cur_timestamp_->mutable_data<int64_t>(phi::make_ddim({ins_num, 1}), this->place_);
-    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr_cur, reinterpret_cast<int64_t*>(buf.h_cur_timestamp.data()), buf.h_cur_timestamp.size() * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    VLOG(1) << "this thread id is " << thread_id_ << ", this place is " << this->place_ << ", ads_cur_timestamp_ is " << *ads_cur_timestamp_;
-
-    int64_t* tensor_ptr_show = ads_show_timestamp_->mutable_data<int64_t>(phi::make_ddim({ins_num, 1}), this->place_);
-    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr_show, reinterpret_cast<int64_t*>(buf.h_show_timestamp.data()), buf.h_show_timestamp.size() * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    VLOG(1) << "this thread id is " << thread_id_ << ", this place is " << this->place_ << ", ads_show_timestamp_ is " << *ads_show_timestamp_;
-}
-
-void SlotPaddleBoxDataFeed::GetAdsOffsetGPU(const int pv_num, const int ins_num) {
-    auto stream = dynamic_cast<phi::GPUContext*>(
-          platform::DeviceContextPool::Instance().Get(this->place_))
-          ->stream();
-    auto& buf = pack_->cpu_value();
-    int* tensor_ptr = ads_offset_->mutable_data<int>(phi::make_ddim({pv_num + 1, 1}), this->place_);
-    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr, buf.h_ad_offset.data(), buf.h_ad_offset.size() * sizeof(int), cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    VLOG(1) << "this thread id is " << thread_id_ << ", this place is" << this->place_ << ", ads_offset_ is " << *ads_offset_;
-}
-
-void SlotPaddleBoxDataFeed::GetTrainMaskGPU(const int pv_num,
-                                            const int ins_num) {
-  auto& buf = pack_->cpu_value();
-  PADDLE_ENFORCE_EQ(
-          buf.h_train_mask.size(),
-          ins_num,
-          platform::errors::InvalidArgument(
-              "the size of train_mask must be equal to ins_num"));
-
-  auto stream = dynamic_cast<phi::GPUContext*>(
-                    platform::DeviceContextPool::Instance().Get(this->place_))
-                    ->stream();
-  int64_t* tensor_ptr = ads_train_mask_->mutable_data<int64_t>(
-      phi::make_ddim({ins_num, 1}), this->place_);
-  CUDA_CHECK(cudaMemcpyAsync(tensor_ptr,
-                             reinterpret_cast<int64_t*>(buf.h_train_mask.data()),
-                             buf.h_train_mask.size() * sizeof(int64_t),
-                             cudaMemcpyHostToDevice,
-                             stream));
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-  VLOG(1) << "this thread id is " << thread_id_ << ", this place is "
-          << this->place_ << ", ads_train_mask_ is " << *ads_train_mask_;
 }
 
 // todo: copy

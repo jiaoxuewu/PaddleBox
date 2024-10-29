@@ -843,11 +843,7 @@ __global__ void FusedSeqpoolCVMGradKernelWithCVM(const size_t N,
     }
     auto &start = lods_values[x * (batch_size + 1) + y];
     auto &end = lods_values[x * (batch_size + 1) + y + 1];
-    auto concat_end = start + concate_index + 1;
-    if (concat_end > end || concate_index == embedx_concate_size - 1) {
-      concat_end = end;
-    }
-    for (auto k = start + concate_index; k < concat_end; ++k) {
+    for (auto k = start; k < end; ++k) {
       *(in_grads_values[x] + k * embedding_size + offset) = val;
     }
   }
