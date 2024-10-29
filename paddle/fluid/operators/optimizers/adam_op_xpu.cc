@@ -176,7 +176,7 @@ class AdamOpXPUKernel : public framework::OpKernel<T> {
                         epsilon,
                         param.numel());
 
-      xpu_wait(dev_ctx.x_context()->xpu_stream);
+      // xpu_wait(dev_ctx.x_context()->xpu_stream);
       PADDLE_ENFORCE_EQ(
           r == xpu::Error_t::SUCCESS,
           true,
@@ -225,7 +225,7 @@ class AdamOpXPUKernel : public framework::OpKernel<T> {
                   r,
                   XPUAPIErrorMsg[r]));
 
-          xpu_wait(dev_ctx.x_context()->xpu_stream);
+          // xpu_wait(dev_ctx.x_context()->xpu_stream);
         }
       }
     } else if (grad_var->IsType<phi::SelectedRows>()) {

@@ -28,6 +28,18 @@ limitations under the License. */
 #include "paddle/fluid/platform/collective_helper.h"
 #endif
 #include "paddle/fluid/operators/tensor_formatter.h"
+
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+// The producer side.
+#include <scalopus_tracing/tracing.h>
+#include <scalopus_transport/transport_loopback.h>
+// The catapult recorder side.
+#include <scalopus_catapult/catapult_recorder.h>
+#include <scalopus_general/endpoint_manager_poll.h>
+#include <scalopus_general/general_provider.h>
+#include <scalopus_tracing/native_trace_provider.h>
+#endif
+
 namespace paddle {
 namespace operators {
 
@@ -402,6 +414,10 @@ class CMixAllGatherOpXPUKernel : public framework::OpKernel<T> {
     XPUStream stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
                        ->x_context()
                        ->xpu_stream;
+#ifdef TRACE_PROFILE
+    TRACE_SCOPE_START("bkcl_all_reduce", xpu_wait(stream));
+#endif
+
     PADDLE_ENFORCE_EQ(
         bkcl_all_reduce(comm->comm(),
                         recvbuff,
@@ -413,6 +429,9 @@ class CMixAllGatherOpXPUKernel : public framework::OpKernel<T> {
             BKCL_SUCCESS,
             platform::errors::PreconditionNotMet("BKCL all reduce failed"));
     PADDLE_ENFORCE_XPU_SUCCESS(xpu_wait(stream));
+#ifdef TRACE_PROFILE
+    TRACE_SCOPE_END("bkcl_all_reduce",);
+#endif
     box_ptr->DenseNcclTimer(device_id, true, 0x01);
 #else
     PADDLE_THROW("PaddlePaddle should compile with XPU.");

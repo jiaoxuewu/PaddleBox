@@ -77,9 +77,17 @@ class ThreadPool {
       try {
         fn();
       } catch (platform::EnforceNotMet& ex) {
+#if defined(PADDLE_WITH_XPU) || defined(PADDLE_WITH_XPU_KP)
+        VLOG(0) << "ThreadPool get EnforceNotMet exception abort:" << ex.what();
+        std::abort();
+#endif
         return std::unique_ptr<platform::EnforceNotMet>(
             new platform::EnforceNotMet(ex));
       } catch (const std::exception& e) {
+#if defined(PADDLE_WITH_XPU) || defined(PADDLE_WITH_XPU_KP)
+        VLOG(0) << "ThreadPool get unknow exception abort:" << e.what();
+        std::abort();
+#endif
         PADDLE_THROW(platform::errors::Fatal(
             "Unexpected exception is catched in thread pool. All "
             "throwable exception in Paddle should be an EnforceNotMet."

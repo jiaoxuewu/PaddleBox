@@ -34,7 +34,7 @@ enum class OpRole {
   kDist = 0x0008,
   // Tag all learning rate scheduler operators.
   kLRSched = 0x0010,
-  
+
   // scale lr(for adam)
   kScaleLr = 0x0012,
 

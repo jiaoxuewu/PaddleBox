@@ -105,6 +105,38 @@ class AnalysisPredictor : public PaddlePredictor {
       config_.EnableMemoryOptim(false);
     }
     predictor_id_ = inference::GetUniqueId();
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+    // Client side to produce the tracepoints.
+    factory = std::make_shared<scalopus::TransportLoopbackFactory>();
+    const auto server = factory->serve();
+    server->addEndpoint(std::make_shared<scalopus::EndpointTraceMapping>());
+    server->addEndpoint(std::make_shared<scalopus::EndpointIntrospect>());
+    server->addEndpoint(std::make_shared<scalopus::EndpointNativeTraceSender>());
+    auto endpoint_process_info = std::make_shared<scalopus::EndpointProcessInfo>();
+    endpoint_process_info->setProcessName("PaddleInfer");
+    server->addEndpoint(endpoint_process_info);
+
+    // Catapult recorder side.
+    manager = std::make_shared<scalopus::EndpointManagerPoll>(factory);
+    manager->addEndpointFactory<scalopus::EndpointTraceMapping>();
+    manager->addEndpointFactory<scalopus::EndpointProcessInfo>();
+    auto native_trace_provider = std::make_shared<scalopus::NativeTraceProvider>(manager);
+    manager->addEndpointFactory(scalopus::EndpointNativeTraceSender::name, native_trace_provider);
+
+    catapult_recorder = std::make_shared<scalopus::CatapultRecorder>();
+    catapult_recorder->addProvider(native_trace_provider);
+    catapult_recorder->addProvider(std::make_shared<scalopus::GeneralProvider>(manager));
+
+    auto logging_function = [](const std::string& msg) { std::cout << msg << std::endl; };
+    logging_function("Logging can be enabled in the source, uncomment the lines below this one.");
+
+    manager->connect(server->getAddress());  // Connect the manager to the server.
+    catapult_recorder->start();              // start the recorder thread.
+    catapult_recorder->startInterval();      // start recording.
+
+    TRACE_THREAD_NAME("PaddleInfer");
+    std::cout<<"start profile in PaddleInfer"<<std::endl;
+#endif
   }
   ///
   /// \brief Destroy the Analysis Predictor object
@@ -523,6 +555,13 @@ class AnalysisPredictor : public PaddlePredictor {
   std::shared_ptr<distributed::TaskNode> task_node_;
 #endif
   friend class paddle_infer::experimental::InternalUtils;
+
+#if defined(TRACE_PROFILE) && defined(PADDLE_WITH_XPU_KP)
+  scalopus::TransportLoopbackFactory::Ptr factory;
+  std::shared_ptr<scalopus::EndpointManagerPoll> manager;
+  scalopus::CatapultRecorder::Ptr catapult_recorder;
+#endif
+
 };
 
 }  // namespace paddle

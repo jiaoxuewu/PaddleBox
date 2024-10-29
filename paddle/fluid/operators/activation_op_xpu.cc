@@ -75,6 +75,23 @@ void xpu_activation_forward(
 }
 
 template <typename DeviceContext, typename T, typename XPUT>
+void xpu_activation_forward_long(
+    const framework::ExecutionContext &ctx,
+    std::function<int(xpu::Context *, const XPUT *, XPUT *, int, float*, float*)> func) {
+  const auto *x = ctx.Input<Tensor>("X");
+  auto *y = ctx.Output<Tensor>("Out");
+  const XPUT *x_data = reinterpret_cast<const XPUT *>(x->data<T>());
+  XPUT *y_data = reinterpret_cast<XPUT *>(y->mutable_data<T>(ctx.GetPlace()));
+
+  auto xpu_context = ctx.device_context<DeviceContext>().x_context();
+  int r = func(xpu_context, x_data, y_data, x->numel(), nullptr, nullptr);
+  PADDLE_ENFORCE_EQ(
+      r, xpu::Error_t::SUCCESS,
+      platform::errors::External("XPU activation op return wrong value[%d %s].",
+                                 r, XPUAPIErrorMsg[r]));
+}
+
+template <typename DeviceContext, typename T, typename XPUT>
 void xpu_activation_backward(
     const framework::ExecutionContext &ctx,
     std::function<int(
@@ -170,7 +187,7 @@ template <typename T>
 struct XPURelu6Functor : public BaseActivationFunctor<T> {
   using XPUType = typename XPUTypeTrait<T>::Type;
   void operator()(const framework::ExecutionContext &ctx) const {
-    xpu_activation_forward<paddle::platform::XPUDeviceContext, T, XPUType>(
+    xpu_activation_forward_long<paddle::platform::XPUDeviceContext, T, XPUType>(
         ctx, xpu::relu6<XPUType>);
   }
 };
@@ -188,7 +205,7 @@ template <typename T>
 struct XPUSigmoidFunctor : public BaseActivationFunctor<T> {
   using XPUType = typename XPUTypeTrait<T>::Type;
   void operator()(const framework::ExecutionContext &ctx) const {
-    xpu_activation_forward<paddle::platform::XPUDeviceContext, T, XPUType>(
+    xpu_activation_forward_long<paddle::platform::XPUDeviceContext, T, XPUType>(
         ctx, xpu::sigmoid<XPUType>);
   }
 };
@@ -242,7 +259,7 @@ template <typename T>
 struct XPUTanhFunctor : public BaseActivationFunctor<T> {
   using XPUType = typename XPUTypeTrait<T>::Type;
   void operator()(const framework::ExecutionContext &ctx) const {
-    xpu_activation_forward<paddle::platform::XPUDeviceContext, T, XPUType>(
+    xpu_activation_forward_long<paddle::platform::XPUDeviceContext, T, XPUType>(
         ctx, xpu::tanh<XPUType>);
   }
 };
@@ -275,7 +292,7 @@ struct XPUHardSwishFunctor : public BaseActivationFunctor<T> {
         offset,
         3.0f,
         platform::errors::External("Not support offset [%f] in XPU", offset));
-    xpu_activation_forward<paddle::platform::XPUDeviceContext, T, XPUType>(
+    xpu_activation_forward_long<paddle::platform::XPUDeviceContext, T, XPUType>(
         ctx, xpu::hard_swish<XPUType>);
   }
 };

@@ -39,4 +39,7 @@ namespace plat = paddle::platform;
 REGISTER_OP_KERNEL(c_sync_comm_stream, KP, plat::XPUPlace,
                    ops::CSyncCommStreamKernel<float>);
 
+REGISTER_OP_XPU_KERNEL(c_sync_comm_stream,
+                       ops::CSyncCommStreamKernel<float>);      
+
 #endif

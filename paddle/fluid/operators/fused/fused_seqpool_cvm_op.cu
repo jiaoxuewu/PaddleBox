@@ -373,7 +373,7 @@ __global__ void FusedCVMKernelWithCVM(const size_t N,
                                       const T *seqpool_output_values,
                                       const int batch_size,
                                       const int embedding_size,
-                                      const int cvm_offset) {
+                                      const int cvm_offset, bool fix_ctr_to_click) {
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / embedding_size;
     int offset = i % embedding_size;
@@ -386,6 +386,10 @@ __global__ void FusedCVMKernelWithCVM(const size_t N,
       *out = log(in[0] + 1);
     } else if (offset == 1) {  // ctr = log(click + 1) - log(show + 1)
       *out = log(in[1] + 1) - log(in[0] + 1);
+      // fix_ctr_to_click: click += show
+      if (fix_ctr_to_click) {
+        *out = log(in[1] + 1);
+      }
     } else {
       *out = in[offset];
     }
@@ -399,7 +403,8 @@ __global__ void FusedCVMKernelWithCVMEmbedxConcate(const size_t N,
                                       const int batch_size,
                                       const int embedding_size,
                                       const int cvm_offset,
-                                      const int embedx_concate_size) {
+                                      const int embedx_concate_size,
+                                      bool fix_ctr_to_click) {
   int concat_embedding_size = embedx_concate_size * embedding_size;
   CUDA_KERNEL_LOOP(i, N) {
     int key = i / concat_embedding_size;
@@ -416,6 +421,10 @@ __global__ void FusedCVMKernelWithCVMEmbedxConcate(const size_t N,
       *out = log(in[0] + 1);
     } else if (offset == 1) {  // ctr = log(click + 1) - log(show + 1)
       *out = log(in[1] + 1) - log(in[0] + 1);
+      // fix_ctr_to_click: click += show
+      if (fix_ctr_to_click) {
+        *out = log(in[1] + 1);
+      }
     } else {
       *out = in[offset];
     }
@@ -550,7 +559,8 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                      const int embedx_concate_size,
                      bool embedx_concate_filter,
                      bool fill_zero,
-                     const std::vector<int64_t> &slot_fea_offsets) {
+                     const std::vector<int64_t> &slot_fea_offsets, 
+                     bool fix_ctr_to_click) {
   auto stream = dynamic_cast<phi::GPUContext *>(
                     platform::DeviceContextPool::Instance().Get(place))
                     ->stream();
@@ -765,7 +775,8 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                                           seqpool_outputs_ptr,
                                           batch_size,
                                           embedding_size,
-                                          cvm_offset);
+                                          cvm_offset,
+                                          fix_ctr_to_click);
       } else {
         FusedCVMKernelWithCVMEmbedxConcate<<<GET_BLOCK(N),
                         PADDLE_CUDA_NUM_THREADS,
@@ -776,7 +787,8 @@ void FusedSeqpoolCVM(const paddle::platform::Place &place,
                                   batch_size,
                                   embedding_size,
                                   cvm_offset,
-                                  embedx_concate_size);
+                                  embedx_concate_size,
+                                  fix_ctr_to_click);
       }
     }
   } else {
@@ -1177,6 +1189,7 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
     const int embedx_concate_size = ctx.Attr<int>("embedx_concate_size");
     bool embedx_concate_filter = ctx.Attr<bool>("embedx_concate_filter");
     bool fill_zero = ctx.Attr<bool>("fill_zero");
+    bool fix_ctr_to_click = ctx.Attr<bool>("fix_ctr_to_click");
 
     auto place = ctx.GetPlace();
     if (embedx_concate_size != 1 && embed_thres_size != 0) {
@@ -1264,7 +1277,8 @@ class FusedSeqpoolCVMCUDAKernel : public framework::OpKernel<T> {
                     embedx_concate_size,
                     embedx_concate_filter,
                     fill_zero,
-                    slot_fea_offsets);
+                    slot_fea_offsets,
+                    fix_ctr_to_click);
   }
 };
 

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #pragma once
-#include "xpu/kernel/cluster_header.h"
-#include "xpu/kernel/debug.h"
-#include "xpu/kernel/math.h"
+#include "xpu/kernel/xtdk.h"
+// #include "xpu/kernel/debug.h"
+#include "xpu/kernel/xtdk_math.h"
 
 namespace phi {
 namespace kps {

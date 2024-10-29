@@ -33,6 +33,11 @@ limitations under the License. */
 #include "paddle/fluid/platform/device/gpu/nccl_helper.h"
 #endif
 
+#if defined(PADDLE_WITH_XPU_BKCL)
+#include "paddle/fluid/platform/collective_helper.h"
+#include "paddle/fluid/platform/device/xpu/bkcl_helper.h"
+#endif
+
 namespace paddle {
 namespace operators {
 
@@ -69,6 +74,20 @@ class CCommInitMultiTrainerOp : public framework::OperatorBase {
     }
     platform::NCCLCommContext::Instance().CreateNCCLCommMultiTrainer(
         devices, nccl_id, ntrainers, train_id, rid);
+#elif defined(PADDLE_WITH_XPU_BKCL)
+    BKCLUniqueId* bkcl_id = var->GetMutable<BKCLUniqueId>();
+
+    int ntrainers = Attr<int>("ntrainers");
+    int train_id = Attr<int>("trainer_id");
+    int rid = Attr<int>("ring_id");
+
+    std::vector<int> devices = Attr<std::vector<int>>("devices");
+
+    if (devices.empty()) {
+      devices = platform::GetXPUSelectedDevices();
+    }
+    platform::BKCLCommContext::Instance().CreateBKCLCommMultiTrainer(
+        devices, bkcl_id, ntrainers, train_id, rid);
 #else
     PADDLE_THROW(platform::errors::Unimplemented(
         "PaddlePaddle should compile with GPU."));

@@ -297,6 +297,13 @@ class BKCLCommContext {
 
   void CreateAllBKCLComms(const std::vector<int>& dev_ids, int ring_id = 0);
 
+
+  void CreateBKCLCommMultiTrainer(const std::vector<int>& dev_ids,
+                                  BKCLUniqueId* bkcl_id,
+                                  int nranks,
+                                  int rank,
+                                  int ring_id);
+
   // a latter comm with the same dev_id and the same ring_id
   // will override the former
   BKCLComm* AssignBKCLComm(

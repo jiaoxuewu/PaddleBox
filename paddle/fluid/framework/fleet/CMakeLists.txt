@@ -38,10 +38,29 @@ if(WITH_HETERPS)
     endif()
     add_subdirectory(heter_ps)
   elseif(WITH_XPU_KP)
+    set(SCALOPUS_PATH "${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu")
+    include_directories("${SCALOPUS_PATH}/scalopus/include")
+    include_directories("${SCALOPUS_PATH}/scalopus/include_consumer")
+    include_directories("${SCALOPUS_PATH}/scalopus/thirdparty/nlohmann_json/single_include")
+    if(TRACE_PROFILE)
+      link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_catapult")
+      link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_general")
+      link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_interface/")
+      link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_transport/")
+      link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_tracing")
+      link_directories("${SCALOPUS_PATH}/scalopus/so/thirdparty/seasocks/src/main/c/")
+    endif()
     xpu_library(
       ps_gpu_wrapper
       SRCS ps_gpu_wrapper.kps ps_gpu_wrapper.cc
       DEPS heter_ps gloo_wrapper ${BRPC_DEPS})
+    if(TRACE_PROFILE)
+      target_link_libraries(ps_gpu_wrapper scalopus_catapult scalopus_tracing_native
+                          scalopus_tracing_nop scalopus_general_consumer scalopus_general
+                          scalopus_consumer scalopus_lttng_babeltrace scalopus_tracepoint_native
+                          scalopus_tracepoint_nop scalopus_scope_tracing scalopus_transport
+                          scalopus_interface seasocks scalopus_tracing_consumer)
+    endif()
     add_subdirectory(heter_ps)
   elseif(WITH_RCCL)
     hip_library(
@@ -77,9 +96,9 @@ if(WITH_BOX_PS)
       DEPS framework_proto lod_tensor box_ps)
   endif()
   if(WITH_XPU)
-  	cc_library(
+    xpu_library(
    	   box_wrapper
-      SRCS box_wrapper.cc box_wrapper_impl.cc metrics.cc
+      SRCS box_wrapper.cc box_wrapper_kernel.kps box_wrapper_impl.cc metrics.cc
       DEPS framework_proto lod_tensor box_ps)
   endif()
 else()

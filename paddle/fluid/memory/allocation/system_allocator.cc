@@ -39,6 +39,9 @@ limitations under the License. */
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 #include "paddle/fluid/platform/cuda_device_guard.h"
 #endif
+#if defined(PADDLE_WITH_XPU)
+DECLARE_double(fraction_of_xpu_memory_to_use);
+#endif
 
 #include "paddle/fluid/platform/device/device_wrapper.h"
 #include "paddle/fluid/platform/profiler/mem_tracing.h"
@@ -288,6 +291,82 @@ void CUDAPinnedAllocator::Free(void* p, size_t size, size_t index) {
 bool CUDAPinnedAllocator::UseGpu() const { return false; }
 
 #endif
+
+#if defined(PADDLE_WITH_XPU)
+void* XPUAllocator::Alloc(size_t* index, size_t size) {
+  if (size <= 0) return nullptr;
+
+  void* p;
+  // platform::inc_malloc_cnt(xpu_id_);
+  auto result = platform::RecordedXpuMalloc(&p, size, xpu_id_);
+
+  if (result == XPU_SUCCESS) {
+    *index = 0;
+    xpu_alloc_size_ += size;
+    return p;
+  } else {
+    size_t avail, total, actual_avail, actual_total;
+    bool is_limited = platform::RecordedXpuMemGetInfo(
+        &avail, &total, &actual_avail, &actual_total, xpu_id_);
+    size_t allocated = total - avail;
+
+    std::string err_msg;
+    if (is_limited) {
+      auto limit_size = (total >> 20);
+      err_msg = string::Sprintf(
+          "\n   3) Set environment variable `FLAGS_gpu_memory_limit_mb` to a "
+          "larger value. Currently `FLAGS_gpu_memory_limit_mb` is %d, so the "
+          "maximum GPU memory usage is limited to %d MB.\n"
+          "      The command is `export FLAGS_gpu_memory_limit_mb=xxx`.",
+          limit_size,
+          limit_size);
+    }
+
+    PADDLE_THROW_BAD_ALLOC(platform::errors::ResourceExhausted(
+        "\n\nOut of memory error on XPU %d. "
+        "Cannot allocate %s memory on XPU %d, %s memory has been allocated and "
+        "available memory is only %s.\n\n"
+        "Please check whether there is any other process using GPU %d.\n"
+        "1. If yes, please stop them, or start PaddlePaddle on another GPU.\n"
+        "2. If no, please try one of the following suggestions:\n"
+        "   1) Decrease the batch size of your model.\n"
+        "   2) FLAGS_fraction_of_gpu_memory_to_use is %.2lf now, "
+        "please set it to a higher value but less than 1.0.\n"
+        "      The command is "
+        "`export FLAGS_fraction_of_gpu_memory_to_use=xxx`.%s\n\n",
+        xpu_id_,
+        string::HumanReadableSize(size),
+        xpu_id_,
+        string::HumanReadableSize(allocated),
+        string::HumanReadableSize(avail),
+        xpu_id_,
+        FLAGS_fraction_of_xpu_memory_to_use,
+        err_msg));
+    return nullptr;
+  }
+}
+
+void XPUAllocator::Free(void* p, size_t size, size_t index) {
+  PADDLE_ENFORCE_EQ(index,
+                    0,
+                    platform::errors::InvalidArgument(
+                        "The index should be 0, index is %d", index));
+  PADDLE_ENFORCE_GE(xpu_alloc_size_,
+                    size,
+                    platform::errors::InvalidArgument(
+                        "The size of memory (%d) to free exceeds the size of "
+                        "allocated gpu memory (%d)",
+                        size,
+                        xpu_alloc_size_));
+  xpu_alloc_size_ -= size;
+
+  platform::RecordedXpuFree(p, size, xpu_id_);
+}
+
+bool XPUAllocator::UseGpu() const { return true; }
+
+#endif
+
 
 #ifdef PADDLE_WITH_ASCEND_CL
 void* NPUAllocator::Alloc(size_t* index, size_t size) {

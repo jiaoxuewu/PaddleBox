@@ -26,7 +26,15 @@ template <typename DeviceContext, typename T>
 class ReduceMaxXPUKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& context) const override {
-    XPUReduce<DeviceContext, T>(context, xpu::reduce_max<T>);
+     using XPUType = typename XPUTypeTrait<T>::Type;
+  auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              XPUType* y,
+              const std::vector<int>& xdims,
+              const std::vector<int>& reduce_dims) {
+    return xpu::reduce_max<XPUType>(ctx, x, y, xdims, reduce_dims);
+  };
+    XPUReduce<DeviceContext, T>(context, f);
   }
 };
 

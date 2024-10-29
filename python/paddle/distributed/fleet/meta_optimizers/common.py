@@ -124,7 +124,7 @@ class CollectiveHelper(object):
             _add_sync_by_allreduce(block)
             return
 
-        comm_id_var = block.create_var(name=unique_name.generate('comm_id'),
+        comm_id_var = block.create_var(name=unique_name.generate('nccl_id'),
                                        persistable=True,
                                        type=core.VarDesc.VarType.RAW)
         if core.is_compiled_with_cuda():

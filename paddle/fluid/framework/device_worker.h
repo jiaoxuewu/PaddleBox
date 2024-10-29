@@ -226,7 +226,7 @@ class DeviceWorker {
   virtual void DumpField(const Scope& scope,
                          int dump_mode,
                          int dump_interval = 10000);
-
+  
   Scope* root_scope_ = nullptr;
   Scope* thread_scope_;
   paddle::platform::Place place_;
@@ -865,11 +865,13 @@ class BoxPSWorker : public DeviceWorker {
     // numel
     int64_t numel(void) { return data_tensor_->numel(); }
   };
+
   struct fd_info_t {
     int fd;
     size_t len;
     int fileid;
   };
+
  public:
   BoxPSWorker() {}
   ~BoxPSWorker() override {}
@@ -909,7 +911,7 @@ class BoxPSWorker : public DeviceWorker {
   void CreateThreadOperators(const ProgramDesc& program);
   int IsParameter(const std::string& name, bool full_match);
 
- protected:
+protected:
   virtual void DumpParam(const Scope& scope, const int batch_id);
   virtual void DumpField(const Scope& scope,
                          int dump_mode,
@@ -924,6 +926,7 @@ class BoxPSWorker : public DeviceWorker {
   int thread_id_;
 
   std::vector<std::unique_ptr<OperatorBase>> ops_;
+
   platform::DeviceContext* dev_ctx_ = nullptr;
 
   // dense async table
@@ -942,6 +945,7 @@ class BoxPSWorker : public DeviceWorker {
   std::vector<std::string> skip_vars_;
   std::unordered_map<const OperatorBase*, std::vector<std::string>>
       unused_vars_;
+
   int nccl_rank_id_ = 0;
   int ring_id_ = 0;
   std::unordered_map<std::string, int> params2rootid_;
@@ -957,6 +961,7 @@ class BoxPSWorker : public DeviceWorker {
   bool sharding_mode_ = false;
   // op extend
   std::unordered_set<const OperatorBase*> sync_points_;
+
   // dump file
   int dump_thread_num_ = 20;
   std::string dump_fields_path_ = "";

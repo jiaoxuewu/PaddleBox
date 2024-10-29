@@ -2164,7 +2164,11 @@ template <typename T>
 struct CudaExpFunctor : public BaseActivationFunctor<T> {
   // exp(x) = expf(x)
   __device__ __forceinline__ T operator()(const T x) const {
+#if defined(__xpu__)
+    return static_cast<T>(exp(static_cast<float>(x)));
+#else
     return static_cast<T>(expf(static_cast<float>(x)));
+#endif
   }
 };
 

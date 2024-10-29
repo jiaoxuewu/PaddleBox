@@ -32,6 +32,9 @@ bool is_gpu_place(const Place &p) {
 bool is_xpu_place(const Place &p) {
   return p.GetType() == phi::AllocationType::XPU;
 }
+bool is_xpul3_place(const Place &p) {
+  return p.GetType() == phi::AllocationType::XPUL3;
+}
 
 bool is_mlu_place(const Place &p) {
   return p.GetType() == phi::AllocationType::MLU;
@@ -67,6 +70,10 @@ bool places_are_same_class(const Place &p1, const Place &p2) {
     return p1.GetDeviceType() == p2.GetDeviceType();
   }
 #endif
+  if ((is_xpu_place(p1) && is_xpul3_place(p2)) ||
+      (is_xpu_place(p2) && is_xpul3_place(p1))) {
+    return true;
+  }
   return p1.GetType() == p2.GetType();
 }
 
@@ -75,7 +82,12 @@ bool is_same_place(const Place &p1, const Place &p2) {
     if (is_cpu_place(p1) || is_cuda_pinned_place(p1) ||
         is_npu_pinned_place(p1)) {
       return true;
+    } else if ((is_xpu_place(p1) && is_xpul3_place(p2)) ||
+               (is_xpu_place(p2) && is_xpul3_place(p1))) {
+      return true;
     } else if (is_xpu_place(p1)) {
+      return p1 == p2;
+    } else if (is_xpul3_place(p1)) {
       return p1 == p2;
     } else if (is_mlu_place(p1)) {
       return p1 == p2;
@@ -103,6 +115,8 @@ std::string PlaceHelper::GetDeviceType(const Place &place) {
     return "npu";
   } else if (is_xpu_place(place)) {
     return "xpu";
+  // } else if (is_xpul3_place(place)) {
+  //   return "xpul3";
   } else if (is_custom_place(place)) {
     return place.GetDeviceType();
   } else {
@@ -125,6 +139,8 @@ Place PlaceHelper::CreatePlace(const std::string &dev_type, size_t dev_id) {
     return platform::NPUPlace(dev_id);
   } else if (dev_type == "xpu") {
     return platform::XPUPlace(dev_id);
+  // } else if (dev_type == "xpul3") {
+  //   return platform::XPUL3Place(dev_id);
   } else {
     return platform::CustomPlace(dev_type, dev_id);
   }

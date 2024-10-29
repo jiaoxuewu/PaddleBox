@@ -25,6 +25,9 @@
 #include "paddle/fluid/platform/collective_helper.h"
 #include "paddle/fluid/platform/device/gpu/gpu_info.h"
 #endif
+#if defined(PADDLE_WITH_XPU_KP)
+#include "paddle/fluid/platform/collective_helper.h"
+#endif
 
 DECLARE_bool(use_gpu_replica_cache);
 DECLARE_int32(gpu_replica_cache_dim);
@@ -77,7 +80,7 @@ inline int make_str2day_id(const std::string &date) {
 #ifdef PADDLE_WITH_BOX_PS
 std::shared_ptr<BoxWrapper> BoxWrapper::s_instance_ = nullptr;
 std::shared_ptr<boxps::PaddleShuffler> BoxWrapper::data_shuffle_ = nullptr;
-cudaStream_t BoxWrapper::stream_list_[MAX_GPU_NUM];
+boxps::StreamType BoxWrapper::stream_list_[MAX_GPU_NUM];
 
 void BoxWrapper::PullSparse(const paddle::platform::Place& place,
                             const std::vector<const uint64_t*>& keys,
@@ -206,6 +209,24 @@ void BoxWrapper::EndPass(bool need_save_delta) {
     VLOG(0) << "release gpu memory total: " << (total >> 20)
             << "MB, available: " << (available >> 20) << "MB";
   }
+#endif
+#if defined(TRACE_PROFILE) && defined(PADDLE_WITH_XPU_KP)
+  static int trace_pass_count = std::getenv("TRACE_PASS_NUM")!=NULL ?
+                      std::stoi(std::string(std::getenv("TRACE_PASS_NUM"))):
+                      1;
+  static int count = 0;
+  if(count==trace_pass_count) {
+    // need to guarantee we propagate the tracepoints before we stop the interval.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    catapult_recorder->stopInterval();
+    catapult_recorder->setupDumpFile("./traces.json");
+    std::cout<<"end profile in BoxWrapper"<<std::endl;
+
+    factory.reset();
+    manager.reset();
+    catapult_recorder.reset();
+  }
+  count++;
 #endif
 }
 
@@ -549,6 +570,15 @@ class MaskMetricMsg : public MetricMsg {
     calculator->init(bucket_size, max_batch_size);
   }
   virtual ~MaskMetricMsg() {}
+  inline phi::Place GetVarPlace(const paddle::framework::Scope *exe_scope, const std::string &varname) {
+    auto* var = exe_scope->FindVar(varname.c_str());
+    PADDLE_ENFORCE_NOT_NULL(
+        var, platform::errors::NotFound("Error: var %s is not found in scope.",
+                                        varname.c_str()));
+    auto& gpu_tensor = var->Get<LoDTensor>();
+    auto place = gpu_tensor.place();
+    return place;
+  }
   void add_data(const Scope* exe_scope,
                 const paddle::platform::Place& place) override {
     int label_len = 0;
@@ -567,8 +597,11 @@ class MaskMetricMsg : public MetricMsg {
                       platform::errors::PreconditionNotMet(
                           "the predict data length should be consistent with "
                           "the label data length"));
+    auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+    auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+    auto mask_var_place = GetVarPlace(exe_scope, mask_varname_);
     auto cal = GetCalculator();
-    cal->add_mask_data(pred_data, label_data, mask_data, label_len, place);
+    cal->add_mask_data(pred_data, label_data, mask_data, label_len, pre_var_place, label_var_place, mask_var_place);
   }
 
  protected:
@@ -698,8 +731,11 @@ class FloatMaskMetricMsg : public MetricMsg {
                           "the predict data length should be consistent with "
                           "the label data length"));
     auto cal = GetCalculator();
+    auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+    auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+    auto mask_var_place = GetVarPlace(exe_scope, mask_varname_);
     cal->add_float_mask_data(
-        pred_data, label_data, mask_data, label_len, place);
+        pred_data, label_data, mask_data, label_len, pre_var_place, label_var_place, mask_var_place);
   }
 
  protected:
@@ -742,8 +778,11 @@ class ContinueMaskMetricMsg : public MetricMsg {
                           "the predict data length should be consistent with "
                           "the label data length"));
     auto cal = GetCalculator();
+    auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+    auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+    auto mask_var_place = GetVarPlace(exe_scope, mask_varname_);
     cal->add_continue_mask_data(
-        pred_data, label_data, mask_data, label_len, place);
+        pred_data, label_data, mask_data, label_len, pre_var_place, label_var_place, mask_var_place);
   }
 
  protected:
@@ -864,7 +903,7 @@ class NanInfMetricMsg : public MetricMsg {
     calculator = new BasicAucCalculator(mode_collect_in_gpu);
     calculator->init(bucket_size);
   }
-  virtual ~NanInfMetricMsg() { } 
+  virtual ~NanInfMetricMsg() { }
   void add_data(const Scope* exe_scope,
                 const paddle::platform::Place& place) override {
     int label_len = 0;
@@ -880,8 +919,10 @@ class NanInfMetricMsg : public MetricMsg {
                           "the predict data length should be consistent with "
                           "the label data length"));
     auto cal = GetCalculator();
-    cal->add_nan_inf_data( 
-        pred_data, label_data, label_len, place);
+    auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+    auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+    cal->add_nan_inf_data(
+        pred_data, label_data, label_len, pre_var_place, label_var_place);
   }
 };
 
@@ -1178,9 +1219,25 @@ void BoxWrapper::GetFeatureOffsetInfo(void) {
                     0,
                     platform::errors::PreconditionNotMet(
                         "feature push size must sizeof(float) number."));
+#ifdef PADDLE_WITH_XPU_KP
+  box_wrapper_kernel_->GetFeatureInfo(pull_info_, feature_pull_size_,
+      push_info_, feature_push_size_, embedx_dim_, expand_embed_dim_,
+      pull_embedx_scale_);
+#endif
 }
 
 //============================== other =====================================
+
+#ifdef PADDLE_WITH_XPU_KP
+void BoxWrapper::SetDataFuncForCacheManager(int batch_num,
+    std::function<void(int, std::vector<std::vector<std::pair<uint64_t*, int>>>*)> data_func) {
+  boxps_ptr_->SetDataFuncForCacheManager(batch_num, data_func, &fid2sign_map_);
+}
+
+int BoxWrapper::PrepareNextBatch(int dev_id) {
+  return boxps_ptr_->PrepareNextBatch(dev_id);
+}
+#endif
 
 boxps::PSAgentBase* BoxWrapper::GetAgent() {
   boxps::PSAgentBase* p_agent = nullptr;
@@ -1206,7 +1263,7 @@ void BoxWrapper::InitializeGPUAndLoadModel(
     const std::map<std::string, float>& lr_map) {
   if (nullptr != s_instance_) {
     VLOG(3) << "Begin InitializeGPU";
-    std::vector<cudaStream_t*> stream_list;
+    std::vector<boxps::StreamType*> stream_list;
     gpu_num_ = GetDeviceCount();
     CHECK(gpu_num_ <= MAX_GPU_NUM) << "gpu card num: " << gpu_num_
                                    << ", more than max num: " << MAX_GPU_NUM;

@@ -36,6 +36,8 @@ const char *AllocationTypeStr(AllocationType type) {
       return "gpu_pinned";
     case AllocationType::XPU:
       return "xpu";
+    case AllocationType::XPUL3:
+      return "xpul3";
     case AllocationType::NPU:
       return "npu";
     case AllocationType::NPUPINNED:

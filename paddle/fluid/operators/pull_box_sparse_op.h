@@ -21,6 +21,7 @@
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/phi/kernels/funcs/math_function.h"
+#include "paddle/fluid/operators/tensor_formatter.h"
 
 DECLARE_bool(enable_pull_box_padding_zero);
 
@@ -47,6 +48,8 @@ static void PaddingZeros(const framework::ExecutionContext &ctx,
   data_lod[0].resize(batch_size + 1, 1);
   data_lod[0][0] = 0;
   data->set_lod(data_lod);
+
+  data->set_layout(paddle::framework::DataLayout::UNDEFINED);
 }
 
 template <typename T>
@@ -128,6 +131,14 @@ static void PullBoxSparseFunctor(const framework::ExecutionContext &ctx) {
       }
     }
   }
+  int total_length = 0;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    total_length += outputs[i]->numel();
+  }
+  framework::LoDTensor total_values;
+  total_values.Resize(phi::make_ddim({total_length}));
+  total_values.mutable_data<T>(ctx.GetPlace());
+  int offset = 0;
   for (size_t i = 0; i < slot_size; ++i) {
     const auto *slot = inputs[i];
     auto *output = outputs[i];
@@ -143,7 +154,10 @@ static void PullBoxSparseFunctor(const framework::ExecutionContext &ctx) {
         reinterpret_cast<const uint64_t *>(slot->data<int64_t>());
     all_keys[i] = single_slot_keys;
     slot_lengths[i] = numel;
+    total_values.set_offset(offset);
+    output->ShareBufferWith(total_values);
     all_values[i] = output->mutable_data<T>(ctx.GetPlace());
+    offset += output->numel() * sizeof(T);
   }
 
 #ifdef PADDLE_WITH_BOX_PS
@@ -152,6 +166,22 @@ static void PullBoxSparseFunctor(const framework::ExecutionContext &ctx) {
   auto expand_dim = box_ptr->GetExpandEmbedDim();
   box_ptr->PullSparse(ctx.GetPlace(), all_keys, all_values, slot_lengths,
                       hidden_size, expand_dim, skip_offset, true);
+  if (std::getenv("DUMP_XPU_PUSH_SPARSE_INPUT") != nullptr) {
+    auto names = ctx.OutputNames("Out");
+    for (int i = 0; i <int(outputs.size()); i++) {
+      TensorFormatter formatter;
+      // const std::string &name = ctx.InputNames(framework::GradVarName("Out"))[i];
+      const std::string &name = names[i];
+      formatter.SetPrintTensorType(true);
+      formatter.SetPrintTensorShape(true);
+      formatter.SetPrintTensorLod(true);
+      formatter.SetPrintTensorLayout(true);
+      // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".pull_sparse.txt");
+      std::string message = std::string("---embs_all_")+std::to_string(i)+std::string("---");
+      formatter.Print(*(outputs[i]), name, message);
+    }
+  }
 #endif
 }
 
@@ -204,6 +234,22 @@ static void PushBoxSparseFunctor(const framework::ExecutionContext &ctx) {
   int skip_offset = ctx.Attr<int>("offset");
   auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
   auto expand_dim = box_ptr->GetExpandEmbedDim();
+  if (std::getenv("DUMP_XPU_PUSH_SPARSE_INPUT") != nullptr) {
+    auto names = ctx.InputNames(framework::GradVarName("Out"));
+    for (int i = (d_output.size()-1); i >=0; i--) {
+      TensorFormatter formatter;
+      // const std::string &name = ctx.InputNames(framework::GradVarName("Out"))[i];
+      const std::string &name = names[i];
+      formatter.SetPrintTensorType(true);
+      formatter.SetPrintTensorShape(true);
+      formatter.SetPrintTensorLod(true);
+      formatter.SetPrintTensorLayout(true);
+      // formatter.SetSummarize(static_cast<int64_t>(Attr<int>("summarize")));
+      formatter.SetPrintFilePath("dev"+std::to_string(ctx.GetPlace().device)+".push_sparse.txt");
+      std::string message = std::string("---embs_all_")+std::to_string(i)+std::string("---");
+      formatter.Print(*(d_output[i]), name, message);
+    }
+  }
   box_ptr->PushSparseGrad(ctx.GetPlace(), all_keys, all_grad_values,
                           slot_lengths, hidden_size, expand_dim, batch_size,
                           skip_offset, true);

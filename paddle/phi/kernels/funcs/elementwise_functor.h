@@ -21,7 +21,7 @@ limitations under the License. */
 #if defined(__xpu__)
 #include <xpu/runtime.h>
 
-#include "xpu/kernel/math_xpu2.h"  //pow()
+#include "xpu/kernel/xtdk_math.h"  //pow()
 #endif
 
 namespace phi {

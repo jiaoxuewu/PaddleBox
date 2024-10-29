@@ -111,8 +111,27 @@ class TensorAddFunctor
         platform::errors::External(
             "XPU add kernel return wrong value[%d %s]", r, XPUAPIErrorMsg[r]));
   }
+  void operator()(const platform::XPUL3Place& place) const {
+    using XPUType = typename XPUTypeTrait<T>::Type;
+    platform::XPUDeviceContext* ctx = dynamic_cast<platform::XPUDeviceContext*>(
+        platform::DeviceContextPool::Instance().Get(place));
+    int r = xpu::add<XPUType>(
+        ctx->x_context(), reinterpret_cast<const XPUType*>(x_),
+        reinterpret_cast<const XPUType*>(y_), reinterpret_cast<XPUType*>(y_),
+        static_cast<int>(numel_));
+    PADDLE_ENFORCE_EQ(
+        r, XPU_SUCCESS,
+        platform::errors::External("XPU add kernel return wrong value[%d %s]",
+                                   r, XPUAPIErrorMsg[r]));
+  }
 #else
   void operator()(const platform::XPUPlace& place) const {
+    PADDLE_THROW(platform::errors::PermissionDenied(
+        "Gradient accumulation on place (%s) "
+        "is not supported in imperative mode",
+        place));
+  }
+  void operator()(const platform::XPUL3Place& place) const {
     PADDLE_THROW(platform::errors::PermissionDenied(
         "Gradient accumulation on place (%s) "
         "is not supported in imperative mode",

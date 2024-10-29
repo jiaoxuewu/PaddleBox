@@ -178,6 +178,10 @@ std::string PrintLodTensor(const phi::DenseTensor* tensor,
              proto::VarType::FP64) {
     out_val = PrintLodTensorType<double>(
         tensor, start, end, separator, need_leading_separator);
+  } else if (framework::TransToProtoVarType(tensor->dtype()) ==
+             proto::VarType::BOOL) {
+    out_val = PrintLodTensorType<bool>(
+        tensor, start, end, separator, need_leading_separator);
   } else {
     out_val = "unsupported type";
   }
@@ -201,7 +205,7 @@ void PrintLodTensor(const phi::DenseTensor* tensor,
              proto::VarType::FP64) {
     PrintLodTensorType<double>(
         tensor, start, end, out_val, separator, need_leading_separator);
-  } else {
+    } else {
     out_val += "unsupported type";
   }
 }
@@ -249,7 +253,8 @@ void DeviceWorker::DumpParam(const Scope& scope, const int batch_id) {
       continue;
     }
     framework::LoDTensor cpu_tensor;
-    if (platform::is_gpu_place(tensor->place())) {
+    if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
       TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
       tensor = &cpu_tensor;
     }
@@ -347,7 +352,8 @@ void DeviceWorker::DumpField(const Scope& scope,
         continue;
       }
       framework::LoDTensor cpu_tensor;
-      if (platform::is_gpu_place(tensor->place())) {
+      if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
         TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
         cpu_tensor.set_lod(tensor->lod());
         tensor = &cpu_tensor;
@@ -435,7 +441,8 @@ void DeviceWorker::DumpField(const Scope& scope,
       continue;
     }
     framework::LoDTensor cpu_tensor;
-    if (platform::is_gpu_place(tensor->place())) {
+    if (platform::is_gpu_place(tensor->place()) ||
+          platform::is_xpu_place(tensor->place())) {
       TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
       cpu_tensor.set_lod(tensor->lod());
       tensor = &cpu_tensor;

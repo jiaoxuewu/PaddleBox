@@ -14,9 +14,22 @@ limitations under the License. */
 
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/op_version_registry.h"
+#include "paddle/phi/core/dense_tensor.h"
 
 namespace paddle {
 namespace operators {
+
+
+#define DEFINE_XPU_COMPARE_KERNEL(functor)                      \
+    auto f = [](xpu::Context* ctx,                                    \
+                const XPUType* x,                                     \
+                const XPUType* y,                                     \
+                bool* z,                                              \
+                const std::vector<int>& xshape,                       \
+                const std::vector<int>& yshape) {                     \
+      return functor(ctx, x, y, z, xshape, yshape);                   \
+    };                                                                
+
 
 template <typename T, typename XPUType>
 void XPUCompare(const framework::ExecutionContext& ctx,
@@ -56,17 +69,20 @@ class EqualXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_equal<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_equal<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 
 template <typename DeviceContext, typename T>
 class NotEqualXPUKernel : public framework::OpKernel<T> {
+
   using XPUType = typename XPUTypeTrait<T>::Type;
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_not_equal<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_not_equal<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 
@@ -76,7 +92,8 @@ class LessThanXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_less_than<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_less_than<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 
@@ -86,7 +103,8 @@ class LessEqualXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_less_equal<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_less_equal<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 
@@ -96,7 +114,8 @@ class GreaterThanXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_greater_than<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_greater_than<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 
@@ -106,7 +125,8 @@ class GreaterEqualXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUCompare<T, XPUType>(ctx, xpu::broadcast_greater_equal<XPUType>);
+    DEFINE_XPU_COMPARE_KERNEL(xpu::broadcast_greater_equal<XPUType>)
+    XPUCompare<T, XPUType>(ctx, f);
   }
 };
 

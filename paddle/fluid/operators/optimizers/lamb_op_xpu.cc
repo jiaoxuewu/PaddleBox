@@ -36,8 +36,6 @@ class LambOpXPUKernel : public framework::OpKernel<T> {
                           ctx.InputNames("Param").front(),
                           framework::ToTypeName(param_var->Type())));
 
-    using paddle::framework::LoDTensor;
-
     // inputs
     T epsilon = static_cast<T>(ctx.Attr<float>("epsilon"));
     T weight_decay = static_cast<T>(ctx.Attr<float>("weight_decay"));

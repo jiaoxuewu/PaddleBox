@@ -195,6 +195,9 @@ class AllocatorFacadePrivate {
         for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
           InitNaiveBestFitXPUAllocator(platform::XPUPlace(dev_id));
         }
+        for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
+          InitNaiveBestFitXPUAllocator(platform::XPUL3Place(dev_id));
+        }
 #endif
 #ifdef PADDLE_WITH_ASCEND_CL
         for (int dev_id = 0; dev_id < platform::GetNPUDeviceCount(); ++dev_id) {
@@ -262,6 +265,9 @@ class AllocatorFacadePrivate {
         for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
           InitNaiveBestFitXPUAllocator(platform::XPUPlace(dev_id));
         }
+        for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
+          InitNaiveBestFitXPUAllocator(platform::XPUL3Place(dev_id));
+        }
 #endif
 #ifdef PADDLE_WITH_IPU
         for (int dev_id = 0; dev_id < platform::GetIPUDeviceCount(); ++dev_id) {
@@ -292,6 +298,9 @@ class AllocatorFacadePrivate {
 #ifdef PADDLE_WITH_XPU
         for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
           InitNaiveBestFitXPUAllocator(platform::XPUPlace(dev_id));
+        }
+        for (int dev_id = 0; dev_id < platform::GetXPUDeviceCount(); ++dev_id) {
+          InitNaiveBestFitXPUAllocator(platform::XPUL3Place(dev_id));
         }
 #endif
 #ifdef PADDLE_WITH_IPU
@@ -808,6 +817,9 @@ class AllocatorFacadePrivate {
   void InitNaiveBestFitXPUAllocator(platform::XPUPlace p) {
     allocators_[p] = std::make_shared<NaiveBestFitAllocator>(p);
   }
+  void InitNaiveBestFitXPUAllocator(platform::XPUL3Place p) {
+    allocators_[p] = std::make_shared<NaiveBestFitAllocator>(p);
+  }
 #endif
 
 #ifdef PADDLE_WITH_IPU
@@ -856,6 +868,10 @@ class AllocatorFacadePrivate {
     int device_count = platform::GetXPUDeviceCount();
     for (int i = 0; i < device_count; ++i) {
       platform::XPUPlace p(i);
+      system_allocators_[p] = std::make_shared<NaiveBestFitAllocator>(p);
+    }
+    for (int i = 0; i < device_count; ++i) {
+      platform::XPUL3Place p(i);
       system_allocators_[p] = std::make_shared<NaiveBestFitAllocator>(p);
     }
 #endif
@@ -910,6 +926,9 @@ class AllocatorFacadePrivate {
     int device_count = platform::GetXPUDeviceCount();
     for (int dev_id = 0; dev_id < device_count; ++dev_id) {
       places.emplace_back(platform::XPUPlace(dev_id));
+    }
+    for (int dev_id = 0; dev_id < device_count; ++dev_id) {
+      places.emplace_back(platform::XPUL3Place(dev_id));
     }
 #endif
 #ifdef PADDLE_WITH_ASCEND_CL

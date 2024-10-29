@@ -1014,6 +1014,7 @@ class ShardingOptimizer(MetaOptimizerBase):
                     "c_sync_comm_stream",
                     "c_calc_comm_stream",
                     "c_gen_nccl_id",
+                    "c_gen_bkcl_id",
                     "c_comm_init",
                     'send_v2',
                     'recv_v2',
@@ -2019,25 +2020,41 @@ class ThreadShardingOptimizer(ShardingOptimizer):
             other_endpoints = endpoints[:]
             other_endpoints.remove(current_endpoint)
             
-            nccl_id_var = block.create_var(
+            comm_id_var = block.create_var(
                 name=unique_name.generate('nccl_id'),
                 persistable=True,
                 type=core.VarDesc.VarType.RAW,
             )
-            block.append_op(
-                type='c_gen_nccl_id',
-                inputs={},
-                outputs={'Out': nccl_id_var},
-                attrs={
-                    'rank': role_id,
-                    'endpoint': current_endpoint,
-                    'other_endpoints': other_endpoints,
-                    self.op_role_key: OpRole.Forward,
-                },
-            )
+
+            if core.is_compiled_with_cuda():
+                block.append_op(
+                    type='c_gen_nccl_id',
+                    inputs={},
+                    outputs={'Out': comm_id_var},
+                    attrs={
+                        'rank': role_id,
+                        'endpoint': current_endpoint,
+                        'other_endpoints': other_endpoints,
+                        self.op_role_key: OpRole.Forward,
+                    },
+                )
+                
+            elif core.is_compiled_with_xpu():
+                block.append_op(
+                    type='c_gen_bkcl_id',
+                    inputs={},
+                    outputs={'Out': comm_id_var},
+                    attrs={
+                        'rank': role_id,
+                        'endpoint': current_endpoint,
+                        'other_endpoints': other_endpoints,
+                        self.op_role_key: OpRole.Forward,
+                    },
+                )
+
             block.append_op(
                 type='c_comm_init_multitrainer',
-                inputs={'X': nccl_id_var},
+                inputs={'X': comm_id_var},
                 outputs={},
                 attrs={
                     'ntrainers': self.node_nums,

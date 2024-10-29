@@ -223,6 +223,9 @@ void Copy<platform::XPUPlace, platform::XPUPlace>(platform::XPUPlace dst_place,
     VLOG(1) << "memcpy XPU_DEVICE_TO_DEVICE size <= 0 (" << num << ")";
     return;
   }
+  if (dst_place == src_place) {
+    platform::SetXPUDeviceId(src_place.device);
+  }
   platform::MemcpySyncD2D(dst, dst_place, src, src_place, num);
 }
 
@@ -257,6 +260,110 @@ void Copy<phi::Place, phi::XPUPlace>(phi::Place dst_place,
     return Copy(place_dst, dst, src_place, src, num);
   }
 }
+
+template <>
+void Copy<platform::XPUL3Place, platform::CPUPlace>(platform::XPUL3Place dst_place,
+                                                  void* dst,
+                                                  platform::CPUPlace src_place,
+                                                  const void* src,
+                                                  size_t num) {
+  if (num <= 0) {
+    VLOG(1) << "memcpy XPU_HOST_TO_DEVICE size <= 0 (" << num << ")";
+    return;
+  }
+  platform::MemcpySyncH2D(dst, src, num, dst_place);
+}
+
+template <>
+void Copy<platform::CPUPlace, platform::XPUL3Place>(platform::CPUPlace dst_place,
+                                                  void* dst,
+                                                  platform::XPUL3Place src_place,
+                                                  const void* src,
+                                                  size_t num) {
+  if (num <= 0) {
+    VLOG(1) << "memcpy XPU_DEVICE_TO_HOST size <= 0 (" << num << ")";
+    return;
+  }
+  platform::MemcpySyncD2H(dst, src, num, src_place);
+}
+
+template <>
+void Copy<platform::XPUL3Place, platform::XPUPlace>(platform::XPUL3Place dst_place,
+                                                  void* dst,
+                                                  platform::XPUPlace src_place,
+                                                  const void* src,
+                                                  size_t num) {
+  if (num <= 0) {
+    VLOG(1) << "memcpy XPU_DEVICE_TO_DEVICE size <= 0 (" << num << ")";
+    return;
+  }
+  platform::MemcpySyncD2D(dst, dst_place, src, src_place, num);
+}
+
+template <>
+void Copy<platform::XPUPlace, platform::XPUL3Place>(platform::XPUPlace dst_place,
+                                                  void* dst,
+                                                  platform::XPUL3Place src_place,
+                                                  const void* src,
+                                                  size_t num) {
+  if (num <= 0) {
+    VLOG(1) << "memcpy XPU_DEVICE_TO_DEVICE size <= 0 (" << num << ")";
+    return;
+  }
+  platform::MemcpySyncD2D(dst, dst_place, src, src_place, num);
+}
+
+template <>
+void Copy<platform::XPUL3Place, platform::XPUL3Place>(platform::XPUL3Place dst_place,
+                                                  void* dst,
+                                                  platform::XPUL3Place src_place,
+                                                  const void* src,
+                                                  size_t num) {
+  if (num <= 0) {
+    VLOG(1) << "memcpy XPU_DEVICE_TO_DEVICE size <= 0 (" << num << ")";
+    return;
+  }
+  platform::MemcpySyncD2D(dst, dst_place, src, src_place, num);
+}
+
+// NOTE: only for (CPUPlace and XPUL3Place) -> (XPUL3Place).
+template <>
+void Copy<phi::XPUL3Place, phi::Place>(phi::XPUL3Place dst_place,
+                                     void* dst,
+                                     phi::Place src_place,
+                                     const void* src,
+                                     size_t num) {
+  if (src_place.GetType() == phi::AllocationType::CPU) {
+    platform::CPUPlace place_src;
+    return Copy(dst_place, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUL3Place place_src(src_place.GetDeviceId());
+    return Copy(dst_place, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPU) {
+    platform::XPUPlace place_src(src_place.GetDeviceId());
+    return Copy(dst_place, dst, place_src, src, num);
+  }
+}
+
+// NOTE: only for (XPUL3Place) -> (CPUPlace and XPUL3Place).
+template <>
+void Copy<phi::Place, phi::XPUL3Place>(phi::Place dst_place,
+                                     void* dst,
+                                     phi::XPUL3Place src_place,
+                                     const void* src,
+                                     size_t num) {
+  if (dst_place.GetType() == phi::AllocationType::CPU) {
+    platform::CPUPlace place_dst;
+    return Copy(place_dst, dst, src_place, src, num);
+  } else if (dst_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUL3Place place_dst(dst_place.GetDeviceId());
+    return Copy(place_dst, dst, src_place, src, num);
+  } else if (dst_place.GetType() == phi::AllocationType::XPU) {
+    platform::XPUPlace place_dst(dst_place.GetDeviceId());
+    return Copy(place_dst, dst, src_place, src, num);
+  }
+}
+
 #endif
 
 #ifdef PADDLE_WITH_ASCEND_CL
@@ -1421,6 +1528,37 @@ void Copy<phi::Place, phi::Place>(phi::Place dst_place,
              dst_place.GetType() == phi::AllocationType::XPU) {
     platform::XPUPlace place_src(src_place.GetDeviceId());
     platform::XPUPlace place_dst(dst_place.GetDeviceId());
+    return Copy(place_dst, dst, place_src, src, num);
+  }
+  else if (src_place.GetType() == phi::AllocationType::CPU &&
+             dst_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUL3Place place_dst(dst_place.GetDeviceId());
+    platform::CPUPlace place_src;
+    return Copy(place_dst, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPUL3 &&
+             dst_place.GetType() == phi::AllocationType::CPU) {
+    platform::XPUL3Place place_src(src_place.GetDeviceId());
+    platform::CPUPlace place_dst;
+    return Copy(place_dst, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPUL3 &&
+             dst_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUL3Place place_src(src_place.GetDeviceId());
+    platform::XPUL3Place place_dst(dst_place.GetDeviceId());
+    return Copy(place_dst, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPU &&
+             dst_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUL3Place place_dst(dst_place.GetDeviceId());
+    platform::XPUPlace place_src(src_place.GetDeviceId());
+    return Copy(place_dst, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPUL3 &&
+             dst_place.GetType() == phi::AllocationType::XPU) {
+    platform::XPUL3Place place_src(src_place.GetDeviceId());
+    platform::XPUPlace place_dst(dst_place.GetDeviceId());
+    return Copy(place_dst, dst, place_src, src, num);
+  } else if (src_place.GetType() == phi::AllocationType::XPU &&
+             dst_place.GetType() == phi::AllocationType::XPUL3) {
+    platform::XPUPlace place_src(src_place.GetDeviceId());
+    platform::XPUL3Place place_dst(dst_place.GetDeviceId());
     return Copy(place_dst, dst, place_src, src, num);
   }
 #endif

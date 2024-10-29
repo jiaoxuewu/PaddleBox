@@ -1764,7 +1764,8 @@ def fused_seqpool_cvm(input,
                       embed_thres_size=0,
                       embedx_concate_size=1,
                       embedx_concate_filter=False,
-                      fill_zero=True):
+                      fill_zero=True,
+                      fix_ctr_to_click=False):
     """
      **Notes: The Op only receives List of LoDTensor as input, only support SUM pooling now.
     :attr:`input`.
@@ -1824,7 +1825,8 @@ def fused_seqpool_cvm(input,
             "embed_thres_size": embed_thres_size,
             "embedx_concate_size": embedx_concate_size,
             "embedx_concate_filter": embedx_concate_filter,
-            "fill_zero": fill_zero
+            "fill_zero": fill_zero,
+            "fix_ctr_to_click": fix_ctr_to_click
         })
 
     return outs

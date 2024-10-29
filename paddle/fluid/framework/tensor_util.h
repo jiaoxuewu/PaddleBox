@@ -307,7 +307,7 @@ void TensorFromVector(const std::vector<T>& src,
   }
 #endif
 #ifdef PADDLE_WITH_XPU
-  else if (platform::is_xpu_place(dst_place)) {  // NOLINT
+  else if (platform::is_xpu_place(dst_place) || platform::is_xpul3_place(dst_place)) {  // NOLINT
     memory::Copy(dst_place, dst_ptr, src_place, src_ptr, size);
   }
 #endif
@@ -390,7 +390,7 @@ inline void TensorFromVector(const std::vector<bool>& src,
   }
 #endif
 #ifdef PADDLE_WITH_XPU
-  else if (platform::is_xpu_place(dst_place)) {  // NOLINT
+  else if (platform::is_xpu_place(dst_place) || platform::is_xpul3_place(dst_place)) {  // NOLINT
     memory::Copy(dst_place, dst_ptr, src_place, src_ptr, size);
   }
 #endif
@@ -455,7 +455,7 @@ void TensorToVector(const Tensor& src,
   }
 #endif
 #if defined(PADDLE_WITH_XPU)
-  else if (platform::is_xpu_place(src.place())) {  // NOLINT
+  else if (platform::is_xpu_place(src.place()) || platform::is_xpul3_place(src.place())) {  // NOLINT
     memory::Copy(dst_place, dst_ptr, src.place(), src_ptr, size);
   }
 #endif
@@ -513,7 +513,7 @@ inline void TensorToVector(const Tensor& src,
   }
 #endif
 #if defined(PADDLE_WITH_XPU)
-  else if (platform::is_xpu_place(src.place())) {  // NOLINT
+  else if (platform::is_xpu_place(src.place()) || platform::is_xpu_place(src.place())) {  // NOLINT
     memory::Copy(dst_place, dst_ptr, src.place(), src_ptr, size);
   }
 #endif

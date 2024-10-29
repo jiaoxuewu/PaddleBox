@@ -63,6 +63,34 @@ void MemcpySyncD2D(void *dst,
                    const phi::XPUPlace &src_place,
                    size_t count,
                    const phi::XPUContext &dev_ctx);
+void MemcpySyncH2D(void *dst,
+                   const void *src,
+                   size_t count,
+                   const phi::XPUL3Place &dst_place,
+                   const phi::XPUContext &dev_ctx);
+void MemcpySyncD2H(void *dst,
+                   const void *src,
+                   size_t count,
+                   const phi::XPUL3Place &src_place,
+                   const phi::XPUContext &dev_ctx);
+void MemcpySyncD2D(void *dst,
+                   const phi::XPUL3Place &dst_place,
+                   const void *src,
+                   const phi::XPUL3Place &src_place,
+                   size_t count,
+                   const phi::XPUContext &dev_ctx);
+void MemcpySyncD2D(void *dst,
+                   const phi::XPUL3Place &dst_place,
+                   const void *src,
+                   const phi::XPUPlace &src_place,
+                   size_t count,
+                   const phi::XPUContext &dev_ctx);
+void MemcpySyncD2D(void *dst,
+                   const phi::XPUPlace &dst_place,
+                   const void *src,
+                   const phi::XPUL3Place &src_place,
+                   size_t count,
+                   const phi::XPUContext &dev_ctx);
 
 class XPUDeviceGuard {
  public:
@@ -87,7 +115,7 @@ class XPUDeviceGuard {
   int prev_id_{-1};
 };
 
-enum XPUVersion { XPU1, XPU2 };
+enum XPUVersion { XPU1, XPU2, XPU3 };
 XPUVersion get_xpu_version(int dev_id);
 
 }  // namespace xpu

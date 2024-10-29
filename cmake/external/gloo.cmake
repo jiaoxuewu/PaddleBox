@@ -25,12 +25,17 @@ set(GLOO_LIBRARY_DIR
     "${GLOO_INSTALL_DIR}/lib"
     CACHE PATH "gloo library directory." FORCE)
 # As we add extra features for gloo, we use the non-official repo
-if(${CMAKE_CUDA_COMPILER_VERSION} LESS 12.0)
+if(WITH_GPU)
+  if(${CMAKE_CUDA_COMPILER_VERSION} LESS 12.0)
+    set(GLOO_REPOSITORY ${GIT_URL}/sandyhouse/gloo.git)
+    set(GLOO_TAG v0.0.2)
+  else()
+    set(GLOO_REPOSITORY ${GIT_URL}/ziyoujiyi/gloo.git)
+    set(GLOO_TAG v0.0.3)
+  endif()
+else()
   set(GLOO_REPOSITORY ${GIT_URL}/sandyhouse/gloo.git)
   set(GLOO_TAG v0.0.2)
-else()
-  set(GLOO_REPOSITORY ${GIT_URL}/ziyoujiyi/gloo.git)
-  set(GLOO_TAG v0.0.3)
 endif()
 set(GLOO_LIBRARIES
     "${GLOO_INSTALL_DIR}/lib/libgloo.a"

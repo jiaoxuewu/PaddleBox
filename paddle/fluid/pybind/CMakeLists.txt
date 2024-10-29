@@ -132,7 +132,8 @@ set(PYBIND_SRCS
     op_function5.cc
     op_function6.cc
     op_function7.cc
-    op_function8.cc)
+    op_function8.cc
+    )
 
 if(WITH_CUSTOM_DEVICE)
   set(PYBIND_DEPS ${PYBIND_DEPS} phi_capi)
@@ -204,6 +205,10 @@ endif()
 
 if(WITH_NCCL OR WITH_RCCL)
   list(APPEND PYBIND_SRCS nccl_wrapper_py.cc)
+endif()
+
+if(WITH_XPU)
+  list(APPEND PYBIND_SRCS xpu_info_py.cc)
 endif()
 
 if(WITH_PYTHON)

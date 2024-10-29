@@ -56,6 +56,19 @@ PADDLE_DEFINE_EXPORTED_int32(paddle_num_threads,
 
 /**
  * Operator related FLAG
+ * Name: FLAGS_check_fused_negative_nan_inf
+ * Since Version: 0.13.0
+ * Value Range: bool, default=false
+ * Example:
+ * Note: Used to debug. Checking whether operator produce NAN/INF or not.
+ */
+PADDLE_DEFINE_EXPORTED_bool(
+    check_fused_negative_nan_inf,
+    false,
+    "Checking whether fused's op's input/output have NAN/INF or not. It will be "
+    "extremely slow so please use this flag wisely.");
+/**
+ * Operator related FLAG
  * Name: FLAGS_check_nan_inf
  * Since Version: 0.13.0
  * Value Range: bool, default=false
@@ -617,6 +630,56 @@ PADDLE_DEFINE_EXPORTED_uint64(
 
 #endif
 
+#if defined(PADDLE_WITH_XPU)
+
+PADDLE_DEFINE_EXPORTED_bool(
+    use_xpu_buddy_allocator,
+    true,
+    "If set true, using buddy allocator to manage mem allocation");
+
+constexpr static float fraction_of_xpu_memory_to_use = 0.1f;
+PADDLE_DEFINE_EXPORTED_double(
+    fraction_of_xpu_memory_to_use,
+    fraction_of_xpu_memory_to_use,
+    "Allocate a trunk of xpu memory that is this fraction of the "
+    "total xpu memory size. Future memory usage will be allocated "
+    "from the trunk. If the trunk doesn't have enough xpu memory, "
+    "additional trunks of the same size will be requested from xpu "
+    "until the xpu has no memory left for another trunk.");
+
+PADDLE_DEFINE_EXPORTED_uint64(
+    initial_xpu_memory_in_mb,
+    0ul,
+    "Allocate a trunk of xpu memory whose byte size is specified by "
+    "the flag. Future memory usage will be allocated from the "
+    "trunk. If the trunk doesn't have enough gpu memory, additional "
+    "trunks of the xpu memory will be requested from xpu with size "
+    "specified by FLAGS_reallocate_xpu_memory_in_mb until the xpu has "
+    "no memory left for the additional trunk. Note: if you set this "
+    "flag, the memory size set by "
+    "FLAGS_fraction_of_xpu_memory_to_use will be overrided by this "
+    "flag. If you don't set this flag, PaddlePaddle will use "
+    "FLAGS_fraction_of_xpu_memory_to_use to allocate xpu memory");
+
+PADDLE_DEFINE_EXPORTED_uint64(
+    reallocate_xpu_memory_in_mb,
+    0ul,
+    "If this flag is set, Paddle will reallocate the xpu memory with "
+    "size specified by this flag. Else Paddle will reallocate by "
+    "FLAGS_fraction_of_xpu_memory_to_use");
+
+PADDLE_DEFINE_EXPORTED_uint64(
+    xpu_memory_limit_mb,
+    0UL,
+    "The maximum gpu memory limit that the process can allocate. "
+    "If it is equal to 0, there would be no limit and all gpu memory "
+    "would be available to the process. If it is larger than 0, "
+    "the process would raise out of memory error if the allocated "
+    "memory exceeds the limit even though there is available "
+    "memory on the gpu card. The unit is MB and default value is 0.");
+
+#endif
+
 /**
  * Scope related FLAG
  * Name: local_exe_sub_scope_limit
@@ -937,6 +1000,10 @@ PADDLE_DEFINE_EXPORTED_bool(enable_ins_parser_file,
             false,
             "enable parser ins file, default false");
 
+PADDLE_DEFINE_EXPORTED_bool(enable_async_datafeed_batch,
+            false,
+            "enable datafeed use 2-buffer async batch, default false");
+
 PADDLE_DEFINE_EXPORTED_bool(enable_binding_train_cpu, true,
             "enable train binding cpu, default true");
 PADDLE_DEFINE_EXPORTED_bool(enable_sync_dense_moment, false,
@@ -980,6 +1047,8 @@ PADDLE_DEFINE_EXPORTED_bool(lineid_have_extend_info, false,
 PADDLE_DEFINE_EXPORTED_bool(dump_filed_same_as_aibox, false,
             "if true , will change dump format from abc.tmp0:2:1:1 into "
             "abc:1:1, which same as aibox");
+PADDLE_DEFINE_EXPORTED_bool(padbox_dataset_disable_random_update, false,
+            "if true ,will feed & update data with the same sequence");
 
 PADDLE_DEFINE_EXPORTED_bool(
     gpugraph_enable_hbm_table_collision_stat,
