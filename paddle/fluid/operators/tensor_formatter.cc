@@ -41,12 +41,23 @@ void TensorFormatter::SetSummarize(int64_t summarize) {
   summarize_ = summarize;
 }
 
+void TensorFormatter::SetPrintFilePath(const std::string& print_file_path) {
+  print_file_path_ = print_file_path;
+}
+
 void TensorFormatter::Print(const framework::LoDTensor& print_tensor,
                             const std::string& tensor_name,
                             const std::string& message) {
   static std::mutex mutex;
   std::lock_guard<std::mutex> lock(mutex);
-  std::cout << Format(print_tensor, tensor_name, message);
+  if (print_file_path_ == "") {
+    std::cout << Format(print_tensor, tensor_name, message);
+  } else {
+    std::ofstream ofs;
+    ofs.open(print_file_path_, std::ios::app);
+    ofs << Format(print_tensor, tensor_name, message);
+    ofs.close();
+  }
 }
 
 std::string TensorFormatter::Format(const framework::LoDTensor& print_tensor,

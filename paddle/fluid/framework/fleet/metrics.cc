@@ -53,7 +53,7 @@ void BasicAucCalculator::add_unlock_data(double pred, int label) {
   _local_total_num += 1.0;
 }
 
-void BasicAucCalculator::add_unlock_data_with_sample(double pred, int label, float sample_scale) {
+void BasicAucCalculator::add_unlock_data(double pred, int label, float sample_scale) {
   PADDLE_ENFORCE_GE(pred, 0.0,
       platform::errors::PreconditionNotMet("pred should be greater than 0, pred=%f", pred));
   PADDLE_ENFORCE_LE(pred, 1.0,
@@ -121,115 +121,127 @@ void BasicAucCalculator::add_nan_inf_unlock_data(float pred, int label){
     ++_inf_cnt;
   }
 }
-void BasicAucCalculator::add_data(
-        const float* d_pred, const int64_t* d_label,
-        int batch_size, const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<int64_t> h_label;
-    h_pred.resize(batch_size);
-    h_label.resize(batch_size);
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
 
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_unlock_data(h_pred[i], h_label[i]);
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_unlock_data(d_pred[i], d_label[i]);
-    }
+void BasicAucCalculator::add_data(const float* d_pred,
+                                  const int64_t* d_label,
+                                  int batch_size,
+                                  const paddle::platform::Place& place_pred,
+                                  const paddle::platform::Place& place_label) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<int64_t> h_label;
+  const float* add_pred = d_pred;
+  const int64_t* add_label = d_label;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
+    h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
+    h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    add_unlock_data(add_pred[i], add_label[i]);
   }
 }
 
 void BasicAucCalculator::add_sample_data(
-    const float* d_pred, const int64_t* d_label,
-    const std::vector<float>& d_sample_scale, int batch_size,
-    const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<int64_t> h_label;
+    const float* d_pred,
+    const int64_t* d_label,
+    const std::vector<float>& d_sample_scale,
+    int batch_size,
+    const paddle::platform::Place& place_pred,
+    const paddle::platform::Place& place_label) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<int64_t> h_label;
+  const float* add_pred = d_pred;
+  const int64_t* add_label = d_label;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
     h_label.resize(batch_size);
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_unlock_data_with_sample(h_pred[i], h_label[i], d_sample_scale[i]);
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_unlock_data_with_sample(d_pred[i], d_label[i], d_sample_scale[i]);
-    }
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    add_unlock_data(add_pred[i], add_label[i], d_sample_scale[i]);
   }
 }
 
 // add mask data
 void BasicAucCalculator::add_mask_data(const float* d_pred,
                                        const int64_t* d_label,
-                                       const int64_t* d_mask, int batch_size,
-                                       const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<int64_t> h_label;
-    thread_local std::vector<int64_t> h_mask;
+                                       const int64_t* d_mask,
+                                       int batch_size,
+                                       const paddle::platform::Place& place_pred,
+                                       const paddle::platform::Place& place_label,
+                                       const paddle::platform::Place& place_mask) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<int64_t> h_label;
+  thread_local std::vector<int64_t> h_mask;
+  const float* add_pred = d_pred;
+  const int64_t* add_label = d_label;
+  const int64_t* add_mask = d_mask;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
     h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  if (platform::is_gpu_place(place_mask) || platform::is_xpu_place(place_mask)) {
     h_mask.resize(batch_size);
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (h_mask[i]) {
-        add_unlock_data(h_pred[i], h_label[i]);
-      }
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (d_mask[i]) {
-        add_unlock_data(d_pred[i], d_label[i]);
-      }
+    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place_mask);
+    add_mask = h_mask.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    if (add_mask[i]) {
+      add_unlock_data(add_pred[i], add_label[i]);
     }
   }
 }
 // add float mask data
-void BasicAucCalculator::add_float_mask_data(
-    const float* d_pred,
-    const float* d_label,
-    const int64_t* d_mask,
-    int batch_size,
-    const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<float> h_label;
-    thread_local std::vector<int64_t> h_mask;
+void BasicAucCalculator::add_float_mask_data(const float* d_pred,
+                                             const float* d_label,
+                                             const int64_t* d_mask, int batch_size,
+                                             const paddle::platform::Place& place_pred,
+                                             const paddle::platform::Place& place_label,
+                                             const paddle::platform::Place& place_mask) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<float> h_label;
+  thread_local std::vector<int64_t> h_mask;
+  const float* add_pred = d_pred;
+  const float* add_label = d_label;
+  const int64_t* add_mask = d_mask;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
     h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  if (platform::is_gpu_place(place_mask) || platform::is_xpu_place(place_mask)) {
     h_mask.resize(batch_size);
-
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (h_mask[i]) {
-        add_unlock_data_with_float_label(h_pred[i], h_label[i]);
-      }
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (d_mask[i]) {
-        add_unlock_data_with_float_label(d_pred[i], d_label[i]);
-      }
+    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place_mask);
+    add_mask = h_mask.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    if (add_mask[i]) {
+      add_unlock_data_with_float_label(add_pred[i], add_label[i]);
     }
   }
 }
@@ -240,31 +252,34 @@ void BasicAucCalculator::add_continue_mask_data(
     const float* d_label,
     const int64_t* d_mask,
     int batch_size,
-    const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<float> h_label;
-    thread_local std::vector<int64_t> h_mask;
+    const paddle::platform::Place& place_pred,
+    const paddle::platform::Place& place_label,
+    const paddle::platform::Place& place_mask) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<float> h_label;
+  thread_local std::vector<int64_t> h_mask;
+  const float* add_pred = d_pred;
+  const float* add_label = d_label;
+  const int64_t* add_mask = d_mask;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
     h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  if (platform::is_gpu_place(place_mask) || platform::is_xpu_place(place_mask)) {
     h_mask.resize(batch_size);
-
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (h_mask[i]) {
-        add_unlock_data_with_continue_label(h_pred[i], h_label[i]);
-      }
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      if (d_mask[i]) {
-        add_unlock_data_with_continue_label(d_pred[i], d_label[i]);
-      }
+    SyncCopyD2H(h_mask.data(), d_mask, batch_size, place_mask);
+    add_mask = h_mask.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    if (add_mask[i]) {
+      add_unlock_data_with_continue_label(add_pred[i], add_label[i]);
     }
   }
 }
@@ -375,8 +390,8 @@ void BasicAucCalculator::compute() {
                  << ", sqr: " << _local_sqrerr;
   }
 
-  PADDLE_ENFORCE_EQ(total_ins_num,
-                    _size,
+  PADDLE_ENFORCE_LT(abs(total_ins_num - _size),
+                    0.5,
                     platform::errors::InvalidArgument(
                         "The table ins num not equal real total num."));
   calculate_bucket_error(table[0], table[1]);
@@ -433,30 +448,34 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
                                       const int64_t* d_label,
                                       const int64_t* d_uid,
                                       int batch_size,
-                                      const paddle::platform::Place& place) {
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<int64_t> h_label;
-    thread_local std::vector<uint64_t> h_uid;
+                                      const paddle::platform::Place& place_pred,
+                                      const paddle::platform::Place& place_label,
+                                      const paddle::platform::Place& place_uid) {
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<int64_t> h_label;
+  thread_local std::vector<int64_t> h_uid;
+  const float* add_pred = d_pred;
+  const int64_t* add_label = d_label;
+  const int64_t* add_uid = d_uid;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
+  }
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
     h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  if (platform::is_gpu_place(place_uid) || platform::is_xpu_place(place_uid)) {
     h_uid.resize(batch_size);
-
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-    SyncCopyD2H(h_uid.data(), reinterpret_cast<const uint64_t *>(d_uid), batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_uid_unlock_data(h_pred[i], h_label[i],
-          static_cast<uint64_t>(h_uid[i]));
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_uid_unlock_data(d_pred[i], d_label[i],
-          static_cast<uint64_t>(d_uid[i]));
-    }
+    SyncCopyD2H(h_uid.data(), d_label, batch_size, place_uid);
+    add_uid = h_uid.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+      add_uid_unlock_data(add_pred[i], add_label[i],
+          static_cast<uint64_t>(add_uid[i]));
   }
 }
 
@@ -464,26 +483,26 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
 void BasicAucCalculator::add_nan_inf_data(const float* d_pred,
                                           const int64_t* d_label,
                                           int batch_size,
-                                          const paddle::platform::Place& place){
-  if (platform::is_gpu_place(place) || platform::is_xpu_place(place)) {
-    thread_local std::vector<float> h_pred;
-    thread_local std::vector<int64_t> h_label;
+                                          const paddle::platform::Place& place_pred,
+                                          const paddle::platform::Place& place_label){
+  thread_local std::vector<float> h_pred;
+  thread_local std::vector<int64_t> h_label;
+  const float* add_pred = d_pred;
+  const int64_t* add_label = d_label;
+  if (platform::is_gpu_place(place_pred) || platform::is_xpu_place(place_pred)) {
     h_pred.resize(batch_size);
-    h_label.resize(batch_size);
-    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place);
-    SyncCopyD2H(h_label.data(), d_label, batch_size, place);
-
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_nan_inf_unlock_data(h_pred[i], h_label[i]);
-    }
-  } else {
-    std::lock_guard<std::mutex> lock(_table_mutex);
-    for (int i = 0; i < batch_size; ++i) {
-      add_nan_inf_unlock_data(d_pred[i], d_label[i]);
-    }
+    SyncCopyD2H(h_pred.data(), d_pred, batch_size, place_pred);
+    add_pred = h_pred.data();
   }
-
+  if (platform::is_gpu_place(place_label) || platform::is_xpu_place(place_label)) {
+    h_label.resize(batch_size);
+    SyncCopyD2H(h_label.data(), d_label, batch_size, place_label);
+    add_label = h_label.data();
+  }
+  std::lock_guard<std::mutex> lock(_table_mutex);
+  for (int i = 0; i < batch_size; ++i) {
+    add_nan_inf_unlock_data(add_pred[i], add_label[i]);
+  }
 }
 
 void BasicAucCalculator::add_uid_unlock_data(double pred,

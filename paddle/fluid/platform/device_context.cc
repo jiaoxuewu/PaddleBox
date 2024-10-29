@@ -67,7 +67,7 @@ AllocationPtr Alloc(const platform::DeviceContext& dev_ctx, size_t size) {
         "Paddle can't use CUDA device since it's not compiled with CUDA,"
         "Please recompile or reinstall Paddle with GPU support."));
 #endif
-  } else if (platform::is_xpu_place(place)) {
+  } else if (platform::is_xpu_place(place) || platform::is_xpul3_place(place)) {
 #ifdef PADDLE_WITH_XPU
     // TODO(liuyuhui): Consider xpu stream later
     return Alloc(place, size);
@@ -133,7 +133,12 @@ DeviceType Place2DeviceType(const platform::Place& place) {
   }
 }
 
+#if (defined PADDLE_WITH_XPU) && (defined PADDLE_ON_INFERENCE) && (!defined PADDLE_WITH_BOX_PS)
+std::vector<platform::Place> DeviceContextPool::places_;
+thread_local bool DeviceContextPool::is_init_ = false;
+#else
 DeviceContextPool* DeviceContextPool::pool = nullptr;
+#endif
 thread_local const std::map<Place,
                             std::shared_future<std::unique_ptr<DeviceContext>>>*
     DeviceContextPool::external_device_contexts_ = nullptr;
@@ -150,6 +155,13 @@ platform::DeviceContext* DeviceContextPool::Get(const platform::Place& place) {
 
   auto it = ptr->find(place);
   if (it == ptr->end()) {
+#ifdef PADDLE_WITH_XPU
+    XPUPlace xpu_place = XPUPlace(place);
+    it = ptr->find(xpu_place);
+    if (it != ptr->end()) {
+      return it->second.get().get();
+    }
+#endif
     PADDLE_THROW(platform::errors::Unimplemented(
         "Place %s is not supported. Please check that your paddle compiles "
         "with WITH_GPU, WITH_XPU, WITH_IPU, WITH_MLU or WITH_ASCEND_CL option "
@@ -290,7 +302,7 @@ void EmplaceDeviceContexts(
           "CUDAPlace is not supported. Please re-compile with WITH_GPU "
           "option."));
 #endif
-    } else if (platform::is_xpu_place(p)) {
+    } else if (platform::is_xpu_place(p) || platform::is_xpul3_place(p)) {
 #ifdef PADDLE_WITH_XPU
       EmplaceDeviceContext<XPUDeviceContext>(
           place_to_device_context,
@@ -362,12 +374,15 @@ void EmplaceDeviceContexts(
   }
 }
 
+#if (defined PADDLE_WITH_XPU) && (defined PADDLE_ON_INFERENCE) && (!defined PADDLE_WITH_BOX_PS)
+#else
 DeviceContextPool::DeviceContextPool(
     const std::vector<platform::Place>& places) {
   EmplaceDeviceContexts(&device_contexts_,
                         places,
                         /*disable_setting_default_stream_for_allocator=*/false);
 }
+#endif
 
 #ifdef PADDLE_WITH_IPU
 IPUDeviceContext::IPUDeviceContext(IPUPlace place) : place_(place) {}

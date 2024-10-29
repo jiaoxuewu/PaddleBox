@@ -89,7 +89,7 @@ class FusedSeqpoolCVMOp : public framework::OperatorWithKernel {
         if (clk_filter) {
           out_dim = {-1, (dims[rank - 1] - 1) * embedx_concate_size};
         } else {
-        out_dim = {-1, dims[rank - 1]};
+          out_dim = {-1, dims[rank - 1] * embedx_concate_size};
         }
       } else {
         out_dim = {-1, (dims[rank - 1] - cvm_offset - embed_thres_size) * embedx_concate_size};
@@ -147,6 +147,7 @@ class FusedSeqpoolCVMOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<int>("embedx_concate_size", "(int, default 1)").SetDefault(1);
     AddAttr<bool>("embedx_concate_filter", "(bool, default false)").SetDefault(false);
     AddAttr<bool>("fill_zero", "(bool, default true)").SetDefault(true);
+    AddAttr<bool>("fix_ctr_to_click", "(bool, default false)").SetDefault(false);
 
     AddComment(R"DOC(
 Fuse multiple pairs of Sequence Pool and CVM Operator.
@@ -184,6 +185,8 @@ class FusedSeqpoolCVMGradOp : public framework::OperatorWithKernel {
         auto o_dim = og_dims[i][og_dims[i].size() - 1];
         if (clk_filter) {  // filter clk need + 1
           o_dim = o_dim / embedx_concate_size + 1;
+        } else {
+          o_dim = o_dim / embedx_concate_size;
         }
         PADDLE_ENFORCE_EQ(
             o_dim, x_dims[i][og_dims[i].size() - 1],

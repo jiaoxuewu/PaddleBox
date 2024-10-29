@@ -49,6 +49,11 @@ limitations under the License. */
 #endif
 #include "paddle/fluid/framework/threadpool.h"
 
+#if defined(PADDLE_WITH_XPU_KP)
+#include "paddle/fluid/platform/device_context.h"
+#include "data_feed_xpu_kernel_helper.h"
+#endif
+
 DECLARE_int32(record_pool_max_size);
 DECLARE_int32(slotpool_thread_num);
 DECLARE_int32(padbox_record_pool_max_size);
@@ -58,6 +63,7 @@ DECLARE_bool(padbox_auc_runner_mode);
 DECLARE_bool(enable_slotpool_wait_release);
 DECLARE_bool(enable_slotrecord_reset_shrink);
 DECLARE_bool(enable_ins_parser_add_file_path);
+DECLARE_bool(enable_async_datafeed_batch);
 
 namespace paddle {
 namespace framework {
@@ -475,10 +481,12 @@ class CustomParser {
   }
 };
 
+#ifndef PADDLE_WITH_XPU_KP
 struct UsedSlotGpuType {
   int is_uint64_value;
   int slot_value_idx;
 };
+#endif
 
 struct SlotPvInstanceObject {
   int zero_mask_num_ = 0;
@@ -495,7 +503,7 @@ using SlotPvInstance = SlotPvInstanceObject*;
 inline SlotPvInstance make_slotpv_instance() {
   return new SlotPvInstanceObject();
 }
-#if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
+#if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP)
 struct BatchCPUValue {
   std::vector<int> h_uint64_lens;
   std::vector<uint64_t> h_uint64_keys;
@@ -608,13 +616,20 @@ class MiniBatchGpuPack {
       return;
     }
     T* data = buf->mutable_data<T>({static_cast<int64_t>(size), 1}, place_);
+
+#if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
     CUDA_CHECK(cudaMemcpyAsync(data, val, size * sizeof(T),
                                cudaMemcpyHostToDevice, stream_));
+#elif defined(PADDLE_WITH_XPU_KP)
+    platform::MemcpySyncH2D(data, val, size * sizeof(T), this->place_);
+#endif
   }
 
  private:
   paddle::platform::Place place_;
+# if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
   cudaStream_t stream_;
+#endif
   BatchGPUValue value_;
   BatchCPUValue buf_;
   int ins_num_ = 0;
@@ -693,6 +708,109 @@ inline MiniBatchGpuPackMgr& BatchGpuPackMgr() {
   static MiniBatchGpuPackMgr mgr;
   return mgr;
 }
+
+class MiniBatchSlotPvTensorBuffer {
+public:
+  MiniBatchSlotPvTensorBuffer(const std::vector<UsedSlotInfo>& infos, 
+                              const paddle::platform::Place& place) : place_(place) {
+    used_slot_size_ = static_cast<int>(infos.size());
+    offsets_ = std::vector<std::vector<size_t>>(used_slot_size_);
+    batch_float_feasigns_ = std::vector<std::vector<float>>(used_slot_size_);
+    batch_uint64_feasigns_ = std::vector<std::vector<uint64_t>>(used_slot_size_);
+    feed_vec_ = std::vector<LoDTensor>(used_slot_size_);
+
+    used_float_num_ = used_uint64_num_ = 0;
+    for (int i = 0; i < used_slot_size_; ++i) {
+      auto& info = infos[i];
+      if (info.type[0] == 'u') {
+        ++used_uint64_num_;
+      } else {
+        ++used_float_num_;
+      }
+    }
+  }
+
+  void resize_pv_tensor(int pv_row, int pv_col) {
+    pv_tensor_.mutable_data<int>({pv_row, pv_col}, this->place_);
+  }
+
+  void resize_tensor(int float_total_len, int uint64_total_len) {
+    // alloc memory
+    if (used_float_num_ > 0) {
+      float_tensor_.mutable_data<float>({float_total_len + used_float_num_, 1}, this->place_);
+    }
+    if (used_uint64_num_ > 0) {
+      uint64_tensor_.mutable_data<int64_t>({uint64_total_len + used_uint64_num_, 1}, this->place_);
+    }
+  }
+
+  bool valid() {
+    return buffer_done_.valid();
+  }
+
+  void wait_buffer_done(bool need_pv = false) {
+    PADDLE_ENFORCE(buffer_done_.valid(), "invalid future parameter");
+    PADDLE_ENFORCE(buffer_done_.get(), "invalid future results");
+  }
+
+  void set_buffer_done(std::future<bool> && buffer_done) {
+    buffer_done_ = std::move(buffer_done);
+  }
+  
+  LoDTensor & uint64_tensor() {
+    return uint64_tensor_;
+  }
+
+  LoDTensor & float_tensor() {
+    return float_tensor_;
+  }
+
+  LoDTensor & pv_tensor() {
+    return pv_tensor_;
+  }
+
+  std::vector<LoDTensor> & feed_vec() {
+    return feed_vec_;
+  }
+
+  std::vector<SlotRecord> & pv_ins_vec() {
+    return pv_ins_vec_;
+  }
+
+  std::vector<std::vector<float>> & batch_float_feasigns() {
+    return batch_float_feasigns_;
+  }
+
+  std::vector<std::vector<uint64_t>> & batch_uint64_feasigns() {
+    return batch_uint64_feasigns_;
+  }
+
+  std::vector<std::vector<size_t>> & offsets() {
+    return offsets_;
+  }
+private:
+  // uint64 tensor
+  LoDTensor uint64_tensor_;
+  // float tensor
+  LoDTensor float_tensor_;
+  // pv tensor
+  LoDTensor pv_tensor_;
+
+  std::vector<SlotRecord> pv_ins_vec_;
+  paddle::platform::Place place_;
+
+  int used_float_num_;
+  int used_uint64_num_;
+  int used_slot_size_;
+
+  std::vector<std::vector<size_t>> offsets_;
+  std::vector<std::vector<float>> batch_float_feasigns_;
+  std::vector<std::vector<uint64_t>> batch_uint64_feasigns_;
+  std::vector<LoDTensor> feed_vec_;
+
+  std::future<bool> buffer_done_;
+};
+
 #endif
 
 typedef paddle::framework::CustomParser* (*CreateParserObjectFunc)();
@@ -2070,10 +2188,11 @@ class SlotPaddleBoxDataFeed : public DataFeed {
  public:
   SlotPaddleBoxDataFeed() { finish_start_ = false; }
   virtual ~SlotPaddleBoxDataFeed() {
-#if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
+#if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
     if (pack_ != nullptr) {
       LOG(WARNING) << "gpu: "
                    << thread_id_
+                   << ", Next total time: " << next_timer_.ElapsedSec()
                    << ", pack batch total time: " << batch_timer_.ElapsedSec()
                    << "[copy:" << pack_->trans_time_span()
                    << ",fill:" << fill_timer_.ElapsedSec()
@@ -2127,15 +2246,24 @@ class SlotPaddleBoxDataFeed : public DataFeed {
     current_phase_ = current_phase;
   }
   virtual const std::string& GetLineId(int idx) const {
-#if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
-    return pack_->get_lineid(idx);
+#if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
+    if (FLAGS_enable_async_datafeed_batch) {
+      return ins_record_ptr_[idx]->ins_id_;
+    } else {
+      return pack_->get_lineid(idx);
+    }    
+    
 #else
     return ins_record_ptr_[idx]->ins_id_;
 #endif
   }
   virtual int GetCurBatchSize() {
-#if defined(PADDLE_WITH_CUDA)
-    return pack_->ins_num();
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
+    if (FLAGS_enable_async_datafeed_batch) {
+      return batch_ins_num_;
+    } else {
+      return pack_->ins_num();
+    }
 #else
     return batch_ins_num_;
 #endif
@@ -2149,7 +2277,9 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   void AddBatchOffset(const std::pair<int, int>& off) {
     batch_offsets_.push_back(off);
   }
-  void GetUsedSlotIndex(std::vector<int>* used_slot_index);
+  void GetUsedSlotIndex(
+      std::vector<int>* used_slot_index,
+      std::vector<std::string>* used_slot_name = nullptr);
   // expand values
   void ExpandSlotRecord(SlotRecord* ins);
   // pack
@@ -2188,6 +2318,9 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   virtual void LoadIntoMemoryByArchive(void);
 
  private:
+  void CalRankOffsetCPU(const SlotPvInstance* pv_vec, int pv_num, int ins_number, 
+                        std::vector<int> & rank_offset_mat, int max_rank, int row, int col);
+
 #if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
   void CopyRankOffset(int* dest, const int ins_num, const int pv_num,
                       const int max_rank, const int* ranks, const int* cmatchs,
@@ -2200,19 +2333,16 @@ class SlotPaddleBoxDataFeed : public DataFeed {
                            const int float_slot_size,
                            const UsedSlotGpuType* used_slots);
   void CopyForTensor(const int ins_num, const int used_slot_num, void** dest,
-
-
                      const size_t* slot_value_offsets,
                      const uint64_t* uint64_feas, const int* uint64_offsets,
                      const int* uint64_ins_lens, const int uint64_slot_size,
                      const float* float_feas, const int* float_offsets,
                      const int* float_ins_lens, const int float_slot_size,
 
-
-
-
                      const UsedSlotGpuType* used_slots);
 #endif
+  bool PrefechNextBatch(const SlotRecord* ins_vec, int num);
+  bool PrefechNextBatchWithPv(const SlotPvInstance* pvs, int num);
 
  protected:
   int thread_id_ = 0;
@@ -2246,13 +2376,16 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   int float_use_slot_size_ = 0;
   int uint64_use_slot_size_ = 0;
 
-#if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
+#if defined(PADDLE_WITH_CUDA) && defined(_LINUX) || defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
   MiniBatchGpuPack* pack_ = nullptr;
-#else
+#endif
   std::vector<SlotRecord> pv_ins_vec_;
   const SlotRecord *ins_record_ptr_ = nullptr;
   int batch_ins_num_ = 0;
-#endif
+  
+  std::shared_ptr<MiniBatchSlotPvTensorBuffer> slot_pv_tensor_buf_ = nullptr;
+  std::shared_ptr<MiniBatchSlotPvTensorBuffer> slot_pv_tensor_buf_next_ = nullptr;
+
   int offset_index_ = 0;
   std::vector<std::pair<int, int>> batch_offsets_;
   SlotPvInstance* pv_ins_ = nullptr;
@@ -2261,6 +2394,7 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   std::vector<UsedSlotInfo> used_slots_info_;
   std::string parser_so_path_;
 
+  platform::Timer next_timer_;
   platform::Timer batch_timer_;
   platform::Timer fill_timer_;
   platform::Timer offset_timer_;

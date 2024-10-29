@@ -34,6 +34,9 @@ void CastKernel(const Context& dev_ctx,
 
   auto* in_data = x.data<T>();
   auto numel = x.numel();
+  if (numel <= 0) {
+    return;
+  }
 
   int r = -1;
   switch (out_dtype) {
@@ -77,12 +80,11 @@ void CastKernel(const Context& dev_ctx,
       PADDLE_THROW(phi::errors::Unavailable(
           "Not supported cast %d -> %d", x.dtype(), out_dtype));
   }
-
   PADDLE_ENFORCE_EQ(
       r,
       XPU_SUCCESS,
       phi::errors::External(
-          "XPU CAST API return wrong value[%d %s].", r, XPUAPIErrorMsg[r]));
+          "XPU CAST API return wrong value[%d %s]. x=%s", r, XPUAPIErrorMsg[r], x.name));
 }
 }  // namespace phi
 

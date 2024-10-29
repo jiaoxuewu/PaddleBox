@@ -16,16 +16,34 @@ if(NOT WITH_XPU_KP)
   return()
 endif()
 
+set(SCALOPUS_PATH "${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu")
+include_directories("${SCALOPUS_PATH}/scalopus/include")
+include_directories("${SCALOPUS_PATH}/scalopus/include_consumer")
+include_directories("${SCALOPUS_PATH}/scalopus/thirdparty/nlohmann_json/single_include")
+if(TRACE_PROFILE)
+  link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_catapult")
+  link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_general")
+  link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_interface/")
+  link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_transport/")
+  link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_tracing")
+  link_directories("${SCALOPUS_PATH}/scalopus/so/thirdparty/seasocks/src/main/c/")
+endif()
+
 set(LINK_FLAGS "-Wl,--allow-multiple-definition")
 set(CMAKE_EXE_LINKER_FLAGS "${LINK_FLAGS}")
 set(CMAKE_SHARED_LINKER_FLAGS "${LINK_FLAGS}")
 
 if(NOT XPU_TOOLCHAIN)
-  set(XPU_TOOLCHAIN /workspace/output/XTDK-ubuntu_x86_64)
+  #set(XPU_TOOLCHAIN /workspace/output/XTDK-ubuntu_x86_64)
+  set(XPU_TOOLCHAIN ${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu/xtdk-llvm15-bdcentos7_x86_64)
+  # set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-centos7_GCC8u3)
+  #set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-bdcentos_x86_64)
+  #set(XPU_TOOLCHAIN /home/work/xtdk/XTDK-centos_GCCABI1_x86_64)
   get_filename_component(XPU_TOOLCHAIN ${XPU_TOOLCHAIN} REALPATH)
-endif()
-if(NOT IS_DIRECTORY ${XPU_TOOLCHAIN})
-  message(FATAL_ERROR "Directory ${XPU_TOOLCHAIN} not found!")
+else()
+  if(NOT IS_DIRECTORY ${XPU_TOOLCHAIN})
+    message(FATAL_ERROR "Directory ${XPU_TOOLCHAIN} not found!")
+  endif()
 endif()
 message(STATUS "Build with XPU_TOOLCHAIN=" ${XPU_TOOLCHAIN})
 set(XPU_CLANG ${XPU_TOOLCHAIN}/bin/clang++)
@@ -33,7 +51,8 @@ message(STATUS "Build with XPU_CLANG=" ${XPU_CLANG})
 
 # The host sysroot of XPU compiler is gcc-8.2
 if(NOT HOST_SYSROOT)
-  set(HOST_SYSROOT /opt/compiler/gcc-8.2)
+  #set(HOST_SYSROOT /opt/compiler/gcc-8.2)
+  set(HOST_SYSROOT /opt/compiler/gcc-10)
 endif()
 
 if(NOT IS_DIRECTORY ${HOST_SYSROOT})
@@ -62,7 +81,19 @@ set(TOOLCHAIN_ARGS)
 if(OPT_LEVEL)
   set(OPT_LEVEL ${OPT_LEVEL})
 else()
-  set(OPT_LEVEL "-O3")
+  set(OPT_LEVEL "-O2")
+endif()
+
+if(WITH_XPU_XRE5)
+  set(DEVICE_TYPE xpu3)
+else()
+  set(DEVICE_TYPE xpu2)
+endif()
+
+if(WITH_XPU_XRE5)
+  set(DEVICE_TYPE xpu3)
+else()
+  set(DEVICE_TYPE xpu2)
 endif()
 
 message(STATUS "Build with API_ARCH=" ${API_ARCH})
@@ -138,7 +169,8 @@ macro(compile_kernel COMPILE_ARGS)
       -Wno-ignored-qualifiers
       -Wno-ignored-attributes
       -Wno-parentheses
-      -DNDEBUG)
+      -DNDEBUG
+      -D__XTDK_USE_STDINT_H)
 
   #include path
   get_property(
@@ -168,6 +200,9 @@ macro(compile_kernel COMPILE_ARGS)
   else()
     set(ABI_VERSION "-D_GLIBCXX_USE_CXX11_ABI=1")
   endif()
+  if(WITH_BOX_PS OR ON_INFER)
+    set(ABI_VERSION "-D_GLIBCXX_USE_CXX11_ABI=0")
+  endif()
   add_custom_target(
     ${kernel_name}.xpu ALL
     COMMAND ${CMAKE_COMMAND} -E copy ${kernel_path}/${kernel_name}.kps
@@ -177,10 +212,10 @@ macro(compile_kernel COMPILE_ARGS)
     COMMAND ${CMAKE_COMMAND} -E make_directory kernel_build
     COMMAND
       ${XPU_CLANG} --sysroot=${CXX_DIR} -std=c++11 ${ABI_VERSION} ${OPT_LEVEL}
-      -fno-builtin -mcpu=xpu2 -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
+      -fno-builtin -fxpu-launch-return --xpu-arch=${DEVICE_TYPE} -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
       ${XPU_CXX_INCLUDES} -I. -o kernel_build/${kernel_name}.bin.o.sec
       kernel_build/${kernel_name}.xpu --xpu-device-only -c -v
-    COMMAND ${XTDK_DIR}/bin/xpu2-elfconv kernel_build/${kernel_name}.bin.o.sec
+    COMMAND ${XTDK_DIR}/bin/${DEVICE_TYPE}-elfconv kernel_build/${kernel_name}.bin.o.sec
             kernel_build/${kernel_name}.bin.o ${XPU_CLANG} --sysroot=${CXX_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${xpu_add_library_DEPENDS}
@@ -193,7 +228,7 @@ macro(compile_kernel COMPILE_ARGS)
     COMMAND ${CMAKE_COMMAND} -E make_directory kernel_build
     COMMAND
       ${XPU_CLANG} --sysroot=${CXX_DIR} -std=c++11 ${ABI_VERSION} ${OPT_LEVEL}
-      -fno-builtin -mcpu=xpu2 -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
+      -fno-builtin -fxpu-launch-return --xpu-arch=${DEVICE_TYPE} -fPIC ${XPU_CXX_DEFINES} ${XPU_CXX_FLAGS}
       ${XPU_CXX_INCLUDES} -I. -o kernel_build/${kernel_name}.host.o
       kernel_build/${kernel_name}.xpu --xpu-host-only -c -v
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -255,7 +290,7 @@ macro(xpu_add_library TARGET_NAME)
         HOST
         ${XPU1_HOST_O_EXTRA_FLAGS}
         XPU
-        "xpu2"
+        "${DEVICE_TYPE}"
         DEPENDS
         ${cc_srcs_depends})
     endforeach()

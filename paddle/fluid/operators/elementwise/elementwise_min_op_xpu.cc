@@ -25,7 +25,15 @@ class ElementwiseMinXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUElementwise<T, XPUType>(ctx, xpu::broadcast_min<XPUType>);
+      auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              const XPUType* y,
+              XPUType* z,
+              const std::vector<int>& xshape,
+              const std::vector<int>& yshape) {
+    return xpu::broadcast_min<XPUType>(ctx, x, y, z, xshape, yshape);};
+
+    XPUElementwise<T, XPUType>(ctx, f);
   }
 };
 
@@ -36,7 +44,19 @@ class ElementwiseMinGradXPUKernel : public ElemwiseGradKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
     ElemwiseGradKernel<T>::Compute(ctx);
-    XPUElementwiseGrad<T, XPUType>(ctx, xpu::broadcast_min_grad<XPUType>, true);
+     auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              const XPUType* y,
+              const XPUType* z,
+              const XPUType* dz,
+              XPUType* dy,
+              XPUType* dx,
+              const std::vector<int>& xshape,
+              const std::vector<int>& yshape) {
+    return xpu::broadcast_min_grad<XPUType>(
+        ctx, x, y, z, dz, dy, dx, xshape, yshape);
+    };
+    XPUElementwiseGrad<T, XPUType>(ctx, f, true);
   }
 };
 

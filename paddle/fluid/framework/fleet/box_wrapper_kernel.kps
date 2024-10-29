@@ -1,0 +1,1954 @@
+/* Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License. */
+
+#ifdef PADDLE_WITH_XPU_KP
+#include <xpu/runtime.h>  // NOLINT
+#include <algorithm>
+#include <ctime>
+#include <memory>
+#include <numeric>
+
+#include "paddle/fluid/memory/memcpy.h"
+#include "paddle/fluid/platform/device/xpu/enforce_xpu.h"
+#include "paddle/fluid/framework/fleet/box_wrapper_kernel.h"
+#include "paddle/fluid/platform/device_context.h"
+
+#include "xpu/kernel/xtdk.h"  // NOLINT
+// #include "xpu/kernel/debug.h"           // NOLINT
+#include "xpu/kernel/xtdk_math.h"            // NOLINT
+#include "xpu/kernel/xtdk_simd.h"
+
+#ifdef TRACE_PROFILE
+#include "xpu/kernel/xtdk_io.h"
+#include <fstream>
+
+// The producer side.
+#include <scalopus_tracing/tracing.h>
+#include <scalopus_transport/transport_loopback.h>
+// The catapult recorder side.
+#include <scalopus_catapult/catapult_recorder.h>
+#include <scalopus_general/endpoint_manager_poll.h>
+#include <scalopus_general/general_provider.h>
+#include <scalopus_tracing/native_trace_provider.h>
+#endif
+
+namespace paddle {
+namespace framework {
+
+struct EmbedxQuantOp {
+  __device__ void copy(float* dest, const float* src,
+                                       const int& idx,
+                                       const float& scale) const {
+    *dest = *(reinterpret_cast<const int16_t*>(src) + idx) * scale;
+  }
+};
+struct EmbedxNormalOp {
+  __device__ void copy(float* dest, const float* src,
+                                       const int& idx,
+                                       const float& /**scale*/) const {
+    *dest = src[idx];
+  }
+};
+
+struct ExpandPushGetOp {
+  __device__ float get(float* expand, const int& row,
+                                       const int& expand_id,
+                                       const int& /**hidden*/,
+                                       const int& expand_dim) const {
+    return expand[row * expand_dim + expand_id];
+  }
+};
+
+struct ExpandPushEmdGetOp {
+  __device__ float get(float* expand, const int& row,
+                                       const int& expand_id, 
+                                       const int& hidden,
+                                       const int& expand_dim) const {
+    return expand[row * (hidden + expand_dim) + hidden + expand_id];
+  }
+};
+
+template <typename T>
+__device__ void set_byfloat(float* dest, const T& val) {
+  (*reinterpret_cast<T*>(dest)) = val;
+}
+
+static inline __device__ void mfence_lm() {
+    __asm__("mfence {lm}\n\t");
+}
+
+static inline __device__ void xpu_sync_all(int group_mask = -1) {
+    __asm__("sync_local");
+    __asm__("csr_set csr3, %0"::"r"(group_mask));
+    __asm__("sync_group csr3");
+}
+
+__global__ void CopyKeysKernel_u32(unsigned long long* src_keys,
+                               uint32_t* dest_total_keys,
+                               const long long* len, int slot_num,
+                               int total_len, int* key2slots) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+    return;
+  }
+  int thread_id = ncores * cluster_id() + cid;
+  int nthreads = ncores * cluster_num();
+
+  __shared__ long long slot_lens[BoxWrapperKernel::MAX_SLOT_SIZE + 1];
+  __shared__ __global_ptr__ unsigned long long* slot_keys[BoxWrapperKernel::MAX_SLOT_SIZE];
+  for (int i = cid; i <= slot_num; i += ncores) {
+    if (i <= slot_num) {
+      GM2SM(&len[i], &slot_lens[i], sizeof(long long));
+    }
+    if (i < slot_num) {
+      GM2SM(&src_keys[i], &slot_keys[i], sizeof(__global_ptr__ unsigned long long*));
+    }
+  }
+  sync_cluster();
+
+  for (int i = thread_id; i < slot_num; i += nthreads) {
+    // max core local memory = 8KB
+    int slot_len = slot_lens[i + 1] - slot_lens[i];
+    int read_len = 100;
+    int dest_offset = slot_lens[i];
+    __local__ unsigned long long local_slot_keys[read_len];
+    __local__ uint32_t local_slot_keys_uint32[read_len];
+    __local__ int local_slot_uint32[read_len];
+
+    for (int k = 0; k < slot_len; k += read_len) {
+      int real_read_len = min(read_len, slot_len - k);
+      GM2LM(slot_keys[i] + k, local_slot_keys,
+            real_read_len * sizeof(unsigned long long));
+      for (int m = 0; m < real_read_len; m++) {
+          local_slot_keys_uint32[m] = (uint32_t)local_slot_keys[m];
+          local_slot_uint32[m] = i;
+      }
+      mfence();
+      LM2GM(local_slot_uint32, key2slots + dest_offset + k, real_read_len * sizeof(int));
+      LM2GM(local_slot_keys_uint32, dest_total_keys + dest_offset + k, real_read_len * sizeof(uint32_t));
+    }
+  }
+}
+
+__global__ void CopyKeysKernel_u64(unsigned long long* src_keys,
+                               unsigned long long* dest_total_keys,
+                               const long long* len, int slot_num,
+                               int total_len, int* key2slots) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+    return;
+  }
+  int thread_id = ncores * cluster_id() + cid;
+  int nthreads = ncores * cluster_num();
+
+  __shared__ long long slot_lens[BoxWrapperKernel::MAX_SLOT_SIZE + 1];
+  __shared__ __global_ptr__ unsigned long long* slot_keys[BoxWrapperKernel::MAX_SLOT_SIZE];
+  for (int i = cid; i <= slot_num; i += ncores) {
+    if (i <= slot_num) {
+      GM2SM(&len[i], &slot_lens[i], sizeof(long long));
+    }
+    if (i < slot_num) {
+      GM2SM(&src_keys[i], &slot_keys[i], sizeof(__global_ptr__ unsigned long long*));
+    }
+  }
+  sync_cluster();
+
+  for (int i = thread_id; i < slot_num; i += nthreads) {
+    // max core local memory = 8KB
+    int slot_len = slot_lens[i + 1] - slot_lens[i];
+    int read_len = 100;
+    int dest_offset = slot_lens[i];
+    __local__ unsigned long long local_slot_keys[read_len];
+    //__local__ uint32_t local_slot_keys_uint32[read_len];
+    //T * local_converted = (T *)local_slot_keys;
+    __local__ int local_slot_uint32[read_len];
+
+    for (int k = 0; k < slot_len; k += read_len) {
+      int real_read_len = min(read_len, slot_len - k);
+      GM2LM(slot_keys[i] + k, local_slot_keys,
+            real_read_len * sizeof(unsigned long long));
+      for (int m = 0; m < real_read_len; m++) {
+          //local_slot_keys_uint32[m] = (uint32_t)local_slot_keys[m];
+          //local_converted[m] = (T)(local_slot_keys[m]);
+          local_slot_uint32[m] = i;
+      }
+      mfence();
+      LM2GM(local_slot_uint32, key2slots + dest_offset + k, real_read_len * sizeof(int));
+      LM2GM(local_slot_keys, dest_total_keys + dest_offset + k, real_read_len * sizeof(unsigned long long));
+    }
+  }
+}
+
+void BoxWrapperKernel::CopyKeys(const paddle::platform::Place& place,
+                            uint64_t** origin_keys, uint32_t* total_keys,
+                            const int64_t* gpu_len, int slot_num,
+                            int total_len, int* key2slots) {
+  XPUStream stream = nullptr;
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
+               ->x_context()
+               ->xpu_stream;
+  unsigned long long* o_keys =
+      reinterpret_cast<unsigned long long*>(origin_keys);
+  const long long* c_len = (const long long*)gpu_len;
+  CHECK(slot_num <= BoxWrapperKernel::MAX_SLOT_SIZE);
+  CopyKeysKernel_u32<<<2, 64, stream>>>(o_keys, total_keys, c_len, slot_num, total_len, key2slots);
+  xpu_wait(stream);
+}
+
+void BoxWrapperKernel::CopyKeys(const paddle::platform::Place& place,
+                            uint64_t** origin_keys, unsigned long long* total_keys,
+                            const int64_t* gpu_len, int slot_num,
+                            int total_len, int* key2slots) {
+  XPUStream stream = nullptr;
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
+               ->x_context()
+               ->xpu_stream;
+  unsigned long long* o_keys =
+      reinterpret_cast<unsigned long long*>(origin_keys);
+  const long long* c_len = (const long long*)gpu_len;
+  CHECK(slot_num <= BoxWrapperKernel::MAX_SLOT_SIZE);
+  CopyKeysKernel_u64<<<2, 64, stream>>>(o_keys, total_keys, c_len, slot_num, total_len, key2slots);
+  xpu_wait(stream);
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopyNNCross(const TEmbedxOp* op,
+                                const float scale,
+                                const boxps::FeaturePullOffset* info,
+                                int* total_dims,
+                                unsigned long long* dst_vals,
+                                const int* key2slot,
+                                float* total_values,
+                                const uint32_t* restore_idx,
+                                const int total_length,
+                                const int max_cols_num,
+                                const int hidden_size,
+                                const int expand_embed_dim,
+                                const int pull_float_num,
+                                const int skip_offset,
+                                const int cvm_offset,
+                                const int slot_num){
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = 1500 / (pull_float_num + hidden_size + expand_embed_dim + 3);
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_total_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+  __local__ float lm_dst_expand_vals[buf_length * expand_embed_dim];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_total_dims[buf_length];
+  __local__ uint32_t lm_restore_idx[buf_length];
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  const int max_slot_num = 1000;
+  int sm_slot_len = min(max_slot_num, slot_num);
+  __shared__ uint64_t sm_dst_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_dst_expand_vals_ptr[max_slot_num];
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(dst_vals + i, sm_dst_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(dst_vals + slot_num + i, sm_dst_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+  mfence();
+  xpu_sync_all();
+
+  __local__ uint64_t lm_dst_vals_ptr[1];
+  for (int i = 0; i < slot_num; i++) {
+    if(sm_dst_vals_ptr[i] != 0) {
+      lm_dst_vals_ptr[0] = sm_dst_vals_ptr[i];
+      break;
+    }
+  }
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+    // TODO: why disable restore_idx?
+    if(restore_idx != nullptr) {
+     GM2LM(restore_idx + gm_offset, lm_restore_idx, len * sizeof(uint32_t));
+    }
+    int pos = (restore_idx != nullptr) ? lm_restore_idx[gm_offset] : gm_offset;
+    GM2LM(total_values + pos * pull_float_num, lm_total_values, len * pull_float_num * sizeof(float));
+    GM2LM(total_dims + gm_offset, lm_total_dims, len * sizeof(int));
+    GM2LM(key2slot + gm_offset, lm_key2slot, len * sizeof(int));
+
+    for (int j = 0; j < len; j++) {
+      for (int k = 0; k < cvm_offset; ++k) {
+        //TODO:consider xpu_value[slot_id]==nullptr?
+        lm_dst_vals[j * hidden_size + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+      }
+      // embedx
+      // embedx flags + expand flags   && *(keys[x] + y) != 0  && *(keys[x] + y)
+      int embedx_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].embedx_size]));
+      // int embedx_size = 0;
+      // TODO: expand_size = expand_embed_dim?
+      int expand_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].expand_size]));
+      // int expand_size = 0;
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0) | static_cast<int>((expand_size > 0) << 1);
+
+      if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_vals + j * hidden_size + k,
+                  lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                  k - cvm_offset,
+                  scale);
+        }
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_vals[j * hidden_size + k] = 0;
+        }
+      }
+
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] == 0) {
+        continue;
+      }
+      for (int k = hidden_size; k < hidden_size + expand_size; ++k) {
+        // op.copy(&dest_ptr[expand_id], &src_val[info->expand], expand_id, scale);
+        lm_op[0].copy(lm_dst_expand_vals + j * expand_embed_dim + k-hidden_size,
+        lm_total_values + j * pull_float_num + lm_info[0].expand,
+        k - hidden_size,
+        scale);
+      }
+      for (int k = hidden_size + expand_size; k < max_cols_num; ++k) {
+        lm_dst_expand_vals[j * expand_embed_dim + k - hidden_size] = 0;
+      }
+    }
+    mfence();
+
+    LM2GM(lm_total_dims, total_dims + gm_offset, len * sizeof(int));
+    LM2GM(lm_dst_vals, ((__global_ptr__ float*)lm_dst_vals_ptr[0] + gm_offset * hidden_size), 
+          len * hidden_size * sizeof(float));
+    LM2GM(lm_dst_expand_vals, 
+          ((__global_ptr__ float*)lm_dst_vals_ptr[0] + total_length * hidden_size + gm_offset * expand_embed_dim), 
+          len * expand_embed_dim * sizeof(float));
+  }
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopyNNCrossMerged(const TEmbedxOp* op,
+                                      const float scale,
+                                      const boxps::FeaturePullOffset* info,
+                                      int* total_dims,
+                                      unsigned long long* dst_vals,//dst
+                                      const int* key2slot,
+                                      const int* d_res_idx,
+                                      float* total_values,//src
+                                      const int* merged_idx,
+                                      const int* merged_offsets,
+                                      const int merged_length,
+                                      const int total_length,
+                                      const int max_cols_num,
+                                      const int hidden_size,
+                                      const int expand_embed_dim,
+                                      const int pull_float_num,
+                                      const int skip_offset,
+                                      const int cvm_offset,
+                                      const int slot_num) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = 1500 / (pull_float_num + hidden_size + expand_embed_dim + 3);
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_total_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+  __local__ float lm_dst_expand_vals[buf_length * expand_embed_dim];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_res_idx[buf_length];
+
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  const int max_slot_num = 1000;
+  int sm_slot_len = min(max_slot_num, slot_num);
+  __shared__ uint64_t sm_dst_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_dst_expand_vals_ptr[max_slot_num];
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(dst_vals + i, sm_dst_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(dst_vals + slot_num + i, sm_dst_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+  mfence();
+  xpu_sync_all();
+
+  __local__ uint64_t lm_dst_vals_ptr[1];
+  for (int i = 0; i < slot_num; i++) {
+    if (sm_dst_vals_ptr[i] != 0) {
+      lm_dst_vals_ptr[0] = sm_dst_vals_ptr[i];
+      break;
+    }
+  }
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+
+    // GM2LM(total_values + gm_offset * pull_float_num, lm_total_values, len * pull_float_num * sizeof(float));
+    GM2LM(total_dims + gm_offset, lm_total_dims, len * sizeof(int));
+    GM2LM(key2slot + gm_offset, lm_key2slot, len * sizeof(int));
+    GM2LM(d_res_idx + gm_offset, lm_res_idx, len * sizeof(int));
+
+    for (int j = 0; j < len; j++) { // handle each merged value
+      GM2LM(total_values + lm_res_idx[j] * pull_float_num, lm_total_values + j * pull_float_num, pull_float_num * sizeof(float));
+      for (int k = 0; k < cvm_offset; ++k) {
+        lm_dst_vals[j * hidden_size + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+      }
+      // cal embedx & expand size
+      int embedx_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].embedx_size]));
+      int expand_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].expand_size]));
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0) | static_cast<int>((expand_size > 0) << 1);
+
+      // handle embdx 
+      if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_vals + j * hidden_size + k,
+                        lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                        k - cvm_offset,
+                        scale);
+        }
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_vals[j * hidden_size + k] = 0;
+        }
+      }
+
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] == 0) {
+        continue;
+      }
+      // handle expand
+      for (int k = hidden_size; k < hidden_size + expand_size; ++k) {
+        // op.copy(&dest_ptr[expand_id], &src_val[info->expand], expand_id, scale);
+        lm_op[0].copy(lm_dst_expand_vals + j * expand_embed_dim + k - hidden_size,
+                      lm_total_values + j * pull_float_num + lm_info[0].expand,
+                      k - hidden_size,
+                      scale);
+      }
+      for (int k = hidden_size + expand_size; k < max_cols_num; ++k) {
+        lm_dst_expand_vals[j * expand_embed_dim + k - hidden_size] = 0;
+      }
+    }
+    mfence();
+    // fill each undedup val
+
+    LM2GM(lm_total_dims, total_dims + gm_offset, len * sizeof(int));
+    LM2GM(lm_dst_vals,
+          ((__global_ptr__ float*)lm_dst_vals_ptr[0] + gm_offset * hidden_size), 
+          len * hidden_size * sizeof(float));
+    LM2GM(lm_dst_expand_vals,
+          ((__global_ptr__ float*)lm_dst_vals_ptr[0] + total_length * hidden_size + gm_offset * expand_embed_dim), 
+          len * expand_embed_dim * sizeof(float));
+  }
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopyNNCrossWithEmb(const TEmbedxOp* op,
+                          const float scale,
+                          const boxps::FeaturePullOffset* info,
+                          int* total_dims,
+                          unsigned long long* dst_vals,
+                          const int* key2slot,
+                          float* total_values,
+                          const uint32_t* restore_idx,
+                          const int total_length,
+                          const int max_cols_num,
+                          const int hidden_size,
+                          const int expand_embed_dim,
+                          const int pull_float_num,
+                          const int skip_offset,
+                          const int cvm_offset,
+                          const int slot_num) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = 1500 / (pull_float_num + hidden_size + hidden_size + expand_embed_dim + 3);
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_total_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+  __local__ float lm_dst_expand_vals[buf_length * (hidden_size + expand_embed_dim)];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_total_dims[buf_length];
+  __local__ uint32_t lm_restore_idx[buf_length];
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  const int max_slot_num = 1000;
+  int sm_slot_len = min(max_slot_num, slot_num);
+  __shared__ uint64_t sm_dst_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_dst_expand_vals_ptr[max_slot_num];
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(dst_vals + i, sm_dst_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(dst_vals + slot_num + i, sm_dst_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+  mfence();
+  xpu_sync_all();
+
+  __local__ uint64_t lm_dst_vals_ptr[1];
+  for (int i = 0; i < slot_num; i++) {
+    if (sm_dst_vals_ptr[i] != 0) {
+      lm_dst_vals_ptr[0] = sm_dst_vals_ptr[i];
+      break;
+    }
+  }
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+    if(restore_idx != nullptr) {
+     GM2LM(restore_idx + gm_offset, lm_restore_idx, len * sizeof(uint32_t));
+    }
+    int pos = (restore_idx != nullptr) ? lm_restore_idx[gm_offset] : gm_offset;
+    GM2LM(total_values + pos * pull_float_num, lm_total_values, len * pull_float_num * sizeof(float));
+    GM2LM(total_dims + gm_offset, lm_total_dims, len * sizeof(int));
+    GM2LM(key2slot + gm_offset, lm_key2slot, len * sizeof(int));
+
+    for (int j = 0; j < len; j++) {
+      // mfence();
+      // cvm offset
+      for (int k = 0; k < cvm_offset; ++k) {
+        //TODO:consider xpu_value[slot_id]==nullptr?
+        if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+          lm_dst_vals[j * hidden_size + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+        }
+        if (sm_dst_expand_vals_ptr[lm_key2slot[j]] != 0) {
+          lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+        }
+      }
+
+      // embedx
+      // embedx flags + expand flags   && *(keys[x] + y) != 0  && *(keys[x] + y)
+      int embedx_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].embedx_size]));
+      // int embedx_size = 0;
+      // TODO: expand_size = expand_embed_dim?
+      int expand_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].expand_size]));
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0) | static_cast<int>((expand_size > 0) << 1);
+
+      if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_vals + j * hidden_size + k,
+                  lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                  k - cvm_offset,
+                  scale);
+        }
+        
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_vals[j * hidden_size + k] = 0;
+        }
+      }
+
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_expand_vals + j * (hidden_size + expand_embed_dim) + k,
+                  lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                  k - cvm_offset,
+                  scale);
+        }
+        
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = 0;
+        }
+      }
+
+      // expand
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] == 0) {
+          continue;
+      }
+
+      for (int k = hidden_size; k < hidden_size + expand_size; ++k) {
+        lm_op[0].copy(lm_dst_expand_vals + j * (hidden_size + expand_embed_dim) + k,
+        lm_total_values + j * pull_float_num + lm_info[0].expand,
+        k - hidden_size,
+        scale);
+      }
+      for (int k = hidden_size + expand_size; k < max_cols_num; ++k) {
+        lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = 0;
+      }
+    }
+    mfence();
+
+    LM2GM(lm_total_dims, total_dims + gm_offset, len * sizeof(int));
+    LM2GM(lm_dst_vals, ((__global_ptr__ float*)lm_dst_vals_ptr[0] + gm_offset * hidden_size), 
+          len * hidden_size * sizeof(float));
+    LM2GM(lm_dst_expand_vals, 
+          ((__global_ptr__ float*)lm_dst_vals_ptr[0] + total_length * hidden_size + gm_offset * (hidden_size + expand_embed_dim)), 
+          len * (hidden_size + expand_embed_dim) * sizeof(float));
+    mfence();
+  }
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopyNNCrossWithEmbMerged(const TEmbedxOp* op,
+                                             const float scale,
+                                             const boxps::FeaturePullOffset* info,
+                                             int* total_dims,
+                                             unsigned long long* dst_vals,
+                                             const int* key2slot,
+                                             float* total_values,
+                                             const int* d_res_idx,
+                                             const int total_length,
+                                             const int max_cols_num,
+                                             const int hidden_size,
+                                             const int expand_embed_dim,
+                                             const int pull_float_num,
+                                             const int skip_offset,
+                                             const int cvm_offset,
+                                             const int slot_num) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = 5;
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_total_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+  __local__ float lm_dst_expand_vals[buf_length * (hidden_size + expand_embed_dim)];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_res_idx[buf_length];
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  const int max_slot_num = 1000;
+  int sm_slot_len = min(max_slot_num, slot_num);
+  __shared__ uint64_t sm_dst_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_dst_expand_vals_ptr[max_slot_num];
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(dst_vals + i, sm_dst_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(dst_vals + slot_num + i, sm_dst_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+  mfence();
+  xpu_sync_all();
+
+  __local__ uint64_t lm_dst_vals_ptr[1];
+  for (int i = 0; i < slot_num; i++) {
+    if (sm_dst_vals_ptr[i] != 0) {
+      lm_dst_vals_ptr[0] = sm_dst_vals_ptr[i];
+      break;
+    }
+  }
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+
+    GM2LM(total_dims + gm_offset, lm_total_dims, len * sizeof(int));
+    GM2LM(key2slot + gm_offset, lm_key2slot, len * sizeof(int));
+    GM2LM(d_res_idx + gm_offset, lm_res_idx, len * sizeof(int));
+
+    for (int j = 0; j < len; j++) {
+      // mfence();
+     GM2LM(total_values + lm_res_idx[j] * pull_float_num,
+           lm_total_values + j * pull_float_num,
+           pull_float_num * sizeof(float));
+     // cvm offset
+     for (int k = 0; k < cvm_offset; ++k) {
+        //TODO:consider xpu_value[slot_id]==nullptr?
+        if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+          lm_dst_vals[j * hidden_size + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+        }
+        if (sm_dst_expand_vals_ptr[lm_key2slot[j]] != 0) {
+          lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+        }
+      }
+
+      // embedx
+      // embedx flags + expand flags   && *(keys[x] + y) != 0  && *(keys[x] + y)
+      int embedx_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].embedx_size]));
+      // int embedx_size = 0;
+      // TODO: expand_size = expand_embed_dim?
+      int expand_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].expand_size]));
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0) | static_cast<int>((expand_size > 0) << 1);
+
+      if (sm_dst_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_vals + j * hidden_size + k,
+                  lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                  k - cvm_offset,
+                  scale);
+        }
+
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_vals[j * hidden_size + k] = 0;
+        }
+      }
+
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] != 0) {
+        for (int k = cvm_offset; k < cvm_offset + embedx_size; ++k) {
+          lm_op[0].copy(lm_dst_expand_vals + j * (hidden_size + expand_embed_dim) + k,
+                  lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                  k - cvm_offset,
+                  scale);
+        }
+
+        for (int k = cvm_offset + embedx_size; k < hidden_size; ++k) {
+          lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = 0;
+        }
+      }
+
+      // expand
+      if (sm_dst_expand_vals_ptr[lm_key2slot[j]] == 0) {
+          continue;
+      }
+
+      for (int k = hidden_size; k < hidden_size + expand_size; ++k) {
+        lm_op[0].copy(lm_dst_expand_vals + j * (hidden_size + expand_embed_dim) + k,
+        lm_total_values + j * pull_float_num + lm_info[0].expand,
+        k - hidden_size,
+        scale);
+      }
+      for (int k = hidden_size + expand_size; k < max_cols_num; ++k) {
+        lm_dst_expand_vals[j * (hidden_size + expand_embed_dim) + k] = 0;
+      }
+    }
+    mfence();
+
+    LM2GM(lm_total_dims, total_dims + gm_offset, len * sizeof(int));
+    LM2GM(lm_dst_vals, ((__global_ptr__ float*)lm_dst_vals_ptr[0] + gm_offset * hidden_size), 
+          len * hidden_size * sizeof(float));
+    LM2GM(lm_dst_expand_vals,
+          ((__global_ptr__ float*)lm_dst_vals_ptr[0] + total_length * hidden_size + gm_offset * (hidden_size + expand_embed_dim)), 
+          len * (hidden_size + expand_embed_dim) * sizeof(float));
+    mfence();
+  }
+}
+
+template <typename TEmbedxOp>
+inline void FeaturePullCopyNNCross(
+    const paddle::platform::Place& place,
+    const TEmbedxOp* op,
+    const float scale,
+    const boxps::FeaturePullOffset* info,
+    int* total_dims,
+    float** xpu_values, 
+    const int* key2slot,
+    const int* d_res_idx,
+    float* total_values_xpu,
+    const int* xpu_merged_idx,
+    const int* xpu_merged_offsets,
+    int merged_length,
+    const int64_t* slot_lens,
+    const int slot_num,
+    const int total_length,
+    const int hidden_size,
+    const int expand_embed_dim,
+    const int pull_float_num,
+    const int skip_offset,
+    const int cvm_offset,
+    bool expand_only) {
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto ctx_xpu = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context();
+  auto stream = ctx_xpu->xpu_stream;
+
+  auto d_op_tmp = memory::Alloc(place, sizeof(TEmbedxOp));
+  TEmbedxOp* d_op = reinterpret_cast<TEmbedxOp*>(d_op_tmp->ptr());
+  memory::Copy(place,
+               d_op,
+               platform::CPUPlace(),
+               op,
+               sizeof(TEmbedxOp));
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_START("PullCopyNNCross", xpu_wait(stream));
+#endif
+  // float* real_dst_vals;
+  // for (int i = 0; i < slot_num; i++) {
+  //   if(xpu_values[i] != nullptr) {
+  //     real_dst_vals = xpu_values[i];
+  //     break;
+  //   }
+  // }
+  void *d_xpu_values = nullptr;
+  xpu_malloc((void **)&d_xpu_values, slot_num * 2 * sizeof(float*));
+  xpu_memcpy(d_xpu_values, xpu_values, slot_num * 2 * sizeof(float*), XPU_HOST_TO_DEVICE);
+
+  // total_values_xpu->(xpu_values[slot_id], total_dims[slot_id])
+  if (expand_only) {
+    if (xpu_merged_idx == nullptr) {
+      PullCopyNNCross<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                                    scale,
+                                                    info,
+                                                    total_dims,
+                                                    reinterpret_cast<unsigned long long*>(d_xpu_values),
+                                                    key2slot,
+                                                    total_values_xpu,
+                                                    nullptr,
+                                                    total_length,
+                                                    (hidden_size + expand_embed_dim),
+                                                    hidden_size,
+                                                    expand_embed_dim,
+                                                    pull_float_num,
+                                                    skip_offset,
+                                                    cvm_offset,
+                                                    slot_num);
+    } else {
+      PullCopyNNCrossMerged<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                                          scale,
+                                                          info,
+                                                          total_dims,
+                                                          reinterpret_cast<unsigned long long*>(d_xpu_values),
+                                                          key2slot,
+                                                          d_res_idx,
+                                                          total_values_xpu,
+                                                          xpu_merged_idx,
+                                                          xpu_merged_offsets,
+                                                          merged_length,
+                                                          total_length,
+                                                          (hidden_size + expand_embed_dim),
+                                                          hidden_size,
+                                                          expand_embed_dim,
+                                                          pull_float_num,
+                                                          skip_offset,
+                                                          cvm_offset,
+                                                          slot_num);
+    }
+  } else {
+    if (xpu_merged_idx == nullptr) {
+      PullCopyNNCrossWithEmb<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                                           scale,
+                                                           info,
+                                                           total_dims,
+                                                           reinterpret_cast<unsigned long long*>(d_xpu_values),
+                                                           key2slot,
+                                                           total_values_xpu,
+                                                           nullptr,
+                                                           total_length,
+                                                           (hidden_size + expand_embed_dim),
+                                                           hidden_size,
+                                                           expand_embed_dim,
+                                                           pull_float_num,
+                                                           skip_offset,
+                                                           cvm_offset,
+                                                           slot_num);
+    } else {
+      //CHECK(false) << "Copy for pull PullCopyNNCrossWithEmb Merged";
+      PullCopyNNCrossWithEmbMerged<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                                                 scale,
+                                                                 info,
+                                                                 total_dims,
+                                                                 reinterpret_cast<unsigned long long*>(d_xpu_values),
+                                                                 key2slot,
+                                                                 total_values_xpu,
+                                                                 d_res_idx,
+                                                                 total_length,
+                                                                 (hidden_size + expand_embed_dim),
+                                                                 hidden_size,
+                                                                 expand_embed_dim,
+                                                                 pull_float_num,
+                                                                 skip_offset,
+                                                                 cvm_offset,
+                                                                 slot_num);
+    }
+  }
+  xpu_free(d_xpu_values);
+  xpu_wait(stream);
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_END("PullCopyNNCross", );
+
+  TRACE_SCOPE_START("PullCopyNNCross's xpu::copy", xpu_wait(stream));
+  xpu_wait(stream);
+  TRACE_SCOPE_END("PullCopyNNCross's xpu::copy",);
+#endif
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopy(const TEmbedxOp* op,
+                          const float scale,
+                          const boxps::FeaturePullOffset* info,
+                          int* total_dims,
+                          float* dst_vals,
+                          float* total_values,
+                          const int* restore_idx,
+                          const int total_length,
+                          const int hidden_size,
+                          const int pull_float_num,
+                          const int skip_offset,
+                          const int cvm_offset) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int total_local_mem = 6500;
+  const int buf_length = total_local_mem / ((hidden_size + pull_float_num + 3) * 4);
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_total_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_restore_idx[buf_length];
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+
+    if (restore_idx != nullptr) {
+      GM2LM(restore_idx + gm_offset, lm_restore_idx, len * sizeof(int));
+      for (int j = 0; j < len; ++j) {
+        int gm_idx = lm_restore_idx[j];
+        mfence();
+        GM2LM(total_values + gm_idx * pull_float_num, lm_total_values + j * pull_float_num, pull_float_num * sizeof(float));
+      }
+    } else {
+      GM2LM(total_values + gm_offset * pull_float_num, lm_total_values, len * pull_float_num * sizeof(float));
+    }
+
+    for (int j = 0; j < len; j++) {
+      for (int k = 0; k < cvm_offset; ++k) {
+        // dont's need consider xpu_val[slot_id] == nullptr
+        lm_dst_vals[j * hidden_size + k] = lm_total_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+      }
+      // embedx
+      int embedx_size = *((int *)&(lm_total_values[j * pull_float_num + lm_info[0].embedx_size]));
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0);
+      for (int k = 0; k < embedx_size; ++k) {
+        lm_op[0].copy(lm_dst_vals + j * hidden_size + cvm_offset + k,
+                lm_total_values + j * pull_float_num + lm_info[0].embedx,
+                k,
+                scale);
+      }
+      int dim_size = hidden_size - cvm_offset;
+      for (int k = embedx_size; k < dim_size; ++k) {
+        lm_dst_vals[j * hidden_size + cvm_offset + k] = 0;
+      }
+    }
+    mfence();
+    LM2GM(lm_dst_vals, dst_vals + gm_offset * hidden_size, len * sizeof(float) * hidden_size);
+    LM2GM(lm_total_dims, total_dims + gm_offset, len * sizeof(int));
+  }
+}
+
+template <typename TEmbedxOp>
+__global__ void PullCopyMerged(const TEmbedxOp* op,
+                               const float scale,
+                               const boxps::FeaturePullOffset* info,
+                               int* total_dims,
+                               float* dst_vals,
+                               float* merged_values,
+                               const int* merged_idx,
+                               const int* merged_offsets,
+                               const int total_length,
+                               const int merged_length,
+                               const int hidden_size,
+                               const int pull_float_num,
+                               const int skip_offset,
+                               const int cvm_offset) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+      return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int total_local_mem = 6500;
+  const int buf_length = total_local_mem / ((hidden_size + pull_float_num + 3) * 4);
+  const int same_key_idx_buf_len = buf_length;
+  int per_thread_len = roundup_div(merged_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_merged_values[buf_length * pull_float_num];
+  __local__ float lm_dst_vals[buf_length * hidden_size];
+
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_same_key_idx_buf[same_key_idx_buf_len];
+  __local__ int lm_merged_offset[buf_length + 1];
+
+  __local__ boxps::FeaturePullOffset lm_info[1];
+  __local__ TEmbedxOp lm_op[1];
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePullOffset));
+  GM2LM(op, lm_op, sizeof(TEmbedxOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= merged_length) {
+      return;
+    }
+
+    int len = min(per_thread_per_loop_len, merged_length - gm_offset);
+    GM2LM(merged_values + gm_offset * pull_float_num, lm_merged_values, len * pull_float_num * sizeof(float));
+    int idx_copy_len = len + 1;
+    if (gm_offset + len == merged_length) { // last
+      idx_copy_len = len;
+      lm_merged_offset[len] = total_length;
+    }
+    GM2LM(merged_offsets + gm_offset, lm_merged_offset, idx_copy_len * sizeof(int));
+    
+    for (int j = 0; j < len; j++) {
+      // fill local_dst_value from pull_val of each dedup val
+      for (int k = 0; k < cvm_offset; ++k) { // cvm
+        lm_dst_vals[j * hidden_size + k] = lm_merged_values[j * pull_float_num + lm_info[0].show + skip_offset + k];
+      }
+          
+      int embedx_size = *((int *)&(lm_merged_values[j * pull_float_num + lm_info[0].embedx_size]));
+      lm_total_dims[j] = static_cast<int>(embedx_size > 0);
+      for (int k = 0; k < embedx_size; ++k) { // embedx
+        lm_op[0].copy(lm_dst_vals + j * hidden_size + cvm_offset + k,
+                      lm_merged_values + j * pull_float_num + lm_info[0].embedx,
+                      k,
+                      scale);
+      }
+      int dim_size = hidden_size - cvm_offset;
+      for (int k = embedx_size; k < dim_size; ++k) {
+        lm_dst_vals[j * hidden_size + cvm_offset + k] = 0;
+      }
+
+      mfence();
+      // fill each undedup val
+      int same_key_len = lm_merged_offset[j + 1] - lm_merged_offset[j];
+      for (int k = 0; k < same_key_len; k += same_key_idx_buf_len) { // handle each same key of lm_dst_vals[j]
+        int handle_len = min(same_key_idx_buf_len, same_key_len - k);
+        GM2LM(merged_idx + lm_merged_offset[j] + k, lm_same_key_idx_buf, handle_len * sizeof(int));
+        for (int l = 0; l < handle_len; ++l) {
+          LM2GM(&lm_dst_vals[j * hidden_size], dst_vals + lm_same_key_idx_buf[l] * hidden_size, hidden_size * sizeof(float));
+          LM2GM(&lm_total_dims[j], total_dims + lm_same_key_idx_buf[l], sizeof(int));
+        }
+      }
+
+    }
+    mfence();
+  }
+}
+
+template <typename TEmbedxOp>
+inline void FeaturePullCopy(const paddle::platform::Place& place,
+                            const TEmbedxOp* op,
+                            const float scale,
+                            const boxps::FeaturePullOffset* info,
+                            int* total_dims,
+                            float** xpu_values,// const std::vector<float*>& values,
+                            uint64_t* total_keys_xpu,
+                            float* total_values_xpu,
+                            const int* xpu_merged_idx,
+                            const int* xpu_merged_offsets,
+                            int merged_length,
+                            const int64_t* slot_lens,
+                            const int slot_num,
+                            const int total_length,
+                            const int hidden_size,
+                            const int pull_float_num,
+                            const int skip_offset,
+                            const int cvm_offset){
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto ctx_xpu = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context();
+  auto stream = ctx_xpu->xpu_stream;
+
+  auto d_op_tmp = memory::Alloc(place, sizeof(TEmbedxOp));
+  TEmbedxOp* d_op = reinterpret_cast<TEmbedxOp*>(d_op_tmp->ptr());
+  memory::Copy(place,
+               d_op,
+               platform::CPUPlace(),
+               op,
+               sizeof(TEmbedxOp));
+
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_START("PullCopy", xpu_wait(stream));
+#endif
+  float* real_dst_vals;
+  for (int i = 0; i < slot_num; i++) {
+    if(xpu_values[i] != nullptr) {
+      real_dst_vals = xpu_values[i];
+      break;
+    }
+  }
+  
+  CHECK(6500 / ((hidden_size + pull_float_num + 3) * 4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " pull_float_num " << pull_float_num;
+  if (xpu_merged_idx == nullptr) {
+    PullCopy<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                  scale,
+                                  info,
+                                  total_dims,
+                                  real_dst_vals,
+                                  total_values_xpu,
+                                  nullptr,
+                                  total_length,
+                                  hidden_size,
+                                  pull_float_num,
+                                  skip_offset,
+                                  cvm_offset);
+  } else {
+    PullCopyMerged<TEmbedxOp><<<8, 64, stream>>>(d_op,
+                                                 scale,
+                                                 info,
+                                                 total_dims,
+                                                 real_dst_vals,
+                                                 total_values_xpu,
+                                                 xpu_merged_idx,
+                                                 xpu_merged_offsets,
+                                                 total_length,
+                                                 merged_length,
+                                                 hidden_size,
+                                                 pull_float_num,
+                                                 skip_offset,
+                                                 cvm_offset);
+  }
+  xpu_wait(stream);
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_END("PullCopy", );
+#endif
+
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_START("PullCopy's xpu::copy", xpu_wait(stream));
+#endif
+  xpu_wait(stream);
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_END("PullCopy's xpu::copy",);
+#endif
+}
+
+void BoxWrapperKernel::CopyForPull(
+    const paddle::platform::Place& place, uint64_t** gpu_keys,
+    float** xpu_values, void* total_values_xpu,
+    boxps::FeaturePullOffset* pull_offset, const int64_t* slot_lens,
+    const int slot_num, const int* key2slot, const int* d_res_idx, const int hidden_size,
+    const int expand_embed_dim, const int64_t total_length, int* total_dims,
+    const int skip_offset, bool expand_only, const int* xpu_merged_idx, 
+    const int* xpu_merged_offsets, const int merged_length) {
+  uint64_t* total_keys_xpu = nullptr;
+  const int cvm_offset = cvm_offset_ - skip_offset;
+  if (pull_info_.is_quant) {
+    EmbedxQuantOp op;
+    if(expand_embed_dim > 0 && pull_info_.expand_size > 0) { //nncross
+      FeaturePullCopyNNCross(place,
+                             &op,
+                             pull_embedx_scale_,
+                             pull_offset,
+                             total_dims,
+                             xpu_values,
+                             key2slot,
+                             d_res_idx,
+                             (float*)total_values_xpu,
+                             xpu_merged_idx,
+                             xpu_merged_offsets,
+                             merged_length,
+                             slot_lens,
+                             slot_num,
+                             (int)total_length,
+                             hidden_size,
+                             expand_embed_dim_,
+                             (int)pull_float_num_,
+                             skip_offset,
+                             cvm_offset,
+                             expand_only
+                             );
+    } else if (pull_info_.expand_size < 0 &&
+               expand_embed_dim == cvm_offset + expand_embed_dim_ &&
+               hidden_size == cvm_offset + embedx_dim_) {  // var
+      // TODO:
+      CHECK(false) << "FeaturePullCopyVariable not implement";
+      // FeaturePullCopyVariable(
+      //     op, pull_offset, pull_float_num_, stream, gpu_keys, gpu_values,
+      //     total_values_gpu, hidden_size, embedx_dim_, expand_embed_dim_,
+      //     total_length, total_dims, slot_lens, slot_num, key2slot,
+      //     pull_embedx_scale_, cvm_offset, gpu_restore_idx, skip_offset);
+    } else {
+      // normal and adam
+      // total_values_xpu->(xpu_values[slot_id], total_dims[slot_id])
+      FeaturePullCopy(place,
+                      &op,
+                      pull_embedx_scale_,
+                      pull_offset,
+                      total_dims,
+                      xpu_values,
+                      total_keys_xpu,
+                      (float*)total_values_xpu,
+                      xpu_merged_idx,
+                      xpu_merged_offsets,
+                      merged_length,
+                      slot_lens,
+                      slot_num,
+                      (int)total_length,
+                      hidden_size,
+                      (int)pull_float_num_,
+                      skip_offset,
+                      cvm_offset);
+    }
+  } else {
+    EmbedxNormalOp op;
+    if (expand_embed_dim > 0 && pull_info_.expand_size > 0) {
+      FeaturePullCopyNNCross(place,
+                             &op,
+                             pull_embedx_scale_,
+                             pull_offset,
+                             total_dims,
+                             xpu_values,
+                             key2slot,
+                             d_res_idx,
+                             (float*)total_values_xpu,
+                             xpu_merged_idx,
+                             xpu_merged_offsets,
+                             merged_length,
+                             slot_lens,
+                             slot_num,
+                             (int)total_length,
+                             hidden_size,
+                             expand_embed_dim_,
+                             (int)pull_float_num_,
+                             skip_offset,
+                             cvm_offset,
+                             expand_only
+                             );
+
+    } else if (pull_info_.expand_size < 0 &&
+               expand_embed_dim == cvm_offset + expand_embed_dim_ &&
+               hidden_size == cvm_offset + embedx_dim_) {
+      // TODO:
+      CHECK(false) << "FeaturePullCopyVariable not implement";
+
+    } else {
+      FeaturePullCopy(place,
+                    &op,
+                    pull_embedx_scale_,
+                    pull_offset,
+                    total_dims,
+                    xpu_values,
+                    total_keys_xpu,
+                    (float*)total_values_xpu,
+                    xpu_merged_idx,
+                    xpu_merged_offsets,
+                    merged_length,
+                    slot_lens,
+                    slot_num,
+                    total_length,
+                    hidden_size,
+                    pull_float_num_,
+                    skip_offset,
+                    cvm_offset);
+    }
+  }
+}
+
+template <typename TExpandPushGetOp>
+__global__ void PushCopyNNCross(const TExpandPushGetOp* op,
+                                const boxps::FeaturePushOffset* info,
+                                unsigned long long* total_values,//src, float ptr[2*slot_num]
+                                const int* total_dims,
+                                const int* key2slot,
+                                const int* slot_vector,
+                                const int* slot_inner_offset,
+                                float* dst_vals, //dst, PushValueType ptr[slot_num]
+                                const int total_length,
+                                const int hidden_size,//src sizeof
+                                const int expand_embed_dim,//src sizeof
+                                const int slot_num,
+                                const int push_float_num,//dst sizeof
+                                const int cvm_offset,
+                                const int skip_offset,
+                                const int bs) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+    return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = 1500 / (push_float_num + hidden_size + expand_embed_dim + 3);
+  int per_thread_len = roundup_div(total_length, nthreads);
+  int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+  int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+  __local__ float lm_src_vals[buf_length * hidden_size];
+  __local__ float lm_src_expand_vals[buf_length * expand_embed_dim];
+  __local__ float lm_dst_vals[buf_length * push_float_num];
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_slot_inner_offset[buf_length];
+  __local__ boxps::FeaturePushOffset lm_info[1];
+  __local__ TExpandPushGetOp lm_op[1];
+
+  // shared memory max 256 KB per cluster
+  const int max_slot_num = 1000;
+  __shared__ int sm_slots[max_slot_num];
+  int sm_slot_len = min(max_slot_num, slot_num);
+  int lm_slot = -1;
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+      mfence();
+      GM2LM(slot_vector + i, &lm_slot, sizeof(int));
+      sm_slots[i] = lm_slot;
+  }
+
+  __shared__ uint64_t sm_src_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_src_expand_vals_ptr[max_slot_num];
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(total_values + i, sm_src_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(total_values + slot_num + i, sm_src_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+  mfence();
+  xpu_sync_all();
+
+  __local__ uint64_t lm_src_vals_ptr[1];
+  __local__ uint64_t lm_src_expand_vals_ptr[1];
+  for(int i=0;i<slot_num;i++) {
+    if(sm_src_vals_ptr[i] != 0) {
+      lm_src_vals_ptr[0]=sm_src_vals_ptr[i];
+      break;
+    }
+  }
+  for(int i=0;i<slot_num;i++) {
+    if(sm_src_expand_vals_ptr[i] != 0) {
+      lm_src_expand_vals_ptr[0] = sm_src_expand_vals_ptr[i];
+      break;
+    }
+  }
+
+  GM2LM(info, lm_info, sizeof(boxps::FeaturePushOffset));
+  GM2LM(op, lm_op, sizeof(TExpandPushGetOp));
+  for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+    int gm_offset = i * per_thread_per_loop_len;
+    if (gm_offset >= total_length) {
+      return;
+    }
+    int len = min(per_thread_per_loop_len, total_length - gm_offset);
+    GM2LM(((__global_ptr__ float*)lm_src_vals_ptr[0] + gm_offset * hidden_size), lm_src_vals,  len * hidden_size * sizeof(float));
+    GM2LM(total_dims + gm_offset, lm_total_dims, len * sizeof(int));
+    GM2LM(key2slot + gm_offset, lm_key2slot, len * sizeof(int));
+    GM2LM(slot_inner_offset+ gm_offset, lm_slot_inner_offset, len * sizeof(int));
+    for (int j = 0; j < len; j++) {
+      //slot, k==0
+      // lm_dst_vals[j * push_float_num] = sm_slots[lm_key2slot[j]];
+      lm_slot = sm_slots[lm_key2slot[j]];
+      set_byfloat<int>(lm_dst_vals + j * push_float_num, lm_slot);
+      // skip
+      for (int k = 1; k < skip_offset + 1; ++k) {
+        lm_dst_vals[j * push_float_num + k] = 1.0;
+      }
+      // cvm
+      for (int k = skip_offset + 1; k < cvm_offset + 1 + skip_offset; ++k) {
+        if(sm_src_vals_ptr[lm_key2slot[j]] !=0){//src[x] != 0
+          if (k < lm_info->embed_g) {  // cvm
+            lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1];
+          } else {
+            lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1] * -1 * bs;
+          }
+        } else {
+          if (k == lm_info->show) {  // show
+            lm_dst_vals[j * push_float_num + k] = 1;
+          } else {  // other
+            lm_dst_vals[j * push_float_num + k] = 0;
+          }
+        }
+      }
+      // hidden_size
+      // for size not equal hidden_size
+      for (int k = cvm_offset + 1 + skip_offset; k < 1 + skip_offset + hidden_size; ++k) {
+        if((lm_total_dims[j] & 0x01) && sm_src_vals_ptr[lm_key2slot[j]] !=0) {
+          lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1] * -1 * bs;
+        } else {
+          lm_dst_vals[j * push_float_num + k] = 0;
+        }
+      }
+      if((lm_total_dims[j] & 0x02) && sm_src_expand_vals_ptr[lm_key2slot[j]] !=0) {
+        lm_src_expand_vals_ptr[0] = sm_src_expand_vals_ptr[lm_key2slot[j]];
+        mfence();
+        GM2LM(((__global_ptr__ float*)lm_src_expand_vals_ptr[0] + lm_slot_inner_offset[j] * expand_embed_dim), lm_src_expand_vals, expand_embed_dim * sizeof(float));
+        mfence();
+        for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
+          lm_dst_vals[j * push_float_num + k] = lm_op[0].get(lm_src_expand_vals,
+                                                                    0,
+                                                                    k - skip_offset - 1 - hidden_size,
+                                                                    hidden_size,  // hidden_size is useless
+                                                                    expand_embed_dim) * -1 * bs;
+        }
+        mfence();
+      } else {
+        for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
+          lm_dst_vals[j * push_float_num + k] = 0;
+        }
+      }
+    }
+    mfence();
+    LM2GM(lm_dst_vals, dst_vals + gm_offset * push_float_num,len * push_float_num * sizeof(float));
+  }
+}
+
+template <typename TExpandPushGetOp>
+__global__ void PushCopyNNCrossDiscontinuous(const TExpandPushGetOp* op,
+                                const boxps::FeaturePushOffset* info,
+                                unsigned long long* total_values,//src, float ptr[2*slot_num]
+                                const int* total_dims,
+                                const int* key2slot,
+                                const int* slot_vector,
+                                const int* slot_inner_offset,
+                                const long long* slot_len_lod,
+                                float* dst_vals, //dst, PushValueType ptr[slot_num]
+                                const int total_length,
+                                const int hidden_size,//src sizeof
+                                const int expand_embed_dim,//src sizeof
+                                const int slot_num,
+                                const int push_float_num,//dst sizeof
+                                const int cvm_offset,
+                                const int skip_offset,
+                                const int bs,
+                                const int* slot_slices,
+                                const int slot_slice_num) {
+  int cid = core_id();
+  int ncores = core_num();
+  if (cid >= ncores) {
+    return;
+  }
+  int thread_id = cluster_id() * ncores + cid;
+  int nthreads = cluster_num() * ncores;
+
+  const int buf_length = (1500 - expand_embed_dim - slot_slice_num - 2) / (push_float_num + hidden_size + 3);
+
+  __local__ float lm_src_vals[buf_length * hidden_size];
+  __local__ float lm_src_expand_vals[expand_embed_dim + 1];
+  __local__ float lm_dst_vals[buf_length * push_float_num];
+  __local__ int lm_total_dims[buf_length];
+  __local__ int lm_key2slot[buf_length];
+  __local__ int lm_slot_inner_offset[buf_length];
+  __local__ int lm_slot_slices[slot_slice_num + 1];
+  __local__ boxps::FeaturePushOffset lm_info[1];
+  __local__ TExpandPushGetOp lm_op[1];
+
+  // shared memory max 256 KB per cluster
+  const int max_slot_num = 1000;
+  __shared__ int sm_slots[max_slot_num];
+  int sm_slot_len = min(max_slot_num, slot_num);
+  int lm_slot = -1;
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+      mfence();
+      GM2LM(slot_vector + i, &lm_slot, sizeof(int));
+      sm_slots[i] = lm_slot;
+  }
+
+  __shared__ uint64_t sm_src_vals_ptr[max_slot_num];
+  __shared__ uint64_t sm_src_expand_vals_ptr[max_slot_num];
+  
+  for (int i = cid; i < sm_slot_len; i += ncores) {
+    GM2SM(total_values + i, sm_src_vals_ptr + i, sizeof(uint64_t));
+    GM2SM(total_values + slot_num + i, sm_src_expand_vals_ptr + i, sizeof(uint64_t));
+  }
+
+  __shared__ int64_t sm_slot_len_lod[max_slot_num + 1];
+  for (int i = cid; i < sm_slot_len + 1; i += ncores) {
+    GM2SM(slot_len_lod + i, sm_slot_len_lod + i, sizeof(int64_t));
+  }
+
+  mfence();
+  xpu_sync_all();
+
+  GM2LM_ASYNC(info, lm_info, sizeof(boxps::FeaturePushOffset));
+  GM2LM_ASYNC(op, lm_op, sizeof(TExpandPushGetOp));
+  GM2LM_ASYNC(slot_slices, lm_slot_slices, slot_slice_num * sizeof(int));
+  mfence();
+
+  int slot_start = 0;
+  for(int i = 0; i < slot_num; i++) {
+    if(sm_src_vals_ptr[i] != 0) {
+      slot_start = i;
+      break;
+    }
+  }
+  
+  int slot_end = 0;
+  for (int slice_index = 0; slice_index < slot_slice_num; slice_index++) {
+    slot_end = lm_slot_slices[slice_index];
+    int total_len = sm_slot_len_lod[slot_end] - sm_slot_len_lod[slot_start];
+
+    int m = slot_start;
+    slot_start = slot_end;
+    if(total_len == 0) {
+      continue;
+    }
+    int per_thread_len = roundup_div(total_len, nthreads);
+    int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+    int per_thread_per_loop_len = roundup_div(per_thread_len, per_thread_loop_count);
+
+    for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+      int gm_offset = i * per_thread_per_loop_len;
+      if (gm_offset >= total_len) {
+        break;
+      }
+      int len = min(per_thread_per_loop_len, total_len - gm_offset);
+      GM2LM_ASYNC((__global_ptr__ float*)sm_src_vals_ptr[m] + gm_offset * hidden_size, lm_src_vals, len * hidden_size * sizeof(float));
+      GM2LM_ASYNC(total_dims + sm_slot_len_lod[m] + gm_offset, lm_total_dims, len * sizeof(int));
+      GM2LM_ASYNC(key2slot + sm_slot_len_lod[m] + gm_offset, lm_key2slot, len * sizeof(int));
+      GM2LM_ASYNC(slot_inner_offset + sm_slot_len_lod[m] + gm_offset, lm_slot_inner_offset, len * sizeof(int));
+      mfence();
+      for (int j = 0; j < len; j++) {
+        //slot, k==0
+        // lm_dst_vals[j * push_float_num] = sm_slots[lm_key2slot[j]];
+        lm_slot = sm_slots[lm_key2slot[j]];
+        set_byfloat<int>(lm_dst_vals + j * push_float_num, lm_slot);
+        // skip
+        for (int k = 1; k < skip_offset + 1; ++k) {
+          lm_dst_vals[j * push_float_num + k] = 1.0;
+        }
+        // cvm
+        for (int k = skip_offset + 1; k < cvm_offset + 1 + skip_offset; ++k) {
+          if(sm_src_vals_ptr[lm_key2slot[j]] != 0){//src[x] != 0
+            if (k < lm_info->embed_g) {  // cvm
+              lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1];
+            } else {
+              lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1] * -bs;
+            }
+          } else {
+            if (k == lm_info->show) {  // show
+              lm_dst_vals[j * push_float_num + k] = 1;
+            } else {  // other
+              lm_dst_vals[j * push_float_num + k] = 0;
+            }
+          }
+        }
+        // hidden_size
+        // for size not equal hidden_size
+        for (int k = cvm_offset + 1 + skip_offset; k < 1 + skip_offset + hidden_size; ++k) {
+          if((lm_total_dims[j] & 0x01) && sm_src_vals_ptr[lm_key2slot[j]] !=0) {
+            lm_dst_vals[j * push_float_num + k] = lm_src_vals[j * hidden_size + k-skip_offset - 1] * -bs;
+          } else {
+            lm_dst_vals[j * push_float_num + k] = 0;
+          }
+        }
+        if((lm_total_dims[j] & 0x02) && sm_src_expand_vals_ptr[lm_key2slot[j]] != 0) {
+          GM2LM((__global_ptr__ float*)sm_src_expand_vals_ptr[lm_key2slot[j]] + lm_slot_inner_offset[j] * expand_embed_dim, 
+                lm_src_expand_vals, expand_embed_dim * sizeof(float));
+          for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
+            // lm_dst_vals[j * push_float_num + k] = lm_src_expand_vals[k - skip_offset - 1] * -bs;
+            lm_dst_vals[j * push_float_num + k] = lm_op[0].get(lm_src_expand_vals,
+                                                                    0,
+                                                                    k - skip_offset - 1 - hidden_size,
+                                                                    hidden_size,  // hidden_size is useless
+                                                                    expand_embed_dim)  * -bs;
+          }
+          mfence();
+        } else {
+          for (int k = 1 + skip_offset + hidden_size; k < push_float_num; ++k) {
+            lm_dst_vals[j * push_float_num + k] = 0;
+          }
+        }
+      }
+      mfence();
+      LM2GM(lm_dst_vals, dst_vals + (sm_slot_len_lod[m] + gm_offset) * push_float_num, len * push_float_num * sizeof(float));
+    }
+  }
+}
+
+template <typename TExpandPushGetOp>
+inline void FeaturePushCopyNNCross(
+    const paddle::platform::Place& place,
+    const TExpandPushGetOp* op,
+    const boxps::FeaturePushOffset* info,
+    float** gm_src,
+    const int* total_dims,
+    const int* key2slot,
+    const int* slot_vector,
+    const int* slot_inner_offset,
+    const int64_t* slot_len_lod,
+    float* push_grad_values,
+    // uint64_t* total_keys_xpu,//useless
+    const int total_length,
+    const int hidden_size,
+    const int expand_embed_dim,
+    const int slot_num,
+    const int push_float_num,  // dst sizeof
+    const int cvm_offset,
+    const int skip_offset,
+    const int bs,
+    bool expand_only,
+    bool is_continuous,
+    const int* slot_slices,
+    const int slot_slice_num) {
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto ctx_xpu = static_cast<platform::XPUDeviceContext*>(dev_ctx)->x_context();
+  auto stream = ctx_xpu->xpu_stream;
+
+#ifdef TRACE_PROFILE
+  TRACE_SCOPE_START("PushCopyNNCross", xpu_wait(stream));
+#endif
+  if (expand_only) {
+    ExpandPushGetOp op;
+    auto d_op_tmp = memory::Alloc(place, sizeof(ExpandPushGetOp));
+    ExpandPushGetOp* d_op = reinterpret_cast<ExpandPushGetOp*>(d_op_tmp->ptr());
+    memory::Copy(place,
+                d_op,
+                platform::CPUPlace(),
+                &op,
+                sizeof(ExpandPushGetOp));
+    if(is_continuous) {
+      PushCopyNNCross<TExpandPushGetOp><<<8, 64, stream>>>(d_op,
+                                                        info,
+                                                        reinterpret_cast<unsigned long long*>(gm_src),//src
+                                                        total_dims,
+                                                        key2slot,
+                                                        slot_vector,
+                                                        slot_inner_offset,
+                                                        push_grad_values,//dst
+                                                        total_length,
+                                                        hidden_size,
+                                                        expand_embed_dim,
+                                                        slot_num,
+                                                        push_float_num,
+                                                        cvm_offset,
+                                                        skip_offset,
+                                                        bs);
+    } else {
+      PushCopyNNCrossDiscontinuous<TExpandPushGetOp><<<8, 64, stream>>>(d_op,
+                                                        info,
+                                                        reinterpret_cast<unsigned long long*>(gm_src),//src
+                                                        total_dims,
+                                                        key2slot,
+                                                        slot_vector,
+                                                        slot_inner_offset,
+                                                        (long long*)slot_len_lod,
+                                                        push_grad_values,//dst
+                                                        total_length,
+                                                        hidden_size,
+                                                        expand_embed_dim,
+                                                        slot_num,
+                                                        push_float_num,
+                                                        cvm_offset,
+                                                        skip_offset,
+                                                        bs,
+                                                        slot_slices,
+                                                        slot_slice_num);
+    }
+  } else {
+    ExpandPushEmdGetOp op;
+    auto d_op_tmp = memory::Alloc(place, sizeof(ExpandPushEmdGetOp));
+    ExpandPushEmdGetOp* d_op = reinterpret_cast<ExpandPushEmdGetOp*>(d_op_tmp->ptr());
+    memory::Copy(place,
+                d_op,
+                platform::CPUPlace(),
+                &op,
+                sizeof(ExpandPushEmdGetOp));
+    if(is_continuous) {
+      PushCopyNNCross<ExpandPushEmdGetOp><<<8, 64, stream>>>(d_op,
+                                                        info,
+                                                        reinterpret_cast<unsigned long long*>(gm_src),//src
+                                                        total_dims,
+                                                        key2slot,
+                                                        slot_vector,
+                                                        slot_inner_offset,
+                                                        push_grad_values,//dst
+                                                        total_length,
+                                                        hidden_size,
+                                                        hidden_size + expand_embed_dim,
+                                                        slot_num,
+                                                        push_float_num,
+                                                        cvm_offset,
+                                                        skip_offset,
+                                                        bs);
+    } else {
+      PushCopyNNCrossDiscontinuous<ExpandPushEmdGetOp><<<8, 64, stream>>>(d_op,
+                                                        info,
+                                                        reinterpret_cast<unsigned long long*>(gm_src),//src
+                                                        total_dims,
+                                                        key2slot,
+                                                        slot_vector,
+                                                        slot_inner_offset,
+                                                        (long long*)slot_len_lod,
+                                                        push_grad_values,//dst
+                                                        total_length,
+                                                        hidden_size,
+                                                        hidden_size + expand_embed_dim,
+                                                        slot_num,
+                                                        push_float_num,
+                                                        cvm_offset,
+                                                        skip_offset,
+                                                        bs,
+                                                        slot_slices,
+                                                        slot_slice_num);
+    }
+  }
+#ifdef TRACE_PROFILE
+  xpu_wait(stream);
+  TRACE_SCOPE_END("PushCopyNNCross", );
+#endif
+}
+
+__global__ void PushCopy(unsigned long long* src_vals,
+    float* dest_vals,
+    boxps::FeaturePushOffset* push_offset,
+    const int push_float_num,
+    const int total_length,
+    const int hidden_size,
+    const int batch_size,
+    const int* total_dims,
+    const int skip_offset,
+    const int cvm_offset,
+    const int* key2slot,
+    const int* slots,
+    const int slot_num) {
+    int cid = core_id();
+    int ncores = core_num();
+    if (cid >= ncores) {
+      return;
+    }
+    int thread_id = cluster_id() * ncores + cid;
+    int nthreads = cluster_num() * ncores;
+
+    //const int buf_length = 40; // max 2048 float
+    const int total_local_mem = 6500;
+    const int buf_length = total_local_mem / ((hidden_size + push_float_num + 3) * 4);
+    int per_thread_len = roundup_div(total_length, nthreads);
+    int per_thread_loop_count = roundup_div(per_thread_len, buf_length);
+    int per_thread_per_loop_len =
+      roundup_div(per_thread_len, per_thread_loop_count);
+
+    __local__ float lm_src_vals[buf_length * hidden_size];
+    __local__ float lm_dest_vals[buf_length * push_float_num];
+    __local__ int lm_total_dims[buf_length];
+    __local__ int lm_key2slot[buf_length];
+    boxps::FeaturePushOffset info;
+
+    // shared memory max 256 KB per cluster
+    const int max_slot_num = 1000;
+    __shared__ int sm_slots[max_slot_num];
+    int sm_slot_len = min(max_slot_num, slot_num);
+    int lm_slot = -1;
+    for (int i = cid; i < sm_slot_len; i += ncores) {
+        mfence();
+        GM2LM(slots + i, &lm_slot, sizeof(int));
+        sm_slots[i] = lm_slot;
+    }
+
+    __shared__ uint64_t sm_src_vals_ptr[max_slot_num];
+    for (int i = cid; i < sm_slot_len; i += ncores) {
+      GM2SM(src_vals + i, sm_src_vals_ptr + i, sizeof(uint64_t));
+    }
+
+    mfence();
+    xpu_sync_all();
+
+    __local__ uint64_t lm_src_vals_ptr[1];
+    for (int i = 0; i < slot_num; i++) {
+      if (sm_src_vals_ptr[i] != 0) {
+        lm_src_vals_ptr[0] = sm_src_vals_ptr[i];
+        break;
+      }
+    }
+    GM2LM(push_offset, &info, sizeof(boxps::FeaturePushOffset));
+
+    float scale = -1. * batch_size;
+    for (int i = thread_id; i < per_thread_loop_count * nthreads; i += nthreads) {
+      mfence();
+      int gm_offset = i * per_thread_per_loop_len;
+      if (gm_offset >= total_length)
+        return;
+
+      int count_per_loop =
+          min(per_thread_per_loop_len, total_length - gm_offset);
+
+      GM2LM((__global_ptr__ float*)lm_src_vals_ptr[0] + gm_offset * hidden_size, lm_src_vals,
+              count_per_loop * hidden_size * sizeof(float));
+      GM2LM(total_dims + gm_offset, lm_total_dims,
+              count_per_loop * sizeof(int));
+      GM2LM(key2slot + gm_offset, lm_key2slot,
+              count_per_loop * sizeof(int));
+
+      for (int j = 0; j < count_per_loop; j++) {
+          mfence();
+          float* dest_val = &(lm_dest_vals[j * push_float_num]);
+          if (lm_key2slot[j] < sm_slot_len) {
+              lm_slot = sm_slots[lm_key2slot[j]];
+              set_byfloat<int>(dest_val + info.slot, lm_slot);
+          } else {
+              mfence();
+              GM2LM(slots + lm_key2slot[j], &lm_slot, sizeof(int));
+              set_byfloat<int>(dest_val + info.slot, lm_slot);
+          }
+
+          float* optr = reinterpret_cast<float*>(&dest_val[info.show]);
+          float* src_val = reinterpret_cast<float*>(lm_src_vals + j * hidden_size);
+
+          for (int k = 0; k < skip_offset; ++k) {
+              optr[k] = 1.0;
+          }
+          for (int k = 0; k < cvm_offset; ++k) {
+              optr[k + skip_offset] = src_val[k];
+          }
+          for (int k = 0; k < info.embed_num; ++k) {
+              dest_val[info.embed_g + k] *= scale;
+          }
+
+          if (lm_total_dims[j] & 0x01) {
+              for (int k = 0; k < hidden_size - cvm_offset; ++k) {
+                  dest_val[info.embedx_g + k] = src_val[cvm_offset + k] * scale;
+              }
+          } else {
+              for (int k = 0; k < hidden_size - cvm_offset; ++k) {
+                  dest_val[info.embedx_g + k] = 0;
+              }
+          }
+      }
+
+      mfence();
+      LM2GM(&(lm_dest_vals[0]), dest_vals + gm_offset * push_float_num,
+              count_per_loop * push_float_num * sizeof(float));
+  }
+}
+
+void BoxWrapperKernel::CopyForPush(
+    const paddle::platform::Place& place,
+    float** gm_src_ptr,
+    void* total_grad_values_xpu,
+    boxps::FeaturePushOffset* push_offset,
+    const int64_t total_length,
+    const int* slots,
+    const int* slot_inner_offset,
+    const int64_t* slot_len_lod,
+    const int slot_num,
+    const int hidden_size,
+    const int batch_size,
+    const int* total_dims,
+    const int skip_offset,
+    const int* key2slot,
+    const int expand_embed_dim,
+    const int push_float_num,
+    bool expand_only,
+    bool is_continuous,
+    const int* slot_slices,
+    const int slot_slice_num) {
+  auto dev_ctx = platform::DeviceContextPool::Instance().Get(place);
+  auto stream = static_cast<platform::XPUDeviceContext*>(dev_ctx)
+               ->x_context()
+               ->xpu_stream;
+
+  const int cvm_offset = cvm_offset_ - skip_offset;
+
+  const int c_total_length = static_cast<const int>(total_length);
+  float* push_grad_values = reinterpret_cast<float*>(total_grad_values_xpu);
+
+  if (expand_embed_dim > 0 && pull_info_.expand_size > 0) {  // nncross
+    // FeaturePushCopyNNCross
+    ExpandPushGetOp op;
+    FeaturePushCopyNNCross(place,
+                           &op,
+                           push_offset,
+                           gm_src_ptr,
+                           total_dims,
+                           key2slot,
+                           slots,
+                           slot_inner_offset,
+                           slot_len_lod,
+                           push_grad_values,
+                           c_total_length,
+                           hidden_size,
+                           expand_embed_dim,
+                           slot_num,
+                           push_float_num,  // dst sizeof
+                           cvm_offset,
+                           skip_offset,
+                           batch_size,
+                           expand_only,
+                           is_continuous,
+                           slot_slices,
+                           slot_slice_num);
+  } else if (pull_info_.expand_size < 0 &&
+             expand_embed_dim == cvm_offset + expand_embed_dim_ &&
+             hidden_size == cvm_offset + embedx_dim_) {  // var
+    // FeaturePushCopyVariable
+    // TODO:
+    CHECK(false) << "FeaturePushCopyVariable not implement";
+  } else {
+    // FeaturePushCopy
+    CHECK(6500 / ((hidden_size + push_float_num + 3) * 4) > 0) << "xpu lm is overflow hidden_size " << hidden_size << " push_float_num " << push_float_num;
+    PushCopy<<<8, 64, stream>>>(reinterpret_cast<unsigned long long*>(gm_src_ptr), push_grad_values, push_offset,
+        push_float_num_, c_total_length, hidden_size, batch_size, total_dims,
+        skip_offset, cvm_offset, key2slot, slots, slot_num);
+  }
+
+  xpu_wait(stream);
+}
+
+void BoxWrapperKernel::GetFeatureInfo(boxps::FeaturePullOffset &pull_info,
+    size_t feature_pull_size, boxps::FeaturePushOffset &push_info,
+    size_t feature_push_size, int embedx_dim, int expand_embed_dim,
+    float pull_embedx_scale) {
+  pull_info_ = pull_info;
+  feature_pull_size_ = feature_pull_size;
+  push_info_ = push_info;
+  feature_push_size_ = feature_push_size;
+
+  pull_float_num_ = feature_pull_size_ / sizeof(float);
+  push_float_num_ = feature_push_size_ / sizeof(float);
+  // set cvm offset
+  cvm_offset_ = pull_info_.embedx_size - pull_info_.show;
+
+  embedx_dim_ = embedx_dim;
+  expand_embed_dim_ = expand_embed_dim;
+  pull_embedx_scale_ = pull_embedx_scale;
+}
+
+}  // end namespace framework
+}  // end namespace paddle
+#endif

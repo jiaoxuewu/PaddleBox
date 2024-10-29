@@ -434,7 +434,6 @@ class SingleProcessMultiThread(GradAllReduce):
 class MultiThread(GradAllReduce):
     '''
     '''
-
     def __init__(self, nrings=1, trans_mode="all_reduce"):
         GradAllReduce.__init__(self, nrings)
         self.mode = "box"
@@ -455,7 +454,6 @@ class MultiThread(GradAllReduce):
                                         self.current_endpoint, self.endpoints,
                                         self.rank, ring_id, self.wait_port,
                                         True)
-
         else:
             if "xpu" in self.trans_mode:
                 print(

@@ -181,6 +181,87 @@ void MemcpySyncD2D(void* dst,
   }
 }
 
+void MemcpySyncH2D(void* dst,
+                   const void* src,
+                   size_t count,
+                   const phi::XPUL3Place& dst_place,
+                   const phi::XPUContext& dev_ctx) {
+  XPUDeviceGuard guard(dst_place.device);
+  dev_ctx.Wait();
+  PADDLE_ENFORCE_XPU_SUCCESS(
+      xpu_memcpy(dst, src, count, XPUMemcpyKind::XPU_HOST_TO_DEVICE));
+}
+
+void MemcpySyncD2H(void* dst,
+                   const void* src,
+                   size_t count,
+                   const phi::XPUL3Place& src_place,
+                   const phi::XPUContext& dev_ctx) {
+  XPUDeviceGuard guard(src_place.GetDeviceId());
+  dev_ctx.Wait();
+  PADDLE_ENFORCE_XPU_SUCCESS(
+      xpu_memcpy(dst, src, count, XPUMemcpyKind::XPU_DEVICE_TO_HOST));
+}
+
+// if src.device == dst.device and you need sync , after call this function,
+// need to call xpu_wait()
+void MemcpySyncD2D(void* dst,
+                   const phi::XPUL3Place& dst_place,
+                   const void* src,
+                   const phi::XPUL3Place& src_place,
+                   size_t count,
+                   const phi::XPUContext& dev_ctx) {
+  int dev_id = GetXPUCurrentDeviceId();
+  if (dst_place.device == dev_id && src_place.device == dev_id) {
+    PADDLE_ENFORCE_XDNN_SUCCESS(
+        baidu::xpu::api::copy(dev_ctx.x_context(),
+                              static_cast<const int8_t*>(src),
+                              static_cast<int8_t*>(dst),
+                              count),
+        "copy ");
+  } else {
+    PADDLE_ENFORCE_XPU_SUCCESS(
+        xpu_memcpy_peer(dst_place.device, dst, src_place.device, src, count));
+  }
+}
+void MemcpySyncD2D(void* dst,
+                   const phi::XPUPlace& dst_place,
+                   const void* src,
+                   const phi::XPUL3Place& src_place,
+                   size_t count,
+                   const phi::XPUContext& dev_ctx) {
+  int dev_id = GetXPUCurrentDeviceId();
+  if (dst_place.device == dev_id && src_place.device == dev_id) {
+    PADDLE_ENFORCE_XDNN_SUCCESS(
+        baidu::xpu::api::copy(dev_ctx.x_context(),
+                              static_cast<const int8_t*>(src),
+                              static_cast<int8_t*>(dst),
+                              count),
+        "copy ");
+  } else {
+    PADDLE_ENFORCE_XPU_SUCCESS(
+        xpu_memcpy_peer(dst_place.device, dst, src_place.device, src, count));
+  }
+}
+void MemcpySyncD2D(void* dst,
+                   const phi::XPUL3Place& dst_place,
+                   const void* src,
+                   const phi::XPUPlace& src_place,
+                   size_t count,
+                   const phi::XPUContext& dev_ctx) {
+  int dev_id = GetXPUCurrentDeviceId();
+  if (dst_place.device == dev_id && src_place.device == dev_id) {
+    PADDLE_ENFORCE_XDNN_SUCCESS(
+        baidu::xpu::api::copy(dev_ctx.x_context(),
+                              static_cast<const int8_t*>(src),
+                              static_cast<int8_t*>(dst),
+                              count),
+        "copy ");
+  } else {
+    PADDLE_ENFORCE_XPU_SUCCESS(
+        xpu_memcpy_peer(dst_place.device, dst, src_place.device, src, count));
+  }
+}
 /**************************** Others **************************/
 
 XPUVersion get_xpu_version(int dev_id) {
@@ -188,11 +269,14 @@ XPUVersion get_xpu_version(int dev_id) {
   PADDLE_ENFORCE_XPU_SUCCESS(xpu_device_get_attr(&v, XPUATTR_MODEL, dev_id));
 
   if (v == K100 || v == K200) {
-    VLOG(1) << "KUNLUN device " << dev_id << " is XPU1\n";
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU1\n";
     return XPU1;
-  } else {
-    VLOG(1) << "KUNLUN device " << dev_id << " is XPU2\n";
+  } else if (v < KL3_BEGIN) {
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU2\n";
     return XPU2;
+  } else {
+    VLOG(3) << "KUNLUN device " << dev_id << " is XPU3\n";
+    return XPU3;
   }
 }
 

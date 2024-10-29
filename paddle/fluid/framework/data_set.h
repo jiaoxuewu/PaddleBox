@@ -40,6 +40,7 @@ DECLARE_bool(enable_shuffle_by_searchid);
 DECLARE_bool(padbox_dataset_disable_shuffle);
 DECLARE_bool(padbox_dataset_disable_polling);
 DECLARE_bool(enable_update_filter_ins);
+DECLARE_bool(padbox_dataset_disable_random_update);
 namespace boxps {
 class PSAgentBase;
 }
@@ -603,6 +604,7 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   double min_shuffle_span_ = 0;
   bool disable_shuffle_ = FLAGS_padbox_dataset_disable_shuffle;
   bool disable_polling_ = FLAGS_padbox_dataset_disable_polling;
+  bool disable_random_update_ = FLAGS_padbox_dataset_disable_random_update;
   std::vector<std::shared_ptr<BinaryArchiveWriter>> binary_files_;
   bool is_archive_file_ = false;
   std::atomic<int64_t> total_ins_num_{0};

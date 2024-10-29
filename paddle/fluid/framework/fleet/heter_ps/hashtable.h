@@ -38,9 +38,9 @@ limitations under the License. */
 #elif defined(__xpu__)
 #include <xpu/runtime.h>
 
-#include "xpu/kernel/cluster_header.h"
-#include "xpu/kernel/math.h"
-#include "xpu/kernel/simd.h"
+#include "xpu/kernel/xtdk.h"
+#include "xpu/kernel/xtdk_math.h"
+#include "xpu/kernel/xtdk_simd.h"
 #endif
 
 #include "paddle/fluid/framework/fleet/heter_ps/optimizer_conf.h"

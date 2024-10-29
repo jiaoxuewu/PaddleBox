@@ -1943,6 +1943,18 @@ AnalysisPredictor::~AnalysisPredictor() {
     memory::Release(place_);
   }
   device_contexts_.clear();
+
+  #if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+      // need to guarantee we propagate the tracepoints before we stop the interval.
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      catapult_recorder->stopInterval();
+      catapult_recorder->setupDumpFile("./traces.json");
+      std::cout<<"end profile in BoxWrapper"<<std::endl;
+
+      factory.reset();
+      manager.reset();
+      catapult_recorder.reset();
+  #endif
 }
 
 std::unique_ptr<PaddlePredictor> AnalysisPredictor::Clone(void *stream) {

@@ -48,12 +48,26 @@ void NaiveExecutor::Run() {
   platform::RegisterModelLayout(ops_, place_);
 #endif
   platform::ScopedFlushDenormal flush;
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+  TRACE_SCOPE_START("naive_executor ops run",);
+#endif
   for (auto &op : ops_) {
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+    xpu_wait();
+    RUNTIME_TRACE_SCOPE_START((op->Type()+" run").c_str(),);
+#endif
     VLOG(4) << std::this_thread::get_id() << " run "
             << op->DebugStringEx(scope_) << " on scope " << scope_;
     op->SetIsCalledByExecutor(false);
     op->Run(*scope_, place_);
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+    RUNTIME_TRACE_SCOPE_END((op->Type()+" run").c_str(),);
+    xpu_wait();
+#endif
   }
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+  TRACE_SCOPE_END("naive_executor ops run",);
+#endif
 }
 
 void NaiveExecutor::CreateVariables(const ProgramDesc &desc,

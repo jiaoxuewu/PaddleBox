@@ -51,7 +51,7 @@ void Copy(const Context& dev_ctx,
 #endif
 
 #ifdef PADDLE_WITH_XPU
-  } else if (paddle::platform::is_xpu_place(dst_place)) {
+  } else if (paddle::platform::is_xpu_place(dst_place) || paddle::platform::is_xpul3_place(dst_place)) {
     dst_ptr = dev_ctx.Alloc(dst, src.dtype());
 #endif
 #ifdef PADDLE_WITH_CUSTOM_DEVICE
@@ -201,14 +201,14 @@ void Copy(const Context& dev_ctx,
         dst_cuda_pinned_place, dst_ptr, src_gpu_place, src_ptr, size, stream);
 #endif
 #ifdef PADDLE_WITH_XPU
-  } else if (paddle::platform::is_xpu_place(src_place) &&  // NOLINT
+  } else if ((paddle::platform::is_xpu_place(src_place) || paddle::platform::is_xpul3_place(src_place)) &&  // NOLINT
              paddle::platform::is_cpu_place(dst_place)) {
     paddle::memory::Copy(dst_place, dst_ptr, src_place, src_ptr, size);
   } else if (paddle::platform::is_cpu_place(src_place) &&
-             paddle::platform::is_xpu_place(dst_place)) {
+             (paddle::platform::is_xpu_place(dst_place) || paddle::platform::is_xpul3_place(dst_place))) {
     paddle::memory::Copy(dst_place, dst_ptr, src_place, src_ptr, size);
-  } else if (paddle::platform::is_xpu_place(src_place) &&
-             paddle::platform::is_xpu_place(dst_place)) {
+  } else if ((paddle::platform::is_xpu_place(src_place) || paddle::platform::is_xpul3_place(src_place)) &&
+             (paddle::platform::is_xpu_place(dst_place) || paddle::platform::is_xpul3_place(dst_place))) {
     if (src_ptr == dst_ptr) {
       VLOG(3) << "Skip copy the same data async from " << src_place << " to "
               << dst_place;

@@ -34,6 +34,7 @@ using CUDAPinnedPlace = phi::GPUPinnedPlace;
 using NPUPlace = phi::NPUPlace;
 using NPUPinnedPlace = phi::NPUPinnedPlace;
 using XPUPlace = phi::XPUPlace;
+using XPUL3Place = phi::XPUL3Place;
 using IPUPlace = phi::IPUPlace;
 using MLUPlace = phi::MLUPlace;
 using CustomPlace = phi::CustomPlace;
@@ -51,6 +52,7 @@ class PlaceHelper {
 
 bool is_gpu_place(const Place &);
 bool is_xpu_place(const Place &);
+bool is_xpul3_place(const Place &);
 bool is_npu_place(const Place &);
 bool is_mlu_place(const Place &);
 bool is_ipu_place(const Place &);
@@ -92,6 +94,16 @@ typename Visitor::result_type VisitPlace(const Place &place,
 #else
       PADDLE_THROW(paddle::platform::errors::Unavailable(
           "Paddle is not compiled with XPU. Cannot visit xpu device"));
+      return typename Visitor::result_type();
+#endif
+    }
+    case phi::AllocationType::XPUL3: {
+#ifdef PADDLE_WITH_XPU
+      platform::XPUL3Place p(place.GetDeviceId());
+      return visitor(p);
+#else
+      PADDLE_THROW(paddle::platform::errors::Unavailable(
+          "Paddle is not compiled with XPU. Cannot visit xpul3 device"));
       return typename Visitor::result_type();
 #endif
     }

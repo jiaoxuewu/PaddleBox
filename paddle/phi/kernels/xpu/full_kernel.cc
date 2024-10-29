@@ -70,7 +70,10 @@ void FullLikeKernel(const Context& dev_ctx,
                     DataType dtype,
                     DenseTensor* out) {
   dev_ctx.template Alloc<T>(out);
-  auto value = val.to<float>();
+  //auto value = val.to<float>();
+  // BUG Fix: ".to<float>()" has overflow bug when T is int64_t, update to "to<T>()"
+  // but dtype of "Scalar& val" is double, not consistent with T(int64), has risk!
+  auto value = val.to<T>();
   using XPUInTDType = typename XPUTypeTrait<T>::Type;
   using CommonType = typename std::common_type<
       float,

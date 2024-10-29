@@ -14,10 +14,10 @@
 
 #pragma once
 #include "paddle/phi/common/float16.h"
-#include "xpu/kernel/cluster_header.h"
-#include "xpu/kernel/debug.h"
-#include "xpu/kernel/math.h"
-#include "xpu/kernel/simd_header.h"
+#include "xpu/kernel/xtdk.h"
+// #include "xpu/kernel/debug.h"
+#include "xpu/kernel/xtdk_math.h"
+#include "xpu/kernel/xtdk_simd.h"
 
 namespace phi {
 namespace kps {

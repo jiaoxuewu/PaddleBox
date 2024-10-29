@@ -50,11 +50,14 @@ option(WITH_GPU "Compile PaddlePaddle with NVIDIA GPU" ${CUDA_FOUND})
 option(WITH_TENSORRT "Compile PaddlePaddle with NVIDIA TensorRT" OFF)
 option(WITH_XPU "Compile PaddlePaddle with BAIDU KUNLUN XPU" OFF)
 option(WITH_XPU_KP "Compile PaddlePaddle with BAIDU XPU compiler " OFF)
+option(WITH_XPU_XRE5 "Compile PaddlePaddle with BAIDU XPU XRE 5" OFF)
+option(TRACE_PROFILE "Compile PaddlePaddle with TRACE_PROFILE " OFF)
 option(WITH_MLU "Compile PaddlePaddle with CAMBRICON MLU" OFF)
 option(WITH_WIN_DUMP_DBG "Compile with windows core dump debug mode" OFF)
 option(WITH_ASCEND "Compile PaddlePaddle with ASCEND" OFF)
 option(WITH_ROCM "Compile PaddlePaddle with ROCM platform" OFF)
 option(WITH_IPU "Compile PaddlePaddle with Graphcore IPU" OFF)
+option(WITH_CPU_DATA_FEED "Compile PaddlePaddle with cpu datafeed" OFF)
 # NOTE(zhiqiu): WITH_ASCEND_CL can be compile on x86_64, so we can set WITH_ASCEND=OFF and WITH_ASCEND_CL=ON
 # to develop some acl related functionality on x86
 option(WITH_ASCEND_CL "Compile PaddlePaddle with ASCEND CL" ${WITH_ASCEND})
@@ -71,6 +74,9 @@ if(WITH_GPU AND WITH_XPU)
 endif()
 if(WITH_GPU AND WITH_XPU_KP)
   message(FATAL_ERROR "Error when compile GPU and XPU2 at the same time")
+endif()
+if(WITH_GPU AND WITH_XPU_XRE5)
+  message(FATAL_ERROR "Error when compile GPU and XPU-XRE5 at the same time")
 endif()
 if(WITH_GPU AND WITH_ASCEND)
   message(FATAL_ERROR "Error when compile GPU and ASCEND at the same time")
@@ -390,6 +396,14 @@ if(NOT WITH_XPU AND WITH_XPU_BKCL)
       CACHE STRING "Disable BKCL when compiling without XPU" FORCE)
 endif()
 
+if(NOT WITH_XPU AND WITH_XPU_XRE5)
+  message((WARNING
+           "Disable XRE5 when compiling without XPU. Force WITH_XPU_XRE5=OFF"))
+  set(WITH_XPU_XRE5
+      OFF
+      CACHE STRING "Disable XRE5 when compiling without XPU" FORCE)
+endif()
+
 if(NOT WITH_MLU AND WITH_CNCL)
   message(
     WARNING "Disable CNCL when compiling without MLU. Force WITH_MLU=OFF.")
@@ -593,6 +607,10 @@ if(WITH_STRIP)
         CACHE STRING "Command strip is only used on Linux when it exists."
               FORCE)
   endif()
+endif()
+
+if(WITH_CPU_DATA_FEED)
+  add_definitions(-DCPU_DATA_FEED)
 endif()
 
 add_subdirectory(paddle)

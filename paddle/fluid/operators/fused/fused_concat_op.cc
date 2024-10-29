@@ -162,6 +162,7 @@ class FusedConcatOp : public framework::OperatorWithKernel {
                           "Input length more than zero %d.", length));
 
     auto ins_dims = ctx->GetInputsDim("X");
+    int batch_size = ins_dims[0][0];
     const int input_nums = ins_dims.size();
     PADDLE_ENFORCE_GT(input_nums, 1UL,
                       platform::errors::InvalidArgument(
@@ -169,7 +170,7 @@ class FusedConcatOp : public framework::OperatorWithKernel {
                           "but received value is %d.",
                           ins_dims.size()));
     std::vector<int64_t> out_dim;
-    out_dim = {-1, length * input_nums};
+    out_dim = {batch_size, length * input_nums};
     ctx->SetOutputDim("Out", phi::make_ddim(out_dim));
   }
 

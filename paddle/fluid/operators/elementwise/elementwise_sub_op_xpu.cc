@@ -26,7 +26,15 @@ class ElementwiseSubXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUElementwise<T, XPUType>(ctx, xpu::broadcast_sub<XPUType>);
+   auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              const XPUType* y,
+              XPUType* z,
+              const std::vector<int>& xshape,
+              const std::vector<int>& yshape) {
+    return xpu::broadcast_sub<XPUType>(ctx, x, y, z, xshape, yshape);
+  };
+    XPUElementwise<T, XPUType>(ctx, f);
   }
 };
 
@@ -37,8 +45,20 @@ class ElementwiseSubGradXPUKernel : public ElemwiseGradKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
     ElemwiseGradKernel<T>::Compute(ctx);
+    auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              const XPUType* y,
+              const XPUType* z,
+              const XPUType* dz,
+              XPUType* dy,
+              XPUType* dx,
+              const std::vector<int>& xshape,
+              const std::vector<int>& yshape) {
+    return xpu::broadcast_sub_grad<XPUType>(
+        ctx, x, y, z, dz, dy, dx, xshape, yshape);
+  };
     XPUElementwiseGrad<T, XPUType>(
-        ctx, xpu::broadcast_sub_grad<XPUType>, false);
+        ctx, f, false);
   }
 };
 
@@ -48,7 +68,8 @@ class ElementwiseSubGradXPUKernel : public ElemwiseGradKernel<T> {
 namespace ops = paddle::operators;
 REGISTER_OP_XPU_KERNEL(elementwise_sub,
                        ops::ElementwiseSubXPUKernel<float>,
-                       ops::ElementwiseSubXPUKernel<paddle::platform::float16>);
+                       ops::ElementwiseSubXPUKernel<paddle::platform::float16>,
+                       ops::ElementwiseSubXPUKernel<int64_t>);
 REGISTER_OP_XPU_KERNEL(
     elementwise_sub_grad,
     ops::ElementwiseSubGradXPUKernel<float>,

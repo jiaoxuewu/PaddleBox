@@ -46,6 +46,7 @@ class TensorFormatter {
   void SetPrintTensorLod(bool print_tensor_lod);
   void SetPrintTensorLayout(bool print_tensor_layout);
   void SetSummarize(int64_t summarize);
+  void SetPrintFilePath(const std::string& print_file_path);
 
  private:
   int64_t summarize_ = -1;
@@ -53,6 +54,7 @@ class TensorFormatter {
   bool print_tensor_shape_ = true;
   bool print_tensor_lod_ = true;
   bool print_tensor_layout_ = true;
+  std::string print_file_path_;
 };
 
 }  // namespace operators

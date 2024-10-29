@@ -19,6 +19,7 @@
 #include "paddle/fluid/memory/allocation/allocator_facade.h"
 #include "paddle/fluid/platform/device/device_wrapper.h"
 #include "paddle/fluid/platform/device/gpu/gpu_resource_pool.h"
+#include "paddle/fluid/platform/device/xpu/bkcl_helper.h"
 
 namespace paddle {
 namespace platform {
@@ -284,20 +285,25 @@ class BKCLCommImpl : public BKCLComm {
   BKCLContext_t comm() const override { return comm_; }
 
   XPUStream stream() const override {
-    return dev_ctx_->x_context()->xpu_stream;
+    return stream_;
   }
 
-  void set_dev_ctx(std::unique_ptr<XPUDeviceContext>&& dev_ctx) {
-    dev_ctx_ = std::move(dev_ctx);
+  void set_dev_ctx(XPUDeviceContext* dev_ctx) {
+    dev_ctx_ = dev_ctx;
   }
-  XPUDeviceContext* dev_context() const override { return dev_ctx_.get(); }
+
+  void set_stream(XPUStream stream) {
+    stream_ = stream;
+  }
+  XPUDeviceContext* dev_context() const override { return dev_ctx_; }
 
  private:
   int ring_id_;
   int nranks_;
   int rank_;
   BKCLContext_t comm_;
-  std::unique_ptr<XPUDeviceContext> dev_ctx_;
+  XPUDeviceContext* dev_ctx_;
+  XPUStream stream_;
 };
 
 BKCLComm* BKCLCommContext::CreateComm(
@@ -343,23 +349,87 @@ BKCLComm* BKCLCommContext::CreateComm(
   return comm_wrapper;
 }
 
+void BKCLCommContext::CreateBKCLCommMultiTrainer(
+    const std::vector<int>& dev_ids,
+    BKCLUniqueId* bkcl_id,
+    int ntrainers,
+    int train_id,
+    int ring_id) {
+  PADDLE_ENFORCE_GT(
+      dev_ids.size(),
+      0,
+      paddle::platform::errors::InvalidArgument(
+          "dev ids = [%d], it should greater than 0.", dev_ids.size()));
+  const int kDevices = dev_ids.size();
+  VLOG(1) << "Begin CreateBKCLCommMultiTrainer. device number: " << kDevices
+          << ", ntrainers: " << ntrainers << ", train_id: " << train_id
+          << ", rind_id: " << ring_id;
+
+  std::unique_ptr<BKCLContext_t[]> comms(new BKCLContext_t[kDevices]);
+  std::unique_ptr<InitBKCLPara[]> paras(new InitBKCLPara[kDevices]);
+  std::unique_ptr<pthread_t[]> pids(new pthread_t[kDevices]);
+  {
+    for (int i = 0; i < kDevices; i++) {
+      int rank = train_id * kDevices + i;
+      int nranks = kDevices * ntrainers;
+
+      paras[i].rank = rank;
+      paras[i].nranks = nranks;
+      paras[i].dev_id = dev_ids[i];
+      paras[i].bkcl_id = bkcl_id;
+      paras[i].ctx = &comms[i];
+      PADDLE_ENFORCE_EQ(pthread_create(&pids[i],
+                                         nullptr,
+                                         init_bkcl_context_func,
+                                         reinterpret_cast<void *>(&paras[i])),
+                          0,
+                          platform::errors::External("pthread_create failed"));
+    }
+    for (int i = 0; i < kDevices; i++) {
+      pthread_join(pids[i], nullptr);
+    }
+  }
+  PADDLE_ENFORCE_EQ(comm_map_.count(ring_id),
+                    0,
+                    platform::errors::InvalidArgument(
+                        "comm_map_ of ring_id: %s should be 0. %s is provided",
+                        ring_id,
+                        comm_map_.count(ring_id)));
+  for (int i = 0; i < kDevices; ++i) {
+    AssignBKCLComm(comms[i],
+                   kDevices * ntrainers,
+                   train_id * kDevices + i,
+                   dev_ids[i],
+                   ring_id);
+    VLOG(1) << "bkcl communicator of train_id " << train_id * kDevices + i
+            << " in ring " << ring_id << " has been created on device "
+            << dev_ids[i];
+  }
+
+  std::call_once(once_flag_, []() {
+    std::atexit([]() { BKCLCommContext::Instance().ReleaseBKCLComms(); });
+  });
+}
+
 BKCLComm* BKCLCommContext::AssignBKCLComm(
     BKCLContext_t comm, int nranks, int rank, int dev_id, int ring_id) {
-  std::unique_ptr<XPUDeviceContext> dev_ctx(
-      new XPUDeviceContext(XPUPlace(dev_id)));
+
+  auto dev_ctx =
+    static_cast<platform::XPUDeviceContext*>(platform::DeviceContextPool::Instance().Get(platform::XPUPlace(dev_id)));
+  dev_ctx->SetBkclContext(comm);
   // used in BKCL as comm_stream, for every dev_id there is
   // a comm_stream at each ring. this stream is passed as input var
   // when calling collective comm commands like bkcl_all_reduce
   XPUStream comm_stream;
   PADDLE_ENFORCE_XPU_SUCCESS(xpu_stream_create(&comm_stream));
-  dev_ctx->SetXPUStream(comm_stream);
 
   BKCLCommImpl* c = new BKCLCommImpl;
   c->set_ring_id(ring_id);
   c->set_nranks(nranks);
   c->set_rank(rank);
   c->set_comm(comm);
-  c->set_dev_ctx(std::move(dev_ctx));
+  c->set_dev_ctx(dev_ctx);
+  c->set_stream(comm_stream);
 
   comm_map_mutex_.lock();
   if (comm_map_.count(ring_id) == 0) {
@@ -369,13 +439,6 @@ BKCLComm* BKCLCommContext::AssignBKCLComm(
 
   dev2comm.emplace(dev_id, std::unique_ptr<BKCLComm>(c));
   comm_map_mutex_.unlock();
-
-  if (ring_id == 0) {
-    auto* dev_ctx = static_cast<platform::XPUDeviceContext*>(
-        platform::DeviceContextPool::Instance().Get(
-            platform::XPUPlace(dev_id)));
-    dev_ctx->SetBkclContext(comm);
-  }
 
   return comm_map_[ring_id][dev_id].get();
 }

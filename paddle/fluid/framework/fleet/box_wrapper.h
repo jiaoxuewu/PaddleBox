@@ -48,6 +48,20 @@ limitations under the License. */
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/string/string_helper.h"
 #include "paddle/phi/common/data_type.h"
+#include "paddle/fluid/framework/fleet/metrics.h"
+#include "paddle/fluid/framework/fleet/box_wrapper_kernel.h"
+
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+// The producer side.
+#include <scalopus_tracing/tracing.h>
+#include <scalopus_transport/transport_loopback.h>
+// The catapult recorder side.
+#include <scalopus_catapult/catapult_recorder.h>
+#include <scalopus_general/endpoint_manager_poll.h>
+#include <scalopus_general/general_provider.h>
+#include <scalopus_tracing/native_trace_provider.h>
+#endif
+
 #define BUF_SIZE 1024 * 1024
 
 DECLARE_bool(padbox_auc_runner_mode);
@@ -56,7 +70,9 @@ DECLARE_int32(padbox_dataset_shuffle_thread_num);
 
 namespace paddle {
 namespace framework {
-extern int make_day_id(const int& y, const int& m, const int& d);
+
+extern int make_day_id(const int &y, const int &m, const int &d);
+
 #ifdef PADDLE_WITH_BOX_PS
 #define MAX_GPU_NUM 16
 
@@ -257,6 +273,12 @@ class DCacheBuffer {
     return buf_->size();
   }
 
+  bool IsInitialized() {
+#ifdef PADDLE_WITH_CUDA
+    return d_buf_ != nullptr;
+#endif
+    return buf_ != nullptr;
+  }
  private:
   void* d_buf_ = nullptr;
   size_t total_bytes_ = 0;
@@ -283,6 +305,15 @@ class MetricMsg {
 
   int MetricPhase() const { return metric_phase_; }
   BasicAucCalculator* GetCalculator() { return calculator; }
+  inline phi::Place GetVarPlace(const paddle::framework::Scope *exe_scope, const std::string &varname) {
+    auto* var = exe_scope->FindVar(varname.c_str());
+    PADDLE_ENFORCE_NOT_NULL(
+        var, platform::errors::NotFound("Error: var %s is not found in scope.",
+                                        varname.c_str()));
+    auto& gpu_tensor = var->Get<LoDTensor>();
+    auto place = gpu_tensor.place();
+    return place;
+  }
   virtual void add_data(const Scope* exe_scope,
                         const paddle::platform::Place& place) {
     int label_len = 0;
@@ -296,6 +327,8 @@ class MetricMsg {
                       platform::errors::PreconditionNotMet(
                           "the predict data length should be consistent with "
                           "the label data length"));
+    auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+    auto label_var_place = GetVarPlace(exe_scope, label_varname_);
     std::vector<float> sample_scale_data;
     if (!sample_scale_varname_.empty()) {
       get_data<float>(exe_scope, sample_scale_varname_, &sample_scale_data);
@@ -307,9 +340,9 @@ class MetricMsg {
               label_len,
               sample_scale_data.size()));
       calculator->add_sample_data(
-          pred_data, label_data, sample_scale_data, label_len, place);
+          pred_data, label_data, sample_scale_data, label_len, pre_var_place, label_var_place);
     } else {
-      calculator->add_data(pred_data, label_data, label_len, place);
+      calculator->add_data(pred_data, label_data, label_len, pre_var_place, label_var_place);
     }
   }
   template <class T = float>
@@ -389,6 +422,11 @@ class BoxWrapper {
     DCacheBuffer pull_offset;
     DCacheBuffer push_offset;
 
+#ifdef PADDLE_WITH_XPU_KP
+    // for xpu
+    DCacheBuffer push_slot_slices;
+#endif
+
     LoDTensor qvalue;
 
     platform::Timer all_pull_timer;
@@ -442,6 +480,54 @@ class BoxWrapper {
   BoxWrapper() {
     fprintf(stdout, "init box wrapper\n");
     boxps::MPICluster::Ins();
+#ifdef PADDLE_WITH_XPU_KP
+    box_wrapper_kernel_ = std::make_unique<BoxWrapperKernel>();
+    use_xpu_sparse_map_ = false;
+    auto env_str = std::getenv("USE_XPU_SPARSE_MAP");
+    if (env_str != nullptr && (strcmp(env_str, "true") == 0 || strcmp(env_str, "1") == 0)) {
+      use_xpu_sparse_map_ = true;
+    }
+
+    check_xpu_nan_ = false;
+    env_str = std::getenv("CHECK_XPU_BOXPS_NAN");
+    if (env_str != nullptr && (strcmp(env_str, "true") == 0 || strcmp(env_str, "1") == 0)) {
+      check_xpu_nan_ = true;
+      VLOG(0) << "CHECK_XPU_BOXPS_NAN has been set to check paddle pull&push";
+    }
+
+#endif
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+    // Client side to produce the tracepoints.
+    factory = std::make_shared<scalopus::TransportLoopbackFactory>();
+    const auto server = factory->serve();
+    server->addEndpoint(std::make_shared<scalopus::EndpointTraceMapping>());
+    server->addEndpoint(std::make_shared<scalopus::EndpointIntrospect>());
+    server->addEndpoint(std::make_shared<scalopus::EndpointNativeTraceSender>());
+    auto endpoint_process_info = std::make_shared<scalopus::EndpointProcessInfo>();
+    endpoint_process_info->setProcessName("BoxWrapper");
+    server->addEndpoint(endpoint_process_info);
+
+    // Catapult recorder side.
+    manager = std::make_shared<scalopus::EndpointManagerPoll>(factory);
+    manager->addEndpointFactory<scalopus::EndpointTraceMapping>();
+    manager->addEndpointFactory<scalopus::EndpointProcessInfo>();
+    auto native_trace_provider = std::make_shared<scalopus::NativeTraceProvider>(manager);
+    manager->addEndpointFactory(scalopus::EndpointNativeTraceSender::name, native_trace_provider);
+
+    catapult_recorder = std::make_shared<scalopus::CatapultRecorder>();
+    catapult_recorder->addProvider(native_trace_provider);
+    catapult_recorder->addProvider(std::make_shared<scalopus::GeneralProvider>(manager));
+
+    auto logging_function = [](const std::string& msg) { std::cout << msg << std::endl; };
+    logging_function("Logging can be enabled in the source, uncomment the lines below this one.");
+
+    manager->connect(server->getAddress());  // Connect the manager to the server.
+    catapult_recorder->start();              // start the recorder thread.
+    catapult_recorder->startInterval();      // start recording.
+
+    TRACE_THREAD_NAME("BoxWrapper");
+    std::cout<<"start profile in BoxWrapper"<<std::endl;
+#endif
   }
   int GetMpiSize() { return boxps::MPICluster::Ins().size(); }
   int GetMpiRank() { return boxps::MPICluster::Ins().rank(); }
@@ -468,6 +554,15 @@ class BoxWrapper {
                       bool expand_only);
 
   void PullSparseCaseGPU(const paddle::platform::Place& place,
+                         const std::vector<const uint64_t*>& keys,
+                         const std::vector<float*>& values,
+                         const std::vector<int64_t>& slot_lengths,
+                         const int hidden_size,
+                         const int expand_embed_dim,
+                         const int skip_offset,
+                         bool expand_only);
+
+  void PullSparseCaseXPU(const paddle::platform::Place& place,
                          const std::vector<const uint64_t*>& keys,
                          const std::vector<float*>& values,
                          const std::vector<int64_t>& slot_lengths,
@@ -503,7 +598,18 @@ class BoxWrapper {
                           const int batch_size,
                           const int skip_offset,
                           bool expand_only);
+
   void PushSparseGradCaseGPU(const paddle::platform::Place& place,
+                             const std::vector<const uint64_t*>& keys,
+                             const std::vector<const float*>& grad_values,
+                             const std::vector<int64_t>& slot_lengths,
+                             const int hidden_size,
+                             const int expand_embed_dim,
+                             const int batch_size,
+                             const int skip_offset,
+                             bool expand_only);
+
+  void PushSparseGradCaseXPU(const paddle::platform::Place& place,
                              const std::vector<const uint64_t*>& keys,
                              const std::vector<const float*>& grad_values,
                              const std::vector<int64_t>& slot_lengths,
@@ -619,6 +725,13 @@ class BoxWrapper {
                    int total_len,
                    int* key2slot);
 
+#ifdef PADDLE_WITH_XPU_KP
+  void SetDataFuncForCacheManager(int batch_num,
+      std::function<void(int, std::vector<std::vector<std::pair<uint64_t*, int>>>*)> data_func);
+  int PrepareNextBatch(int dev_id);
+  std::vector<uint64_t> * GetFid2SginMap() { return fid2sign_map_; }
+#endif
+
   boxps::PSAgentBase* GetAgent();
   void RelaseAgent(boxps::PSAgentBase* agent);
   void InitializeGPUAndLoadModel(
@@ -683,7 +796,7 @@ class BoxWrapper {
     return s_instance_;
   }
 
-  bool SyncDense(cudaStream_t stream,
+  bool SyncDense(boxps::StreamType stream,
                  const int size,
                  const void* sendbuf,
                  void* recvbuf,
@@ -853,6 +966,7 @@ class BoxWrapper {
     for (auto& name : var_names) {
       auto it = std::find(skip_gc_vars_.begin(), skip_gc_vars_.end(), name);
       if (it != skip_gc_vars_.end()) {
+        // return;
         continue;
       }
       skip_gc_vars_.push_back(name);
@@ -862,7 +976,7 @@ class BoxWrapper {
   const std::vector<std::string>& GetSkipGCVars(void) { return skip_gc_vars_; }
 
  private:
-  static cudaStream_t stream_list_[MAX_GPU_NUM];
+  static boxps::StreamType stream_list_[MAX_GPU_NUM];
   static std::shared_ptr<BoxWrapper> s_instance_;
   std::shared_ptr<boxps::BoxPSBase> boxps_ptr_ = nullptr;
 
@@ -899,6 +1013,15 @@ class BoxWrapper {
   std::map<std::string, float> lr_map_;
   size_t input_table_dim_ = 0;
   int gpu_num_ = GetDeviceCount();
+#ifdef PADDLE_WITH_XPU_KP
+  bool check_xpu_nan_;
+  int is_xpu_continuous_memory_pull_ = -1;
+  int is_xpu_continuous_memory_push_ = -1;
+  std::vector<int> * push_slot_slices_ptr_ = nullptr;
+  bool use_xpu_sparse_map_;
+  std::vector<uint64_t> * fid2sign_map_ = nullptr;
+  std::unique_ptr<BoxWrapperKernel> box_wrapper_kernel_;
+#endif
 
  public:
   static std::shared_ptr<boxps::PaddleShuffler> data_shuffle_;
@@ -914,6 +1037,9 @@ class BoxWrapper {
     //                          "you should export
     //                          FLAGS_padbox_auc_runner_mode=true "
     //                          "in auc runner mode."));
+#ifdef PADDLE_WITH_XPU_KP
+    setenv("ENABLE_ALWAYS_SIGN2FID", "true", 1);
+#endif
     size_t object_bytes = sizeof(SlotRecordObject) +
                           sizeof(float) * FLAGS_padbox_slotrecord_extend_dim +
                           sizeof(AucRunnerInfo);
@@ -1012,6 +1138,13 @@ class BoxWrapper {
   std::set<std::string> slot_eval_set_;
   std::atomic<uint16_t> dataset_id_{0};
   std::atomic<uint16_t> round_id_{0};
+
+#if defined(TRACE_PROFILE) && (defined(PADDLE_WITH_XPU_KP) || defined(PADDLE_WITH_XPU))
+  scalopus::TransportLoopbackFactory::Ptr factory;
+  std::shared_ptr<scalopus::EndpointManagerPoll> manager;
+  scalopus::CatapultRecorder::Ptr catapult_recorder;
+#endif
+
   // skip gc vars
   std::vector<std::string> skip_gc_vars_;
   
@@ -1056,8 +1189,8 @@ class BoxHelper {
 
   void SetDate(int year, int month, int day) {
     day_id_ = make_day_id(year, month, day);
-    VLOG(0) << "BoxHelpler set year=" << year << ", month=" << month
-            << ", day=" << day << ", day id=" << day_id_;
+    VLOG(0) << "BoxHelpler set year=" << year << ", month="
+        << month << ", day=" << day << ", day id=" << day_id_;
   }
   void BeginPass() {
 #ifdef PADDLE_WITH_BOX_PS

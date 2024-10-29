@@ -25,7 +25,15 @@ class ElementwiseFloordivXPUKernel : public framework::OpKernel<T> {
 
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    XPUElementwise<T, XPUType>(ctx, xpu::broadcast_floordiv<XPUType>);
+    auto f = [](xpu::Context* ctx,
+              const XPUType* x,
+              const XPUType* y,
+              XPUType* z,
+              const std::vector<int>& xshape,
+              const std::vector<int>& yshape) {
+    return xpu::broadcast_floordiv<XPUType>(ctx, x, y, z, xshape, yshape);
+  };
+    XPUElementwise<T, XPUType>(ctx, f);
   }
 };
 

@@ -57,6 +57,10 @@ struct BKCLContext {
       : ctx_(new platform::XPUDeviceContext(XPUPlace(dev_id))),
         comm_{nullptr} {}
 
+  explicit BKCLContext(platform::Place place)
+      : ctx_(static_cast<platform::XPUDeviceContext*>(platform::DeviceContextPool::Instance().Get(place))),
+        comm_{nullptr} {}
+
   BKCLContext_t comm() const { return comm_; }
 
   int device_id() const { return ctx_->GetPlace().device; }
@@ -107,7 +111,7 @@ struct BKCLContextMap {
     for (auto &p : places_) {
       int dev_id = p.device;
       order_.emplace_back(dev_id);
-      contexts_.emplace(dev_id, BKCLContext(dev_id));
+      contexts_.emplace(dev_id, BKCLContext(p));
     }
     PADDLE_ENFORCE_EQ(
         order_.size(),

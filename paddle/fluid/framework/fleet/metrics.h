@@ -66,7 +66,7 @@ class BasicAucCalculator {
   void reset();
   // add single data in CPU with LOCK, deprecated
   void add_unlock_data(double pred, int label);
-  void add_unlock_data_with_sample(double pred, int label, float sample_scale);
+  void add_unlock_data(double pred, int label, float sample_scale);
   void add_unlock_data_with_float_label(double pred, double label);
   void add_unlock_data_with_continue_label(double pred, double label);
   void add_unlock_data_with_continue_value(const std::vector<double>& value);
@@ -83,42 +83,53 @@ class BasicAucCalculator {
   void add_data(const float* d_pred,
                 const int64_t* d_label,
                 int batch_size,
-                const paddle::platform::Place& place);
+                const paddle::platform::Place& place_pred,
+                const paddle::platform::Place& place_label);
   // add mask data
   void add_mask_data(const float* d_pred,
                      const int64_t* d_label,
                      const int64_t* d_mask,
                      int batch_size,
-                     const paddle::platform::Place& place);
+                     const paddle::platform::Place& place_pred,
+                     const paddle::platform::Place& place_label,
+                     const paddle::platform::Place& place_mask);
   // add float data
   void add_float_mask_data(const float* d_pred,
                            const float* d_label,
                            const int64_t* d_mask,
                            int batch_size,
-                           const paddle::platform::Place& place);
+                           const paddle::platform::Place& place_pred,
+                           const paddle::platform::Place& place_label,
+                           const paddle::platform::Place& place_mask);
   // add continue data
   void add_continue_mask_data(const float* d_pred,
                               const float* d_label,
                               const int64_t* d_mask,
                               int batch_size,
-                              const paddle::platform::Place& place);
+                              const paddle::platform::Place& place_pred,
+                              const paddle::platform::Place& place_label,
+                              const paddle::platform::Place& place_mask);
   // add sample data
   void add_sample_data(const float* d_pred,
                        const int64_t* d_label,
                        const std::vector<float>& d_sample_scale,
                        int batch_size,
-                       const paddle::platform::Place& place);
+                       const paddle::platform::Place& place_pred,
+                       const paddle::platform::Place& place_label);
   // add uid data
   void add_uid_data(const float* d_pred,
                     const int64_t* d_label,
                     const int64_t* d_uid,
                     int batch_size,
-                    const paddle::platform::Place& place);
+                    const paddle::platform::Place& place_pred,
+                    const paddle::platform::Place& place_label,
+                    const paddle::platform::Place& place_uid);
 
   void add_nan_inf_data(const float* d_pred,
                         const int64_t* d_label,
                         int batch_size,
-                        const paddle::platform::Place& place);
+                        const paddle::platform::Place& place_pred,
+                        const paddle::platform::Place& place_label);
 
   void compute();
   void computeContinueMsg();
@@ -126,6 +137,8 @@ class BasicAucCalculator {
   double bucket_error() const { return _bucket_error; }
   double auc() const { return _auc; }
   double mae() const { return _mae; }
+  double nan_rate() const { return _nan_rate; }
+  double inf_rate() const { return _inf_rate; }
   double nan_cnt() const { return _nan_cnt; }
   double inf_cnt() const { return _inf_cnt; }
   double nan_inf_rate() const { return _nan_inf_rate; }
@@ -233,6 +246,15 @@ class Metric {
 
     int MetricPhase() const { return metric_phase_; }
     BasicAucCalculator* GetCalculator() { return calculator; }
+    inline phi::Place GetVarPlace(const paddle::framework::Scope *exe_scope, const std::string &varname) {
+      auto* var = exe_scope->FindVar(varname.c_str());
+      PADDLE_ENFORCE_NOT_NULL(
+          var, platform::errors::NotFound("Error: var %s is not found in scope.",
+                                          varname.c_str()));
+      auto& gpu_tensor = var->Get<LoDTensor>();
+      auto place = gpu_tensor.place();
+      return place;
+    }
 
     // add_data
     virtual void add_data(const Scope* exe_scope,
@@ -248,7 +270,9 @@ class Metric {
                         platform::errors::PreconditionNotMet(
                             "the predict data length should be consistent with "
                             "the label data length"));
-      calculator->add_data(pred_data, label_data, label_len, place);
+      auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+      auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+      calculator->add_data(pred_data, label_data, label_len, pre_var_place, label_var_place);
     }
 
     // get_data
@@ -331,8 +355,11 @@ class Metric {
                         platform::errors::PreconditionNotMet(
                             "the predict data length should be consistent with "
                             "the label data length"));
+      auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+      auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+      auto uid_var_place = GetVarPlace(exe_scope, uid_varname_);
       auto cal = GetCalculator();
-      cal->add_uid_data(pred_data, label_data, uid_data, label_len, place);
+      cal->add_uid_data(pred_data, label_data, uid_data, label_len, pre_var_place, label_var_place, uid_var_place);
     }
 
    protected:
@@ -537,8 +564,11 @@ class Metric {
                         platform::errors::PreconditionNotMet(
                             "the predict data length should be consistent with "
                             "the label data length"));
+      auto pre_var_place = GetVarPlace(exe_scope, pred_varname_);
+      auto label_var_place = GetVarPlace(exe_scope, label_varname_);
+      auto mask_var_place = GetVarPlace(exe_scope, mask_varname_);
       auto cal = GetCalculator();
-      cal->add_mask_data(pred_data, label_data, mask_data, label_len, place);
+      cal->add_mask_data(pred_data, label_data, mask_data, label_len, pre_var_place, label_var_place, mask_var_place);
     }
 
    protected:

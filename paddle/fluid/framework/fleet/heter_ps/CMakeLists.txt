@@ -66,6 +66,18 @@ if(WITH_GPU)
   endif()
 endif()
 if(WITH_XPU_KP)
+  set(SCALOPUS_PATH "${PROJECT_BINARY_DIR}/third_party/xpu/src/extern_xpu")
+  include_directories("${SCALOPUS_PATH}/scalopus/include")
+  include_directories("${SCALOPUS_PATH}/scalopus/include_consumer")
+  include_directories("${SCALOPUS_PATH}/scalopus/thirdparty/nlohmann_json/single_include")
+  if(TRACE_PROFILE)
+    link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_catapult")
+    link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_general")
+    link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_interface/")
+    link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_transport/")
+    link_directories("${SCALOPUS_PATH}/scalopus/so/scalopus_tracing")
+    link_directories("${SCALOPUS_PATH}/scalopus/so/thirdparty/seasocks/src/main/c/")
+  endif()
   set(HETERPS_DEPS device_context)
   xpu_library(heter_comm_kernel SRCS heter_comm_kernel.h heter_comm_kernel.kps
                                      feature_value.h)
@@ -78,6 +90,14 @@ if(WITH_XPU_KP)
     heter_ps
     SRCS heter_ps.cc
     DEPS heter_comm)
+  if(TRACE_PROFILE)
+    target_link_libraries(heter_comm scalopus_catapult scalopus_tracing_native
+                        scalopus_tracing_nop scalopus_general_consumer
+                        scalopus_general scalopus_consumer scalopus_lttng_babeltrace
+                        scalopus_tracepoint_native scalopus_tracepoint_nop
+                        scalopus_scope_tracing scalopus_transport scalopus_interface
+                        seasocks scalopus_tracing_consumer)
+  endif()
 endif()
 if(WITH_ROCM)
   hip_library(
