@@ -212,6 +212,11 @@ struct SlotRecordObject {
   std::string ins_id_;
   SlotValues<uint64_t> slot_uint64_feasigns_;
   SlotValues<float> slot_float_feasigns_;
+  std::string user_id_;
+  uint64_t user_id_sign_;
+  uint64_t cur_timestamp_;
+  uint64_t show_timestamp_;
+
 
   ~SlotRecordObject() { clear(true); }
   void reset(void) { clear(FLAGS_enable_slotrecord_reset_shrink); }
@@ -484,12 +489,15 @@ struct UsedSlotGpuType {
 #endif
 
 struct SlotPvInstanceObject {
+  int zero_mask_num_ = 0;
   std::vector<SlotRecord> ads;
   ~SlotPvInstanceObject() {
     ads.clear();
     ads.shrink_to_fit();
   }
   void merge_instance(SlotRecord ins) { ads.push_back(ins); }
+  void set_zero_mask_num(int zero_mask_num) { zero_mask_num_ = zero_mask_num; }
+  int get_zero_mask_num(void) { return zero_mask_num_; }
 };
 using SlotPvInstance = SlotPvInstanceObject*;
 inline SlotPvInstance make_slotpv_instance() {
@@ -508,6 +516,9 @@ struct BatchCPUValue {
   std::vector<int> h_rank;
   std::vector<int> h_cmatch;
   std::vector<int> h_ad_offset;
+  std::vector<uint64_t> h_cur_timestamp;
+  std::vector<uint64_t> h_show_timestamp;
+  std::vector<uint64_t> h_train_mask;
 };
 
 struct BatchGPUValue {
@@ -522,6 +533,7 @@ struct BatchGPUValue {
   Tensor d_rank;
   Tensor d_cmatch;
   Tensor d_ad_offset;
+  Tensor d_timestamp;
 };
 
 class MiniBatchGpuPack {
@@ -529,6 +541,9 @@ class MiniBatchGpuPack {
   MiniBatchGpuPack(const paddle::platform::Place& place,
                    const std::vector<UsedSlotInfo>& infos);
   ~MiniBatchGpuPack();
+  void set_merge_by_uid(bool merge_by_uid);
+  void set_merge_by_uid_split_method(int split_method);
+  void set_need_time_info(bool need_time_info);
   void reset(const paddle::platform::Place& place);
   void pack_pvinstance(const SlotPvInstance* pv_ins, int num);
   void pack_instance(const SlotRecord* ins_vec, int num);
@@ -621,6 +636,9 @@ class MiniBatchGpuPack {
   int pv_num_ = 0;
 
   bool enable_pv_ = false;
+  bool enable_pv_by_uid_ = false;
+  bool need_time_info_ = false;
+  int merge_by_uid_split_method_ = 0; // 0 no split, 1 direct split, 2 mask split
   int used_float_num_ = 0;
   int used_uint64_num_ = 0;
   int used_slot_size_ = 0;
@@ -1154,6 +1172,8 @@ class DataFeed {
   virtual void SetParseLogKey(bool parse_logkey) {}
   virtual void SetEnablePvMerge(bool enable_pv_merge) {}
   virtual void SetCurrentPhase(int current_phase) {}
+  virtual void SetTestMode(bool is_test) {}
+  virtual void SetTestTimestampRange(std::pair<uint64_t, uint64_t> range) {}
   virtual void SetDeviceKeys(std::vector<uint64_t>* device_keys, int type) {
 #if defined(PADDLE_WITH_GPU_GRAPH) && defined(PADDLE_WITH_HETERPS)
     gpu_graph_data_generator_.SetDeviceKeys(device_keys, type);
@@ -1236,6 +1256,10 @@ class DataFeed {
   std::vector<LoDTensor*> feed_vec_;
 
   LoDTensor* rank_offset_;
+  LoDTensor* ads_offset_;
+  LoDTensor* ads_cur_timestamp_;
+  LoDTensor* ads_show_timestamp_;
+  LoDTensor* ads_train_mask_;
 
   // the batch size defined by user
   int default_batch_size_;
@@ -2129,6 +2153,16 @@ class ISlotParser {
       int& lines) {         // NOLINT
     return false;
   }
+  void SetTestMode(bool test_mode) {
+    is_test_ = test_mode;
+  }
+  void SetTestTimestampRange(std::pair<uint64_t, uint64_t> test_timestamp_range){
+    test_timestamp_range_ = test_timestamp_range;
+  }
+  
+protected:
+  bool is_test_ = false;
+  std::pair<uint64_t, uint64_t> test_timestamp_range_;
 };
 
 /**
@@ -2191,6 +2225,23 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   virtual void SetEnablePvMerge(bool enable_pv_merge) {
     enable_pv_merge_ = enable_pv_merge;
   }
+  virtual void SetMergeByUid(bool merge_by_uid) {
+    merge_by_uid_ = merge_by_uid;
+  }
+  virtual void SetSeqSplitMethod(int merge_by_uid_split_method) {
+    merge_by_uid_split_method_ = merge_by_uid_split_method;
+  }
+
+  virtual void SetNeedTimeInfo(bool need_time_info) {
+    need_time_info_ = need_time_info;
+  }
+
+  void SetTestMode(bool is_test) {
+    is_test_ = is_test;
+  }
+  void SetTestTimestampRange(std::pair<uint64_t, uint64_t> range) {
+    test_timestamp_range_ = range;
+  }
   virtual void SetCurrentPhase(int current_phase) {
     current_phase_ = current_phase;
   }
@@ -2252,6 +2303,9 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   void PutToFeedSlotVec(const SlotRecord* recs, int num);
   void BuildSlotBatchGPU(const int ins_num);
   void GetRankOffsetGPU(const int pv_num, const int ins_num);
+  void GetTimestampGPU(const int pv_num, const int ins_num);
+  void GetAdsOffsetGPU(const int pv_num, const int ins_num);
+  void GetTrainMaskGPU(const int pv_num, const int ins_num);
   void GetRankOffset(const SlotPvInstance* pv_vec, int pv_num, int ins_number);
   bool ParseOneInstance(const std::string& line, SlotRecord* rec);
 
@@ -2297,6 +2351,11 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   bool parse_content_ = false;
   bool parse_logkey_ = false;
   bool enable_pv_merge_ = false;
+  bool merge_by_uid_ = false;
+  int merge_by_uid_split_method_ = 0;
+  bool need_time_info_ = false;
+  bool is_test_ = false;
+  std::pair<uint64_t, uint64_t> test_timestamp_range_;
   int current_phase_{-1};  // only for untest
   std::shared_ptr<FILE> fp_ = nullptr;
   ChannelObject<SlotRecord>* input_channel_ = nullptr;
@@ -2308,6 +2367,10 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   size_t float_total_dims_size_ = 0;
 
   std::string rank_offset_name_;
+  std::string ads_offset_name_;
+  std::string ads_cur_timestamp_name_;
+  std::string ads_show_timestamp_name_;
+  std::string ads_train_mask_name_;
   int pv_batch_size_ = 0;
   int use_slot_size_ = 0;
   int float_use_slot_size_ = 0;
@@ -2431,7 +2494,11 @@ paddle::framework::Archive<AR>& operator<<(paddle::framework::Archive<AR>& ar,
   ar << r->search_id;
   ar << r->rank;
   ar << r->cmatch;
-
+  ar << r->user_id_;
+  ar << r->user_id_sign_;
+  ar << r->cur_timestamp_;
+  ar << r->show_timestamp_;
+  
   return ar;
 }
 template <class AR>
@@ -2443,6 +2510,10 @@ paddle::framework::Archive<AR>& operator>>(paddle::framework::Archive<AR>& ar,
   ar >> r->search_id;
   ar >> r->rank;
   ar >> r->cmatch;
+  ar >> r->user_id_;
+  ar >> r->user_id_sign_;
+  ar >> r->cur_timestamp_;
+  ar >> r->show_timestamp_;
 
   return ar;
 }

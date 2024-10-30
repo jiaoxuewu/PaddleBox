@@ -167,6 +167,23 @@ void CropTensorGradInferMeta(const MetaTensor& out_grad,
   }
 }
 
+void FlashAttnGradInferMeta(const MetaTensor& q,
+                            const MetaTensor& k,
+                            const MetaTensor& v,
+                            MetaTensor* dq,
+                            MetaTensor* dk,
+                            MetaTensor* dv) {
+  if (dq) {
+    dq->share_meta(q);
+  }
+  if (dk && k) {
+    dk->share_meta(k);
+  }
+  if (dv && v) {
+    dv->share_meta(v);
+  }
+}
+
 void CrossEntropyWithSoftmaxGradInferMeta(const MetaTensor& label,
                                           const MetaTensor& softmax,
                                           const MetaTensor& loss_grad,

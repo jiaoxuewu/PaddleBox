@@ -183,7 +183,7 @@ void DeleteUnusedTensors(const Scope &scope,
 
   for (auto &var_name : delete_vars) {
     auto *var = scope.FindVar(var_name);
-    if (var == nullptr) {
+    if (var == nullptr || !(var->IsInitialized())) {
       continue;
     }
 

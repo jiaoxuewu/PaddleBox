@@ -1121,6 +1121,11 @@ class BoxWrapper {
     }
   }
   const std::set<std::string>& GetEvalSlotSet() { return slot_eval_set_; }
+  
+  bool RecordBatchInsInfo() { return batch_max_ins_ > 0; }
+  void SetBatchMaxInsNumber(int max_ins);
+  void AddBatchInsInfo(size_t batch_ins_number, size_t train_ins_number);
+  void ShowBatchInsInfo();
 
  private:
   int mode_ = 0;  // 0 means train/test 1 means auc_runner
@@ -1142,6 +1147,10 @@ class BoxWrapper {
 
   // skip gc vars
   std::vector<std::string> skip_gc_vars_;
+  
+  int batch_max_ins_ = 0;
+  std::vector<uint64_t> batch_all_ins_;
+  std::vector<uint64_t> batch_train_ins_;
 };
 /**
  * @brief file mgr

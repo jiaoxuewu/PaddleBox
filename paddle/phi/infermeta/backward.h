@@ -126,6 +126,13 @@ void EigGradInferMeta(const MetaTensor& out_w,
                       const MetaTensor& dout_v,
                       MetaTensor* dx);
 
+void FlashAttnGradInferMeta(const MetaTensor& q,
+                            const MetaTensor& k,
+                            const MetaTensor& v,
+                            MetaTensor* dq,
+                            MetaTensor* dk,
+                            MetaTensor* dv);
+
 void GatherNdGradInferMeta(const MetaTensor& x,
                            const MetaTensor& index,
                            const MetaTensor& out_grad,

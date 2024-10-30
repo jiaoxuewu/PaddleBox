@@ -77,6 +77,18 @@
   outputs :
     out : Out
 
+- api : flash_attn
+  inputs :
+    {q : Q, k : K, v : V, fixed_seed_offset : FixedSeedOffset, attn_mask : AttnMask}
+  outputs :
+    {out : Out, softmax : Softmax, softmax_lse : SoftmaxLse, seed_offset : SeedOffset}
+
+- api : flash_attn_unpadded
+  inputs :
+    {q : Q, k : K, v : V, cu_seqlens_q : CuSeqlensQ, cu_seqlens_k : CuSeqlensK, fixed_seed_offset : FixedSeedOffset, attn_mask : AttnMask}
+  outputs :
+    {out : Out, softmax : Softmax, softmax_lse : SoftmaxLse, seed_offset : SeedOffset}
+
 - api : lgamma
   inputs :
     x : X

@@ -130,6 +130,30 @@ class DatasetBase(object):
         """
         self.proto_desc.rank_offset = rank_offset
 
+    def set_ads_offset(self, ads_offset):
+        """
+        set ads_offset
+        """
+        self.proto_desc.ads_offset = ads_offset
+
+    def set_ads_cur_timestamp(self, ads_cur_timestamp):
+        """
+        set ads_cur_timestamp
+        """
+        self.proto_desc.ads_cur_timestamp = ads_cur_timestamp
+
+    def set_ads_show_timestamp(self, ads_show_timestamp):
+        """
+        set ads_show_timestamp
+        """
+        self.proto_desc.ads_show_timestamp = ads_show_timestamp
+
+    def set_ads_train_mask(self, ads_train_mask):
+        """
+        set ads_offset
+        """
+        self.proto_desc.ads_train_mask = ads_train_mask
+
     def set_fea_eval(self, record_candidate_size, fea_eval=True):
         """
         set fea eval mode for slots shuffle to debug the importance level of
@@ -400,6 +424,9 @@ class InMemoryDataset(DatasetBase):
         self.parse_content = False
         self.parse_logkey = False
         self.merge_by_sid = True
+        self.merge_by_uid = False
+        self.merge_by_uid_split_size = 0
+        self.merge_by_uid_split_train_size = 0
         self.enable_pv_merge = False
         self.merge_by_lineid = False
         self.fleet_send_sleep_seconds = None
@@ -432,6 +459,15 @@ class InMemoryDataset(DatasetBase):
         self.dataset.set_parse_content(self.parse_content)
         self.dataset.set_parse_logkey(self.parse_logkey)
         self.dataset.set_merge_by_sid(self.merge_by_sid)
+        self.dataset.set_merge_by_uid(
+            self.merge_by_uid, self.merge_by_uid_split_method,
+            self.merge_by_uid_split_size, self.merge_by_uid_split_train_size)
+        self.dataset.set_invalid_users(self.invalid_users)
+        self.dataset.set_need_time_info(self.need_time_info)
+        self.dataset.set_shuffle_and_sort(self.shuffle_and_sort)
+        self.dataset.set_train_timestamp_range(self.train_timestamp_range)
+        self.dataset.set_test_mode(self.test_mode)
+        self.dataset.set_test_timestamp_range(self.test_timestamp_range)
         self.dataset.set_enable_pv_merge(self.enable_pv_merge)
         self.dataset.set_data_feed_desc(self.desc())
         self.dataset.create_channel()
@@ -574,6 +610,70 @@ class InMemoryDataset(DatasetBase):
 
         """
         self.merge_by_sid = merge_by_sid
+
+    def set_merge_by_uid(self, merge_by_uid, merge_by_uid_split_method,
+                         merge_by_uid_split_size,
+                         merge_by_uid_split_train_size):
+        """
+        Set if Dataset need to merge uid. If not, one ins means one Pv.
+
+        Args:
+            merge_by_uid(bool): if merge uid or not
+            merge_by_uid_split_method(int): if merge_by_uid is True, it means the split method of uid.
+                0 no split, 1 direct split, 2 mask split
+            merge_by_uid_split_size(int): if merge_by_uid is True, it means the split size of uid.
+            merge_by_uid_split_train_size(int): if merge_by_uid is True, it means the split size of uid in train. only used in mask split.
+
+        Examples:
+            .. code-block:: python
+
+              import paddle.fluid as fluid
+              dataset = fluid.DatasetFactory().create_dataset("InMemoryDataset")
+              dataset.set_merge_by_uid(True, 1, 1024, 512)
+
+        """
+        self.merge_by_uid = merge_by_uid
+        self.merge_by_uid_split_method = merge_by_uid_split_method
+        self.merge_by_uid_split_size = merge_by_uid_split_size
+        self.merge_by_uid_split_train_size = merge_by_uid_split_train_size
+        if merge_by_uid_split_train_size == 0:  # deafult 1/2 of the seq
+            self.merge_by_uid_split_train_size = int(merge_by_uid_split_size / 2)
+
+    def set_invalid_users(self, invalid_users):
+        """
+        Set invalid users
+        """
+        self.invalid_users = invalid_users
+    
+    def set_need_time_info(self, need_time_info):
+        """
+        Set need_time_info
+        """
+        self.need_time_info = need_time_info
+
+    def set_shuffle_and_sort(self, shuffle_and_sort):
+        """
+        Set shuffle_and_sort
+        """
+        self.shuffle_and_sort = shuffle_and_sort
+
+    def set_train_timestamp_range(self, train_timestamp_range):
+        """
+        Set train timestamp range
+        """
+        self.train_timestamp_range = train_timestamp_range
+
+    def set_test_mode(self, test_mode):
+        """
+        set test_mode
+        """
+        self.test_mode = test_mode
+
+    def set_test_timestamp_range(self, test_timestamp_range):
+        """
+        set test_timestamp_range
+        """
+        self.test_timestamp_range = test_timestamp_range
 
     def set_enable_pv_merge(self, enable_pv_merge):
         """
@@ -1386,6 +1486,13 @@ class PadBoxSlotDataset(BoxPSDataset):
         self.parse_content = False
         self.parse_logkey = False
         self.merge_by_sid = True
+        self.merge_by_uid = False
+        self.test_mode = False
+        self.invalid_users = {""}
+        self.need_time_info = False
+        self.shuffle_and_sort = False
+        self.train_timestamp_range = (0, 0)
+        self.test_timestamp_range = (0, 0)
         self.enable_pv_merge = False
         self.merge_by_lineid = False
         self.fleet_send_sleep_seconds = None

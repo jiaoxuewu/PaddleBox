@@ -130,6 +130,8 @@ from .extension import temporal_shift  # noqa: F401
 
 from .sparse_attention import sparse_attention
 
+from .flash_attention import flash_attention, flash_attn_unpadded, scaled_dot_product_attention
+
 __all__ = [  # noqa
     'celu',
     'conv1d',
@@ -242,4 +244,7 @@ __all__ = [  # noqa
     'triplet_margin_with_distance_loss',
     'triplet_margin_loss',
     'soft_margin_loss',
+    'flash_attention',
+    'flash_attn_unpadded',
+    'scaled_dot_product_attention',
 ]

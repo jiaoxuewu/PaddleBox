@@ -32,6 +32,12 @@ limitations under the License. */
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/string/string_helper.h"
 
+#if defined(PADDLE_WITH_CUDA)
+#include "paddle/fluid/framework/fleet/heter_ps/gpu_graph_utils.h"
+#include "paddle/fluid/platform/cuda_device_guard.h"
+#include "paddle/fluid/platform/device/gpu/gpu_info.h"
+#endif
+
 #if defined(PADDLE_WITH_GLOO)
 #include <gloo/allreduce.h>
 
@@ -63,6 +69,15 @@ class BasicAucCalculator {
   void add_unlock_data(double pred, int label, float sample_scale);
   void add_unlock_data_with_float_label(double pred, double label);
   void add_unlock_data_with_continue_label(double pred, double label);
+  void add_unlock_data_with_continue_value(const std::vector<double>& value);
+  void computeThreadValue(const float* label,
+                          const float* predict,
+                          int batch_size,
+                          const std::vector<const int64_t*>& h_mask,
+                          int* mask_value,
+                          int mask_size,
+                          std::vector<double>& value,
+                          const paddle::platform::Place& place);
   void add_nan_inf_unlock_data(float pred, int label);
   // add batch data
   void add_data(const float* d_pred,

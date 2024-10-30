@@ -61,7 +61,7 @@ void BasicAucCalculator::add_unlock_data(double pred, int label, float sample_sc
   PADDLE_ENFORCE_EQ(label * label, label,
       platform::errors::PreconditionNotMet(
           "label must be equal to 0 or 1, but its value is: %d", label));
-          
+
   int pos = std::min(static_cast<int>(pred * _table_size), _table_size - 1);
   _local_abserr += fabs(pred - label);
   _local_sqrerr += (pred - label) * (pred - label);
@@ -102,6 +102,15 @@ void BasicAucCalculator::add_unlock_data_with_continue_label(double pred,
   _local_pred += pred;
   _local_label += label;
   _local_total_num += 1.0;
+}
+
+void BasicAucCalculator::add_unlock_data_with_continue_value(
+    const std::vector<double>& value) {
+  _local_abserr += value[0];
+  _local_sqrerr += value[1];
+  _local_pred += value[2];
+  _local_label += value[3];
+  _local_total_num += value[4];
 }
 
 void BasicAucCalculator::add_nan_inf_unlock_data(float pred, int label){
@@ -371,7 +380,7 @@ void BasicAucCalculator::compute() {
 
   // add debug info print
   if (FLAGS_enable_debug_print_metrics_info) {
-    LOG(WARNING) << "total ins num: " << total_ins_num 
+    LOG(WARNING) << "total ins num: " << total_ins_num
                  << ", local ins num: " << _local_total_num 
                  << ", fp: " << fp
                  << ", tp: " << tp
@@ -384,7 +393,7 @@ void BasicAucCalculator::compute() {
   PADDLE_ENFORCE_LT(abs(total_ins_num - _size),
                     0.5,
                     platform::errors::InvalidArgument(
-                      "The table ins num not equal real total num."));
+                        "The table ins num not equal real total num."));
   calculate_bucket_error(table[0], table[1]);
 }
 
@@ -469,6 +478,7 @@ void BasicAucCalculator::add_uid_data(const float* d_pred,
           static_cast<uint64_t>(add_uid[i]));
   }
 }
+
 
 void BasicAucCalculator::add_nan_inf_data(const float* d_pred,
                                           const int64_t* d_label,
@@ -607,7 +617,7 @@ BasicAucCalculator::WuaucRocData BasicAucCalculator::computeSingelUserAuc(
   return {tp, fp, auc};
 }
 
-void BasicAucCalculator::reset_nan_inf(){
+void BasicAucCalculator::reset_nan_inf() {
   _nan_cnt = 0;
   _inf_cnt = 0;
   _nan_rate = 0;
@@ -654,18 +664,19 @@ void BasicAucCalculator::computeContinueMsg() {
                            _local_label,
                            _local_total_num};
 #endif
-    _mae = local_err[0] / _local_total_num;
-    _rmse = sqrt(local_err[1] / _local_total_num);
-    _predicted_value = local_err[2] / _local_total_num;
-    _actual_value = local_err[3] / _local_total_num;
+    _size = local_err[4];
+    _mae = local_err[0] / _size;
+    _rmse = sqrt(local_err[1] / _size);
+    _predicted_value = local_err[2] / _size;
+    _actual_value = local_err[3] / _size;
   } else {
+    _size = _local_total_num;
     _mae = _local_abserr / _local_total_num;
     _rmse = sqrt(_local_sqrerr / _local_total_num);
     _predicted_value = _local_pred / _local_total_num;
     _actual_value = _local_label / _local_total_num;
   }
 
-  _size = _local_total_num;
 }
 
 void BasicAucCalculator::computeNanInfMsg() {

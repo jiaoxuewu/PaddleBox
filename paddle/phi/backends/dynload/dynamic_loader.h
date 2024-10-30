@@ -35,6 +35,7 @@ void* GetCusparseDsoHandle();
 void* GetNVRTCDsoHandle();
 void* GetCUDADsoHandle();
 void* GetWarpCTCDsoHandle();
+void* GetFlashAttnDsoHandle();
 void* GetNCCLDsoHandle();
 void* GetHCCLDsoHandle();
 void* GetTensorRtDsoHandle();

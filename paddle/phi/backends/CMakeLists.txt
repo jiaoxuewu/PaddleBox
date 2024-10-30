@@ -19,6 +19,10 @@ if(WITH_XPU)
   list(APPEND BACKENDS_SRCS xpu/xpu_context.cc xpu/xpu_info.cc)
 endif()
 
+if(WITH_FLASHATTN)
+  list(APPEND BACKENDS_DEPS phi_dynload_flashattn flashattn)
+endif()
+
 if(WITH_MKLDNN)
   list(APPEND BACKENDS_SRCS onednn/onednn_context.cc)
   list(APPEND BACKENDS_DEPS mkldnn)

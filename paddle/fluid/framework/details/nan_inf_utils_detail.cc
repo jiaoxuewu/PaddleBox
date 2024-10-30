@@ -360,6 +360,10 @@ void CheckVarHasNanOrInf(const std::string& op_type,
       var,
       platform::errors::NotFound(
           "Cannot find var: `%s` in op `%s`.", var_name, op_type));
+  if (!(var->IsInitialized())) {
+    VLOG(10) << var_name << " not Initialized, ignore check nan or inf";
+    return;
+  }
 
   const Tensor* tensor{nullptr};
   if (var->IsType<framework::LoDTensor>()) {
@@ -659,7 +663,7 @@ void CheckOpHasNanOrInf(const framework::OperatorBase& op,
     // NOTE. vname may destruct in the end of this func.
     for (auto& vname : op.OutputVars(true)) {
       auto* var = exec_scope.FindVar(vname);
-      if (var == nullptr) continue;
+      if (var == nullptr || !(var->IsInitialized())) continue;
       CheckVarHasNanOrInf(op.Type(), exec_scope, vname, place);
     }
   } else {
@@ -673,7 +677,7 @@ void CheckOpHasNanOrInf(const framework::OperatorBase& op,
       }
       if (!need_check) continue;
       auto* var = exec_scope.FindVar(vname);
-      if (var == nullptr) continue;
+      if (var == nullptr || !(var->IsInitialized())) continue;
       CheckVarHasNanOrInf(op.Type(), exec_scope, vname, place);
     }
   }
@@ -845,9 +849,12 @@ bool CheckOpHasNanOrInfRet(const framework::OperatorBase& op,
     // NOTE. vname may destruct in the end of this func.
     for (auto& vname : op.OutputVars(true)) {
       auto* var = exec_scope.FindVar(vname);
-      if (var == nullptr) continue;
+      if (var == nullptr || !(var->IsInitialized())) continue;
       VLOG(1) << "Check its output:" << vname;
       CheckVarHasNanOrInfRet(op.Type(), var, vname, place);
+    //   if (CheckBatchNanOrInfRet(place)) {
+    //     VLOG(0) << "dj-debug:check input nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
+    //   }
     }
   } else {
     VLOG(1) << "Check op:" << op.Type();
@@ -861,9 +868,12 @@ bool CheckOpHasNanOrInfRet(const framework::OperatorBase& op,
       }
       if (!need_check) continue;
       auto* var = exec_scope.FindVar(vname);
-      if (var == nullptr) continue;
+      if (var == nullptr || !(var->IsInitialized())) continue;
       VLOG(1) << "Check its output:" << vname;
       CheckVarHasNanOrInfRet(op.Type(), var, vname, place);
+    //   if (CheckBatchNanOrInfRet(place)) {
+    //     VLOG(0) << "dj-debug:check output nan found:" << op.Type() << "," << vname << ":" << var->IsInitialized();
+    //   }
     }
   }
   if (g_check_nan_inf_ret) {

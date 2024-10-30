@@ -72,6 +72,7 @@ __all__ = [
     'fused_concat',
     'rank_attention2',
     'fused_seq_tensor',
+    'fused_causal_mask',
 ]
 
 
@@ -1765,7 +1766,8 @@ def fused_seqpool_cvm(input,
                       embedx_concate_size=1,
                       embedx_concate_filter=False,
                       fill_zero=True,
-                      fix_ctr_to_click=False):
+                      fix_ctr_to_click=False,
+                      grad_mask=None):
     """
      **Notes: The Op only receives List of LoDTensor as input, only support SUM pooling now.
     :attr:`input`.
@@ -1803,11 +1805,13 @@ def fused_seqpool_cvm(input,
     if quant_ratio == 0 and need_filter:
         ## quant not allow quant ratio zero set default 128
         quant_ratio = 128
-
+    if grad_mask is None:
+        grad_mask = paddle.empty(shape=[0], dtype='int64')
     helper.append_op(
         type="fused_seqpool_cvm",
         inputs={"X": inputs,
-                "CVM": cvm},
+                "CVM": cvm,
+                "GradMask": grad_mask},
         outputs={"Out": outs},
         attrs={
             "pooltype": pool_type.upper(),
@@ -2896,3 +2900,34 @@ def fused_seq_tensor(input,
             })
 
     return din_out, mask_out, side_info_out, ad_slot_session_out
+
+def fused_causal_mask(seq_info):
+    """
+    **fused causal mask**
+    Notice: It currently only supports GPU device.
+
+    Args:
+        seq_info (paddle.Tensor): Tensor with exclusive end indices of each sequence. Shape: [num_sequences + 1].
+
+    Returns:
+        causual_mask (paddle.Tensor): A lower triangular int mask where each sequence attends to itself and preceding elements.
+
+    Example:
+        >>> seq_info = paddle.to_tensor([0, 3, 5])
+        >>> print(get_sequence_causal_mask_paddle(seq_info))
+        array([[ True, False, False, False, False],
+               [ True,  True, False, False, False],
+               [ True,  True,  True, False, False],
+               [False, False, False,  True, False],
+               [False, False, False,  True,  True]])
+    """
+    helper = LayerHelper("fused_causal_mask", **locals())
+    causal_mask = helper.create_variable_for_type_inference(dtype="int64")
+    check_type(seq_info, "seq_info", Variable, 'fused_causal_mask')
+    helper.append_op(
+        type='fused_causal_mask',
+        inputs={'SeqInfoInput': seq_info},
+        outputs={'CausalMaskOutput': causal_mask})
+    return causal_mask
+
+    

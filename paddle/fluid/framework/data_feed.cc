@@ -3090,6 +3090,10 @@ void SlotPaddleBoxDataFeed::Init(const DataFeedDesc& data_feed_desc) {
   input_type_ = data_feed_desc.input_type();
 
   rank_offset_name_ = data_feed_desc.rank_offset();
+  ads_offset_name_ = data_feed_desc.ads_offset();
+  ads_cur_timestamp_name_ = data_feed_desc.ads_cur_timestamp();
+  ads_show_timestamp_name_ = data_feed_desc.ads_show_timestamp();
+  ads_train_mask_name_ = data_feed_desc.ads_train_mask();
   pv_batch_size_ = data_feed_desc.pv_batch_size();
 
   // fprintf(stdout, "rank_offset_name: [%s]\n", rank_offset_name_.c_str());
@@ -3178,6 +3182,7 @@ int SlotPaddleBoxDataFeed::Next() {
   if (offset_index_ >= static_cast<int>(batch_offsets_.size())) {
     return 0;
   }
+  pack_->set_need_time_info(need_time_info_);
 #ifdef PADDLE_WITH_XPU_KP
   auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
   std::future<int> prepare_next_batch_rt = std::async(std::launch::async, [this]() {
@@ -3214,6 +3219,7 @@ int SlotPaddleBoxDataFeed::Next() {
     return this->batch_size_;
   } else {
     this->batch_size_ = batch.second;
+    VLOG(1) << "thread id " << thread_id_ << ", batch size: " << this->batch_size_;
     batch_timer_.Resume();
     PutToFeedSlotVec(&records_[batch.first], this->batch_size_);
 
@@ -3265,17 +3271,38 @@ void SlotPaddleBoxDataFeed::AssignFeedVar(const Scope& scope) {
         scope.FindVar(used_slots_info_[i].slot)->GetMutable<LoDTensor>();
   }
   // set rank offset memory
-  if (enable_pv_merge_) {
+  if (enable_pv_merge_ && merge_by_uid_){
+    ads_offset_ = scope.FindVar(ads_offset_name_)->GetMutable<LoDTensor>();
+    if (merge_by_uid_split_method_ == 2){
+      ads_train_mask_ = scope.FindVar(ads_train_mask_name_)->GetMutable<LoDTensor>(); // for windows split
+    }
+  } else if (enable_pv_merge_) {
     rank_offset_ = scope.FindVar(rank_offset_name_)->GetMutable<LoDTensor>();
+  }
+
+  if (need_time_info_){
+    ads_cur_timestamp_ = scope.FindVar(ads_cur_timestamp_name_)->GetMutable<LoDTensor>();
+    ads_show_timestamp_ = scope.FindVar(ads_show_timestamp_name_)->GetMutable<LoDTensor>();
   }
 }
 void SlotPaddleBoxDataFeed::PutToFeedPvVec(const SlotPvInstance* pvs, int num) {
 #if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
   paddle::platform::SetDeviceId(place_.GetDeviceId());
+  pack_->set_merge_by_uid(merge_by_uid_);
+  pack_->set_merge_by_uid_split_method(merge_by_uid_split_method_);
   pack_->pack_pvinstance(pvs, num);
   int ins_num = pack_->ins_num();
   int pv_num = pack_->pv_num();
-  GetRankOffsetGPU(pv_num, ins_num);
+  VLOG(1) << "thread id " << thread_id_ << ", pv_nums:" << pv_num << ", ins_num:" << ins_num << ", merge_by_uid_split_method_" << merge_by_uid_split_method_;
+  if (merge_by_uid_){
+    GetAdsOffsetGPU(pv_num, ins_num);
+    GetTimestampGPU(pv_num, ins_num);
+    if (merge_by_uid_split_method_ == 2) {  // windows split, get mask train
+      GetTrainMaskGPU(pv_num, ins_num);
+    }
+  } else {
+    GetRankOffsetGPU(pv_num, ins_num);
+  }
   BuildSlotBatchGPU(ins_num);
 #elif defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
   paddle::platform::SetXPUDeviceId(place_.GetDeviceId());
@@ -3523,6 +3550,9 @@ void SlotPaddleBoxDataFeed::PutToFeedSlotVec(const SlotRecord* ins_vec,
 #if defined(PADDLE_WITH_CUDA) && defined(_LINUX)
   paddle::platform::SetDeviceId(place_.GetDeviceId());
   pack_->pack_instance(ins_vec, num);
+  if (need_time_info_) {
+    GetTimestampGPU(0, pack_->ins_num());
+  }
   BuildSlotBatchGPU(pack_->ins_num());
 
 #elif defined(PADDLE_WITH_XPU_KP) && !defined(CPU_DATA_FEED)
@@ -3834,6 +3864,59 @@ void SlotPaddleBoxDataFeed::GetRankOffsetGPU(const int pv_num,
 #endif
 }
 
+// todo: copy
+void SlotPaddleBoxDataFeed::GetTimestampGPU(const int pv_num, const int ins_num) {
+    auto stream = dynamic_cast<phi::GPUContext*>(
+          platform::DeviceContextPool::Instance().Get(this->place_))
+          ->stream();
+    auto& buf = pack_->cpu_value();
+    int64_t* tensor_ptr_cur = ads_cur_timestamp_->mutable_data<int64_t>(phi::make_ddim({ins_num, 1}), this->place_);
+    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr_cur, reinterpret_cast<int64_t*>(buf.h_cur_timestamp.data()), buf.h_cur_timestamp.size() * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    VLOG(1) << "this thread id is " << thread_id_ << ", this place is " << this->place_ << ", ads_cur_timestamp_ is " << *ads_cur_timestamp_;
+
+    int64_t* tensor_ptr_show = ads_show_timestamp_->mutable_data<int64_t>(phi::make_ddim({ins_num, 1}), this->place_);
+    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr_show, reinterpret_cast<int64_t*>(buf.h_show_timestamp.data()), buf.h_show_timestamp.size() * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    VLOG(1) << "this thread id is " << thread_id_ << ", this place is " << this->place_ << ", ads_show_timestamp_ is " << *ads_show_timestamp_;
+}
+
+void SlotPaddleBoxDataFeed::GetAdsOffsetGPU(const int pv_num, const int ins_num) {
+    auto stream = dynamic_cast<phi::GPUContext*>(
+          platform::DeviceContextPool::Instance().Get(this->place_))
+          ->stream();
+    auto& buf = pack_->cpu_value();
+    int* tensor_ptr = ads_offset_->mutable_data<int>(phi::make_ddim({pv_num + 1, 1}), this->place_);
+    CUDA_CHECK(cudaMemcpyAsync(tensor_ptr, buf.h_ad_offset.data(), buf.h_ad_offset.size() * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    VLOG(1) << "this thread id is " << thread_id_ << ", this place is" << this->place_ << ", ads_offset_ is " << *ads_offset_;
+}
+
+void SlotPaddleBoxDataFeed::GetTrainMaskGPU(const int pv_num,
+                                            const int ins_num) {
+  auto& buf = pack_->cpu_value();
+  PADDLE_ENFORCE_EQ(
+          buf.h_train_mask.size(),
+          ins_num,
+          platform::errors::InvalidArgument(
+              "the size of train_mask must be equal to ins_num"));
+
+  auto stream = dynamic_cast<phi::GPUContext*>(
+                    platform::DeviceContextPool::Instance().Get(this->place_))
+                    ->stream();
+  int64_t* tensor_ptr = ads_train_mask_->mutable_data<int64_t>(
+      phi::make_ddim({ins_num, 1}), this->place_);
+  CUDA_CHECK(cudaMemcpyAsync(tensor_ptr,
+                             reinterpret_cast<int64_t*>(buf.h_train_mask.data()),
+                             buf.h_train_mask.size() * sizeof(int64_t),
+                             cudaMemcpyHostToDevice,
+                             stream));
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+  VLOG(1) << "this thread id is " << thread_id_ << ", this place is "
+          << this->place_ << ", ads_train_mask_ is " << *ads_train_mask_;
+}
+
+
 void SlotPaddleBoxDataFeed::CalRankOffsetCPU(const SlotPvInstance* pv_vec,
                                              int pv_num, int ins_number, std::vector<int> & rank_offset_mat, 
                                              int max_rank, int row, int col) {
@@ -3971,7 +4054,8 @@ void SlotPaddleBoxDataFeed::LoadIntoMemoryByLine(void) {
   paddle::framework::ISlotParser* parser =
       global_parser_pool().Get(parser_so_path_, all_slots_info_);
   CHECK(parser != nullptr);
-
+  parser->SetTestMode(is_test_);
+  parser->SetTestTimestampRange(test_timestamp_range_);
   boxps::PaddleDataReader* reader = nullptr;
   if (BoxWrapper::GetInstance()->UseAfsApi() && pipe_command_.empty()) {
     reader =
@@ -4929,8 +5013,8 @@ MiniBatchGpuPack::MiniBatchGpuPack(const paddle::platform::Place& place,
   place_ = place;
 #if defined(PADDLE_WITH_CUDA)
   stream_ = dynamic_cast<phi::GPUContext*>(
-          platform::DeviceContextPool::Instance().Get(place))
-          ->stream();
+                platform::DeviceContextPool::Instance().Get(place))
+                ->stream();
 #endif
   ins_num_ = 0;
   pv_num_ = 0;
@@ -4953,9 +5037,11 @@ MiniBatchGpuPack::MiniBatchGpuPack(const paddle::platform::Place& place,
       place_, gpu_used_slots_.size() * sizeof(UsedSlotGpuType));
 
 #if defined(PADDLE_WITH_CUDA)
-  CUDA_CHECK(cudaMemcpyAsync(gpu_slots_->ptr(), gpu_used_slots_.data(),
+  CUDA_CHECK(cudaMemcpyAsync(gpu_slots_->ptr(),
+                             gpu_used_slots_.data(),
                              gpu_used_slots_.size() * sizeof(UsedSlotGpuType),
-                             cudaMemcpyHostToDevice, stream_));
+                             cudaMemcpyHostToDevice,
+                             stream_));
 #elif defined(PADDLE_WITH_XPU_KP)
   platform::MemcpySyncH2D(gpu_slots_->ptr(), gpu_used_slots_.data(), 
                           gpu_used_slots_.size() * sizeof(UsedSlotGpuType), this->place_);
@@ -4978,8 +5064,8 @@ void MiniBatchGpuPack::reset(const paddle::platform::Place& place) {
   place_ = place;
 #if defined(PADDLE_WITH_CUDA)
   stream_ = dynamic_cast<phi::GPUContext*>(
-          platform::DeviceContextPool::Instance().Get(place))
-          ->stream();
+                platform::DeviceContextPool::Instance().Get(place))
+                ->stream();
 #endif
   ins_num_ = 0;
   pv_num_ = 0;
@@ -4993,6 +5079,16 @@ void MiniBatchGpuPack::reset(const paddle::platform::Place& place) {
   qvalue_tensor_ = &BoxWrapper::GetInstance()->GetQTensor(device_id);
 #endif
 }
+void MiniBatchGpuPack::set_merge_by_uid(bool merge_by_uid) {
+    enable_pv_by_uid_ = merge_by_uid;
+}
+void MiniBatchGpuPack::set_merge_by_uid_split_method(int method) {
+    merge_by_uid_split_method_ = method;
+}
+void MiniBatchGpuPack::set_need_time_info(bool need_time_info){
+    need_time_info_ = need_time_info;
+}
+
 
 void MiniBatchGpuPack::pack_pvinstance(const SlotPvInstance* pv_ins, int num) {
   pv_num_ = num;
@@ -5001,11 +5097,18 @@ void MiniBatchGpuPack::pack_pvinstance(const SlotPvInstance* pv_ins, int num) {
   size_t ins_number = 0;
 
   ins_vec_.clear();
+  buf_.h_train_mask.clear();
   for (int i = 0; i < num; ++i) {
     auto& pv = pv_ins[i];
     ins_number += pv->ads.size();
     for (auto ins : pv->ads) {
       ins_vec_.push_back(ins);
+    }
+    if (enable_pv_by_uid_ && merge_by_uid_split_method_ == 2) {
+      int zero_num = pv->get_zero_mask_num();
+      buf_.h_train_mask.insert(buf_.h_train_mask.end(), zero_num, 0);
+      buf_.h_train_mask.insert(
+          buf_.h_train_mask.end(), pv->ads.size() - zero_num, 1);
     }
     buf_.h_ad_offset[i + 1] = ins_number;
   }
@@ -5024,6 +5127,10 @@ void MiniBatchGpuPack::pack_all_data(const SlotRecord* ins_vec, int num) {
   buf_.h_uint64_lens[0] = 0;
   buf_.h_float_lens.resize(num + 1);
   buf_.h_float_lens[0] = 0;
+  if (need_time_info_){
+    buf_.h_cur_timestamp.resize(num); 
+    buf_.h_show_timestamp.resize(num); 
+  }
 
   if (enable_pv_) {
     for (int i = 0; i < num; ++i) {
@@ -5032,7 +5139,10 @@ void MiniBatchGpuPack::pack_all_data(const SlotRecord* ins_vec, int num) {
       buf_.h_uint64_lens[i + 1] = uint64_total_num;
       float_total_num += r->slot_float_feasigns_.slot_values.size();
       buf_.h_float_lens[i + 1] = float_total_num;
-
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_; 
+      }
       buf_.h_rank[i] = r->rank;
       buf_.h_cmatch[i] = r->cmatch;
     }
@@ -5043,6 +5153,10 @@ void MiniBatchGpuPack::pack_all_data(const SlotRecord* ins_vec, int num) {
       buf_.h_uint64_lens[i + 1] = uint64_total_num;
       float_total_num += r->slot_float_feasigns_.slot_values.size();
       buf_.h_float_lens[i + 1] = float_total_num;
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_;
+      }
     }
   }
 
@@ -5095,16 +5209,25 @@ void MiniBatchGpuPack::pack_uint64_data(const SlotRecord* ins_vec, int num) {
   buf_.h_float_lens.clear();
   buf_.h_float_keys.clear();
   buf_.h_float_offset.clear();
+  buf_.h_cur_timestamp.clear();
+  buf_.h_show_timestamp.clear();
 
   buf_.h_uint64_lens.resize(num + 1);
   buf_.h_uint64_lens[0] = 0;
+  if (need_time_info_){
+    buf_.h_cur_timestamp.resize(num); 
+    buf_.h_show_timestamp.resize(num); 
+  }
 
   if (enable_pv_) {
     for (int i = 0; i < num; ++i) {
       auto r = ins_vec[i];
       uint64_total_num += r->slot_uint64_feasigns_.slot_values.size();
       buf_.h_uint64_lens[i + 1] = uint64_total_num;
-
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_; 
+      }
       buf_.h_rank[i] = r->rank;
       buf_.h_cmatch[i] = r->cmatch;
     }
@@ -5113,6 +5236,10 @@ void MiniBatchGpuPack::pack_uint64_data(const SlotRecord* ins_vec, int num) {
       auto r = ins_vec[i];
       uint64_total_num += r->slot_uint64_feasigns_.slot_values.size();
       buf_.h_uint64_lens[i + 1] = uint64_total_num;
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_; 
+      }
     }
   }
 
@@ -5146,16 +5273,25 @@ void MiniBatchGpuPack::pack_float_data(const SlotRecord* ins_vec, int num) {
   buf_.h_uint64_lens.clear();
   buf_.h_uint64_offset.clear();
   buf_.h_uint64_keys.clear();
+  buf_.h_cur_timestamp.clear();
+  buf_.h_show_timestamp.clear();
 
   buf_.h_float_lens.resize(num + 1);
   buf_.h_float_lens[0] = 0;
+  if (need_time_info_){
+    buf_.h_cur_timestamp.resize(num); 
+    buf_.h_show_timestamp.resize(num); 
+  }
 
   if (enable_pv_) {
     for (int i = 0; i < num; ++i) {
       auto r = ins_vec[i];
       float_total_num += r->slot_float_feasigns_.slot_values.size();
       buf_.h_float_lens[i + 1] = float_total_num;
-
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_; 
+      }
       buf_.h_rank[i] = r->rank;
       buf_.h_cmatch[i] = r->cmatch;
     }
@@ -5164,6 +5300,10 @@ void MiniBatchGpuPack::pack_float_data(const SlotRecord* ins_vec, int num) {
       auto r = ins_vec[i];
       float_total_num += r->slot_float_feasigns_.slot_values.size();
       buf_.h_float_lens[i + 1] = float_total_num;
+      if (need_time_info_){
+        buf_.h_cur_timestamp[i] = r->cur_timestamp_; 
+        buf_.h_show_timestamp[i] = r->show_timestamp_; 
+      }
     }
   }
 

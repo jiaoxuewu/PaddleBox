@@ -44,7 +44,7 @@ namespace framework {
 #define YEAR   (365 * DAY)
 /* interestingly, we assume leap-years */
 static int GMONTH[12] = {
-  0,
+    0,
   DAY * (31),
   DAY * (31 + 29),
   DAY * (31 + 29 + 31),
@@ -387,6 +387,59 @@ void BoxWrapper::AddReplaceFeasign(boxps::PSAgentBase* p_agent,
 
   VLOG(0) << "End AddReplaceFeasign: " << timer.ElapsedMS();
 }
+
+void BoxWrapper::SetBatchMaxInsNumber(int batch_max_ins) {
+  if (batch_max_ins > 0) {
+    batch_max_ins_ = batch_max_ins;
+    batch_all_ins_.resize(batch_max_ins + 1);
+    batch_train_ins_.resize(batch_max_ins + 1);  // [0, max_ins]
+    std::fill(batch_all_ins_.begin(), batch_all_ins_.end(), 0);
+    std::fill(batch_train_ins_.begin(), batch_train_ins_.end(), 0);
+  }
+}
+
+void BoxWrapper::AddBatchInsInfo(size_t all_ins_number,
+                                 size_t train_ins_number) {
+  if (all_ins_number < batch_all_ins_.size() &&
+      train_ins_number < batch_train_ins_.size()) {
+    batch_all_ins_[all_ins_number] += 1;
+    batch_train_ins_[train_ins_number] += 1;
+  } else {
+    VLOG(0) << "all_ins_number: " << all_ins_number
+            << ", or batch_max_ins_: " << batch_all_ins_.size()
+            << ", out of range";
+  }
+}
+
+void BoxWrapper::ShowBatchInsInfo() {
+  if (batch_max_ins_ <= 0) {
+    VLOG(0) << "batch_max_ins_ not set, no batch info to show";
+    return;
+  }
+  std::ostringstream oss;
+
+  // show all ins info
+  oss << "[";
+  for (auto number : batch_all_ins_) {
+    oss << number << " ";
+  }
+  oss << "]";
+  std::cout << "batch all ins: " << oss.str() << std::endl;
+
+  // show train ins info
+  oss.str("");
+  oss << "[";
+  for (auto number : batch_train_ins_) {
+    oss << number << " ";
+  }
+  oss << "]";
+  std::cout << "batch train ins: " << oss.str() << std::endl;
+
+  // reset all and train info array
+  std::fill(batch_all_ins_.begin(), batch_all_ins_.end(), 0);
+  std::fill(batch_train_ins_.begin(), batch_train_ins_.end(), 0);
+}
+
 //================================ auc
 //============================================
 
@@ -789,6 +842,177 @@ class ContinueMaskMetricMsg : public MetricMsg {
   std::string mask_varname_;
 };
 
+class ContinueMultiMaskMetricMsg : public MetricMsg {
+ public:
+  ContinueMultiMaskMetricMsg(const std::string& label_varname,
+                             const std::string& pred_varname,
+                             int metric_phase,
+                             const std::string& mask_varname_list,
+                             const std::string& mask_varvalue_list,
+                             int bucket_size = 1000000,
+                             bool mode_collect_in_gpu = false,
+                             int max_batch_size = 0) {
+    label_varname_ = label_varname;
+    pred_varname_ = pred_varname;
+    mask_varname_list_ = string::split_string(mask_varname_list, " ");
+    const std::vector<std::string> tmp_val_lst =
+        string::split_string(mask_varvalue_list, " ");
+    for (const auto& it : tmp_val_lst) {
+      mask_varvalue_list_.emplace_back(atoi(it.c_str()));
+    }
+    PADDLE_ENFORCE_EQ(
+        mask_varname_list_.size(),
+        mask_varvalue_list_.size(),
+        platform::errors::PreconditionNotMet(
+            "mast var num[%zu] should be equal to mask val num[%zu]",
+            mask_varname_list_.size(),
+            mask_varvalue_list_.size()));
+
+    metric_phase_ = metric_phase;
+    calculator = new BasicAucCalculator(mode_collect_in_gpu);
+    calculator->init(bucket_size);
+  }
+  virtual ~ContinueMultiMaskMetricMsg() {}
+  void add_data(const Scope* exe_scope,
+                const paddle::platform::Place& place) override {
+    std::vector<float> label_data;
+    get_data<float>(exe_scope, label_varname_, &label_data);
+
+    std::vector<float> pred_data;
+    get_data<float>(exe_scope, pred_varname_, &pred_data);
+    PADDLE_ENFORCE_EQ(label_data.size(),
+                      pred_data.size(),
+                      platform::errors::PreconditionNotMet(
+                          "the predict data length should be consistent with "
+                          "the label data length"));
+
+    std::vector<std::vector<int64_t>> mask_value_data_list(
+        mask_varname_list_.size());
+    for (size_t name_idx = 0; name_idx < mask_varname_list_.size();
+         ++name_idx) {
+      get_data<int64_t>(exe_scope,
+                        mask_varname_list_[name_idx],
+                        &mask_value_data_list[name_idx]);
+      PADDLE_ENFORCE_EQ(
+          label_data.size(),
+          mask_value_data_list[name_idx].size(),
+          platform::errors::PreconditionNotMet(
+              "the label data length[%d] should be consistent with "
+              "the %s[%zu] length",
+              label_data.size(),
+              mask_value_data_list[name_idx].size()));
+    }
+    auto cal = GetCalculator();
+    std::lock_guard<std::mutex> lock(cal->table_mutex());
+    size_t batch_size = label_data.size();
+    bool flag = true;
+    for (size_t ins_idx = 0; ins_idx < batch_size; ++ins_idx) {
+      flag = true;
+      for (size_t val_idx = 0; val_idx < mask_varvalue_list_.size();
+           ++val_idx) {
+        if (mask_value_data_list[val_idx][ins_idx] !=
+            mask_varvalue_list_[val_idx]) {
+          flag = false;
+          break;
+        }
+      }
+      if (flag) {
+        cal->add_unlock_data_with_continue_label(pred_data[ins_idx],
+                                                 label_data[ins_idx]);
+      }
+    }
+  }
+
+ protected:
+  std::vector<int> mask_varvalue_list_;
+  std::vector<std::string> mask_varname_list_;
+  std::string cmatch_rank_varname_;
+};
+
+class GPUContinueMultiMaskMetricMsg : public MetricMsg {
+ public:
+  GPUContinueMultiMaskMetricMsg(const std::string& label_varname,
+                                const std::string& pred_varname,
+                                int metric_phase,
+                                const std::string& mask_varname_list,
+                                const std::string& mask_varvalue_list,
+                                int bucket_size = 1000000,
+                                bool mode_collect_in_gpu = false,
+                                int max_batch_size = 0) {
+    label_varname_ = label_varname;
+    pred_varname_ = pred_varname;
+    mask_varname_list_ = string::split_string(mask_varname_list, " ");
+    const std::vector<std::string> tmp_val_lst =
+        string::split_string(mask_varvalue_list, " ");
+    for (const auto& it : tmp_val_lst) {
+      mask_varvalue_list_.emplace_back(atoi(it.c_str()));
+    }
+    PADDLE_ENFORCE_EQ(
+        mask_varname_list_.size(),
+        mask_varvalue_list_.size(),
+        platform::errors::PreconditionNotMet(
+            "mast var num[%zu] should be equal to mask val num[%zu]",
+            mask_varname_list_.size(),
+            mask_varvalue_list_.size()));
+
+    metric_phase_ = metric_phase;
+    calculator = new BasicAucCalculator(mode_collect_in_gpu);
+    calculator->init(bucket_size);
+  }
+  virtual ~GPUContinueMultiMaskMetricMsg() {}
+  void add_data(const Scope* exe_scope,
+                const paddle::platform::Place& place) override {
+    std::vector<double> value(5);
+    const float* label_data = NULL;
+    int label_len = 0;
+    const float* pred_data = NULL;
+    int pred_len = 0;
+    std::vector<const int64_t*> mask_data_list(mask_varname_list_.size());
+
+    get_data<float>(exe_scope, label_varname_, &label_data, &label_len);
+    get_data<float>(exe_scope, pred_varname_, &pred_data, &pred_len);
+    PADDLE_ENFORCE_EQ(label_len,
+                      pred_len,
+                      platform::errors::PreconditionNotMet(
+                          "the predict data length should be consistent with "
+                          "the label data length"));
+
+    for (size_t name_idx = 0; name_idx < mask_varname_list_.size();
+         ++name_idx) {
+      int mask_len = 0;
+      get_data<int64_t>(exe_scope,
+                        mask_varname_list_[name_idx],
+                        &mask_data_list[name_idx],
+                        &mask_len);
+      PADDLE_ENFORCE_EQ(
+          label_len,
+          mask_len,
+          platform::errors::PreconditionNotMet(
+              "the label data length[%d] should be consistent with "
+              "the mask data[%zu] length",
+              label_len,
+              mask_len));
+    }
+    auto cal = GetCalculator();
+
+    cal->computeThreadValue(label_data,
+                            pred_data,
+                            label_len,
+                            mask_data_list,
+                            mask_varvalue_list_.data(),
+                            mask_varvalue_list_.size(),
+                            value,
+                            place);
+    std::lock_guard<std::mutex> lock(cal->table_mutex());
+    cal->add_unlock_data_with_continue_value(value);
+  }
+
+ protected:
+  std::vector<int> mask_varvalue_list_;
+  std::vector<std::string> mask_varname_list_;
+  std::string cmatch_rank_varname_;
+};
+
 class CmatchRankMaskMetricMsg : public MetricMsg {
  public:
   CmatchRankMaskMetricMsg(const std::string& label_varname,
@@ -892,11 +1116,11 @@ class CmatchRankMaskMetricMsg : public MetricMsg {
 class NanInfMetricMsg : public MetricMsg {
  public:
   NanInfMetricMsg(const std::string& label_varname,
-                        const std::string& pred_varname,
-                        int metric_phase,
-                        int bucket_size = 1000000,
-                        bool mode_collect_in_gpu = false,
-                        int max_batch_size = 0) {
+                  const std::string& pred_varname,
+                  int metric_phase,
+                  int bucket_size = 1000000,
+                  bool mode_collect_in_gpu = false,
+                  int max_batch_size = 0) {
     label_varname_ = label_varname;
     pred_varname_ = pred_varname;
     metric_phase_ = metric_phase;
@@ -1055,11 +1279,31 @@ void BoxWrapper::InitMetric(const std::string& method,
                                               bucket_size,
                                               mode_collect_in_gpu,
                                               max_batch_size));
+  } else if (method == "ContinueMultiMaskCalculator") {
+    metric_lists_.emplace(name,
+                          new ContinueMultiMaskMetricMsg(label_varname,
+                                                         pred_varname,
+                                                         metric_phase,
+                                                         mask_varname,
+                                                         cmatch_rank_group,
+                                                         bucket_size,
+                                                         mode_collect_in_gpu,
+                                                         max_batch_size));
+  } else if (method == "GPUContinueMultiMaskCalculator") {
+    metric_lists_.emplace(name,
+                          new GPUContinueMultiMaskMetricMsg(label_varname,
+                                                            pred_varname,
+                                                            metric_phase,
+                                                            mask_varname,
+                                                            cmatch_rank_group,
+                                                            bucket_size,
+                                                            mode_collect_in_gpu,
+                                                            max_batch_size));
   } else {
     PADDLE_THROW(platform::errors::Unimplemented(
         "PaddleBox only support AucCalculator, MultiTaskAucCalculator, "
         "CmatchRankAucCalculator, MaskAucCalculator, "
-        "ContinueMaskCalculator, "
+        "ContinueMaskCalculator, ContinueMultiMaskCalculator, "
         "FloatMaskAucCalculator and CmatchRankMaskAucCalculator"));
   }
   metric_name_list_.emplace_back(name);

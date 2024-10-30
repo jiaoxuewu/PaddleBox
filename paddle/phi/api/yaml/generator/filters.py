@@ -86,9 +86,15 @@ def to_opmaker_name(s):
 
 def to_opmaker_name_cstr(s):
     if s.endswith("_grad"):
-        return '"{}@GRAD"'.format(to_pascal_case(s[:-5]))
+        if s[0].isalpha() and s[0].isupper():
+            return '"{}@GRAD"'.format(s[:-5])
+        else:
+            return '"{}@GRAD"'.format(to_pascal_case(s[:-5]))
     else:
-        return '"{}"'.format(to_pascal_case(s))
+        if s[0].isalpha() and s[0].isupper():
+            return '"{}"'.format(s)
+        else:
+            return '"{}"'.format(to_pascal_case(s))
 
 
 def to_pascal_case(s):

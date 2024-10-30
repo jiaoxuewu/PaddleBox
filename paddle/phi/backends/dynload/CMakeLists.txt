@@ -91,6 +91,14 @@ cc_library(
 add_dependencies(phi_dynload_lapack extern_lapack)
 # TODO(TJ): add iomp, mkldnn?
 
+if(WITH_FLASHATTN)
+  cc_library(
+    phi_dynload_flashattn
+    SRCS flashattn.cc
+    DEPS phi_dynamic_loader)
+  add_dependencies(phi_dynload_flashattn flashattn)
+endif()
+
 if(MKL_FOUND AND WITH_ONEMKL)
   message("ONEMKL INCLUDE directory is ${MKL_INCLUDE}")
   cc_library(

@@ -39,6 +39,7 @@ DECLARE_int32(padbox_max_shuffle_wait_count);
 DECLARE_bool(enable_shuffle_by_searchid);
 DECLARE_bool(padbox_dataset_disable_shuffle);
 DECLARE_bool(padbox_dataset_disable_polling);
+DECLARE_bool(enable_update_filter_ins);
 DECLARE_bool(padbox_dataset_disable_random_update);
 namespace boxps {
 class PSAgentBase;
@@ -95,6 +96,16 @@ class Dataset {
   virtual void SetEnablePvMerge(bool enable_pv_merge) = 0;
   virtual bool EnablePvMerge() = 0;
   virtual void SetMergeBySid(bool is_merge) = 0;
+  virtual void SetMergeByUid(bool is_merge,
+                             int merge_by_uid_split_method,
+                             size_t merge_by_uid_split_size,
+                             size_t merge_by_uid_split_train_size) = 0;
+  virtual void SetTestMode(bool is_merge) = 0;
+  virtual void SetInvalidUsers(std::unordered_set<std::string> invalid_users) = 0;
+  virtual void SetNeedTimeInfo(bool need_time_info) = 0;
+  virtual void SetShuffleAndSort(bool shuffle_and_sort) = 0;
+  virtual void SetTrainTimestamp(std::pair<uint64_t, uint64_t> range) = 0;
+  virtual void SetTestTimestampRange(std::pair<uint64_t, uint64_t> range) = 0;
   virtual void SetShuffleByUid(bool enable_shuffle_uid) = 0;
   // set merge by ins id
   virtual void SetMergeByInsId(int merge_size) = 0;
@@ -218,6 +229,16 @@ class DatasetImpl : public Dataset {
   virtual void SetParseLogKey(bool parse_logkey);
   virtual void SetEnablePvMerge(bool enable_pv_merge);
   virtual void SetMergeBySid(bool is_merge);
+  virtual void SetMergeByUid(bool is_merge,
+                             int merge_by_uid_split_method,
+                             size_t merge_by_uid_split_size,
+                             size_t merge_by_uid_split_train_size);
+  virtual void SetTestMode(bool is_merge);
+  virtual void SetInvalidUsers(std::unordered_set<std::string> invalid_users);
+  virtual void SetNeedTimeInfo(bool need_time_info);
+  virtual void SetShuffleAndSort(bool shuffle_and_sort);
+  virtual void SetTrainTimestamp(std::pair<uint64_t, uint64_t> range);
+  virtual void SetTestTimestampRange(std::pair<uint64_t, uint64_t> range);
   virtual void SetShuffleByUid(bool enable_shuffle_uid);
 
   virtual void SetMergeByInsId(int merge_size);
@@ -300,13 +321,19 @@ class DatasetImpl : public Dataset {
   }
   Channel<T>& GetInputChannelRef() { return input_channel_; }
   // aucrunner need
-  virtual std::vector<T>& GetInputRecord() { return input_records_; }
+  virtual std::vector<T>& GetInputRecord() { 
+    if (FLAGS_enable_update_filter_ins){
+        return filter_input_records_;
+    }
+    return input_records_; 
+  }
   // disable shuffle
   virtual void SetDiablePolling(bool disable) {}
   virtual void SetDisableShuffle(bool disable) {}
   virtual void PreLoadIntoDisk(const std::string& path, const int file_num) {}
   virtual void WaitLoadDiskDone(void) {}
   virtual void SetLoadArchiveFile(bool archive) {}
+
  protected:
   virtual int ReceiveFromClient(int msg_type,
                                 int client_id,
@@ -351,6 +378,16 @@ class DatasetImpl : public Dataset {
   bool parse_content_;
   bool parse_logkey_;
   bool merge_by_sid_;
+  bool merge_by_uid_ = false;
+  int merge_by_uid_split_method_ = 0; // 0 no split, 1 direct split, 2 mask split
+  size_t merge_by_uid_split_size_ = 0;
+  size_t merge_by_uid_split_train_size_ = 0;
+  bool is_test_ = false;
+  std::unordered_set<std::string> invalid_users_;
+  bool need_time_info_ = false;
+  bool shuffle_and_sort_ = false;
+  std::pair<uint64_t, uint64_t> train_timestamp_range_{0, 0};
+  std::pair<uint64_t, uint64_t> test_timestamp_range_;
   bool shuffle_by_uid_;
   bool parse_uid_;
   bool enable_pv_merge_;  // True means to merge pv
@@ -363,6 +400,7 @@ class DatasetImpl : public Dataset {
   int64_t global_index_ = 0;
   std::vector<std::shared_ptr<ThreadPool>> consume_task_pool_;
   std::vector<T> input_records_;  // only for paddleboxdatafeed
+  std::vector<T> filter_input_records_;  // only for paddleboxdatafeed
   std::vector<std::string> use_slots_;
   bool enable_heterps_ = false;
   int gpu_graph_mode_ = 0;
@@ -465,9 +503,18 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   virtual void PostprocessInstance();
   // prepare train do something
   virtual void PrepareTrain(void);
+  // sort pv instance in same uid
+  virtual void SortPvInsInSameUid(void);
+  // sort pv instance by position
+  virtual int SortPvInsByPosition(std::vector<size_t>& idxs);
+  // dump pv instance
+  virtual void dump_pv_ins(std::string file_name);
   virtual int64_t GetMemoryDataSize() {
     if (input_records_.empty()) {
       return total_ins_num_;
+    }
+    if (FLAGS_enable_update_filter_ins) {
+      return filter_input_records_.size();
     }
     return input_records_.size();
   }
@@ -487,7 +534,6 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   virtual void PreLoadIntoDisk(const std::string& path, const int file_num);
   virtual void WaitLoadDiskDone(void);
   virtual void SetLoadArchiveFile(bool archive) { is_archive_file_ = archive; }
-
 
  protected:
   // shuffle data

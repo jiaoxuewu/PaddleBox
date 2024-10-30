@@ -1765,6 +1765,27 @@ void OperatorWithKernel::RunImpl(const Scope& scope,
   if (FLAGS_check_nan_inf) {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_XPU) || defined(PADDLE_WITH_XPU_KP)
     if (framework::details::CheckOpHasNanOrInfRet(*this, exec_scope, place)) {
+      std::stringstream ss;
+      ss << "input[";
+      auto input_var_names = InputVars();
+      for (size_t i = 0; i < input_var_names.size(); ++i) {
+          if (i > 0) {
+              ss << ", ";
+          }
+          ss << input_var_names[i];
+      }
+      ss << "], outputs[";
+      auto out_var_names = OutputVars(true);
+      for (size_t i = 0; i < out_var_names.size(); ++i) {
+          if (i > 0) {
+              ss << ", ";
+          }
+          ss << out_var_names[i];
+      }
+      ss << "]";
+      LOG(WARNING) << "found nan op device:" << int(place.GetDeviceId())
+              << ", op_type:" << type_ << ", " << ss.str();
+
       framework::details::DumpAllScope(exec_scope, place);
       VLOG(0) << "op_type: " << Type() << ", CheckOpHasNanOrInf failed!!";
       // dump current op data
