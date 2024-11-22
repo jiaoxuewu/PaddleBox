@@ -422,6 +422,7 @@ void DeviceWorker::DumpField(const Scope& scope,
     ars[i] += ins_id_vec[i];
     ars[i] += "\t" + ins_content_vec[i];
   }
+  bool flag = true;
   for (auto& field : *dump_fields_) {
     Variable* var = scope.FindVar(field);
     if (var == nullptr) {
@@ -461,7 +462,29 @@ void DeviceWorker::DumpField(const Scope& scope,
       auto bound = GetTensorBound(tensor, i);
       ars[i] += "\t" + field + ":" + std::to_string(bound.second - bound.first);
       ars[i] += PrintLodTensor(tensor, bound.first, bound.second);
+    //}
+
+    //dump param
+        if (flag) {
+            for (auto& param : *dump_param_) {
+                flag = false;
+                Variable* var = scope.FindVar(param);
+                if (var == nullptr) {
+                  continue;
+                }
+                LoDTensor* tensor = var->GetMutable<LoDTensor>();
+                framework::LoDTensor cpu_tensor;
+                if (platform::is_gpu_place(tensor->place())) {
+                  TensorCopySync(*tensor, platform::CPUPlace(), &cpu_tensor);
+                  tensor = &cpu_tensor;
+                }
+                int64_t len = tensor->numel();
+                ars[i] += "\t" + param + ":" + PrintLodTensor(tensor, 0, len);
+                VLOG(3) << "param=" << param << "dump_params.";
+            }
+        }
     }
+
   }
 
   // #pragma omp parallel for
